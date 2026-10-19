@@ -107,19 +107,40 @@ class LibraryStore(
         persist()
     }
 
-    // Throttled progress save from the player.
-    fun notePosition(video: VideoItem, positionMs: Long) {
+    // Throttled progress save from the player. The player's duration is kept
+    // alongside the position so thumbnails can draw the watched-progress bar;
+    // this also un-throttles the very first save once the duration is known.
+    fun notePosition(video: VideoItem, positionMs: Long, durationMs: Long = 0) {
         val idx = _history.value.indexOfFirst { it.video.videoId == video.videoId }
         if (idx < 0) return
         val entry = _history.value[idx]
-        if (kotlin.math.abs(entry.positionMs - positionMs) < 5000) return
-        val updated = entry.copy(positionMs = positionMs, ts = System.currentTimeMillis())
+        val samePosition = kotlin.math.abs(entry.positionMs - positionMs) < 5000
+        val sameDuration = durationMs <= 0 || entry.durationMs == durationMs
+        if (samePosition && sameDuration) return
+        val updated = entry.copy(
+            positionMs = positionMs,
+            durationMs = if (durationMs > 0) durationMs else entry.durationMs,
+            ts = System.currentTimeMillis(),
+        )
         _history.value = listOf(updated) + _history.value.filterNot { it.video.videoId == video.videoId }
         persist()
     }
 
     fun resumePosition(videoId: String): Long =
         _history.value.firstOrNull { it.video.videoId == videoId }?.positionMs ?: 0
+
+    // How much of a video was watched (0..1), from history; null when it has
+    // no measurable progress. Used for the red progress line on cards.
+    fun watchedFraction(videoId: String): Float? = _history.value
+        .firstOrNull { it.video.videoId == videoId }
+        ?.watchedFraction()
+
+    // Videos whose playback reached (near) the end. The local recommender
+    // sinks these, like YouTube stops pushing what you already finished.
+    fun completedIds(): Set<String> = _history.value
+        .filter { (it.watchedFraction() ?: 0f) >= COMPLETED_FRACTION }
+        .map { it.video.videoId }
+        .toSet()
 
     fun removeFromHistory(videoId: String) {
         _history.value = _history.value.filterNot { it.video.videoId == videoId }

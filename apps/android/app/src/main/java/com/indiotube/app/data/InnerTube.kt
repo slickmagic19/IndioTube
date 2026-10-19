@@ -230,6 +230,45 @@ class InnerTube(private val http: OkHttpClient) {
         return parseFeed(root)
     }
 
+    // YouTube's own Trending list for this region (the FEtrending feed). Used
+    // by the Explore tab; falls back to an empty feed when offline so the UI
+    // can show its retry state instead of crashing.
+    suspend fun trending(force: Boolean = false): HomeFeed = try {
+        cached("trending:$country", 10 * 60_000L, force) {
+            parseTrending(browse("FEtrending"))
+        }
+    } catch (_: Exception) {
+        HomeFeed(emptyList(), emptyList(), null)
+    }
+
+    suspend fun trendingContinuation(token: String): HomeFeed = try {
+        parseTrending(browse("FEtrending", continuation = token))
+    } catch (_: Exception) {
+        HomeFeed(emptyList(), emptyList(), null)
+    }
+
+    // Trending pages come in several layouts: newer ones nest rich items, the
+    // classic one lists plain videoRenderers under section lists. Both are
+    // accepted; Shorts are filtered out by the same checks as everywhere else.
+    internal fun parseTrending(root: JsonElement): HomeFeed {
+        val videos = ArrayList<VideoItem>()
+        root.findAll("richItemRenderer", maxDepth = 14, limit = 120).forEach { item ->
+            item.field("content")?.let { content ->
+                parseAnyVideo(content)?.let { videos.add(it) }
+            }
+        }
+        if (videos.isEmpty()) {
+            root.findAll("videoRenderer", maxDepth = 14, limit = 120).forEach { vr ->
+                parseVideoRenderer(vr)?.let { videos.add(it) }
+            }
+        }
+        return HomeFeed(
+            chips = emptyList(),
+            videos = videos.distinctBy { it.videoId },
+            continuation = feedContinuation(root),
+        )
+    }
+
     internal fun parseFeed(root: JsonElement): HomeFeed {
         val chips = ArrayList<Chip>()
         root.path(

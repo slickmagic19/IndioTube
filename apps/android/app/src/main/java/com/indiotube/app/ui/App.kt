@@ -17,12 +17,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Subscriptions
 import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Subscriptions
 import androidx.compose.material3.Icon
@@ -34,6 +36,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -59,6 +62,7 @@ import com.indiotube.app.Container
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.DlEvent
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.watchedFraction
 import com.indiotube.app.player.PlaybackController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -189,6 +193,16 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
 
     val watchOpen = stack.lastOrNull() is Screen.Watch
 
+    // Watched-progress lookup for every thumbnail in the app. Rebuilt whenever
+    // history changes so the red bars appear/update without leaving a screen.
+    val history by container.library.history.collectAsState()
+    val watchProgress: (VideoItem) -> Float? = remember(history) {
+        val fractions = history.associate { it.video.videoId to it.watchedFraction() }
+        val lookup: (VideoItem) -> Float? = { video -> fractions[video.videoId] }
+        lookup
+    }
+
+    CompositionLocalProvider(LocalWatchProgress provides watchProgress) {
     Box(Modifier.fillMaxSize().background(YtBg)) {
         Scaffold(
             containerColor = YtBg,
@@ -213,7 +227,8 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                 if (stack.isEmpty()) {
                     when (tab) {
                         0 -> HomeScreen(container, ui)
-                        1 -> SubscriptionsScreen(container, ui)
+                        1 -> ExploreScreen(container, ui)
+                        2 -> SubscriptionsScreen(container, ui)
                         else -> YouScreen(container, ui)
                     }
                 } else {
@@ -240,11 +255,12 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
             Modifier.align(Alignment.BottomCenter).padding(
                 bottom = when {
                     ui.playerFullscreen -> 24.dp
-                    current != null && !watchOpen -> 156.dp
+                    current != null && !watchOpen -> 180.dp
                     else -> 92.dp
                 },
             ),
         )
+    }
     }
 }
 
@@ -253,6 +269,7 @@ private fun BottomBar(tab: Int, onTab: (Int) -> Unit) {
     NavigationBar(containerColor = YtBg, tonalElevation = 0.dp) {
         val items = listOf(
             Triple("Home", Icons.Outlined.Home, Icons.Filled.Home),
+            Triple("Explore", Icons.Outlined.Explore, Icons.Filled.Explore),
             Triple("Subscriptions", Icons.Outlined.Subscriptions, Icons.Filled.Subscriptions),
             Triple("You", Icons.Outlined.AccountCircle, Icons.Filled.AccountCircle),
         )
@@ -304,22 +321,22 @@ private fun MiniPlayer(container: Container, ui: UiRefs, player: PlaybackControl
             progress = { fraction },
             color = YtRed,
             trackColor = Color.Transparent,
-            modifier = Modifier.fillMaxWidth().height(2.dp),
+            modifier = Modifier.fillMaxWidth().height(3.dp),
         )
         Row(
-            Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 Modifier
-                    .width(96.dp)
-                    .height(54.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .width(128.dp)
+                    .height(72.dp)
+                    .clip(RoundedCornerShape(10.dp))
                     .background(Color.Black),
             ) {
                 // Poster frame underneath, then the live video surface on top —
                 // the mini player keeps showing the video itself, like YouTube.
-                Thumb(model = video.thumbnail, corner = 8.dp, modifier = Modifier.fillMaxSize())
+                Thumb(model = video.thumbnail, corner = 10.dp, modifier = Modifier.fillMaxSize())
                 AndroidView(
                     factory = { c ->
                         PlayerView(c).apply {
@@ -347,9 +364,9 @@ private fun MiniPlayer(container: Container, ui: UiRefs, player: PlaybackControl
                             contentDescription = "Play",
                             tint = Color.White,
                             modifier = Modifier
-                                .size(28.dp)
-                                .background(Color(0x66000000), RoundedCornerShape(14.dp))
-                                .padding(2.dp),
+                                .size(34.dp)
+                                .background(Color(0x66000000), RoundedCornerShape(17.dp))
+                                .padding(3.dp),
                         )
                     }
                 }
@@ -358,15 +375,15 @@ private fun MiniPlayer(container: Container, ui: UiRefs, player: PlaybackControl
             Column(Modifier.weight(1f)) {
                 Text(
                     video.title,
-                    style = MaterialTheme14,
+                    style = MiniTitle,
                     color = YtText,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(3.dp))
                 Text(
                     video.channelName.orEmpty(),
-                    style = MaterialTheme11,
+                    style = MiniMeta,
                     color = YtMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -377,25 +394,25 @@ private fun MiniPlayer(container: Container, ui: UiRefs, player: PlaybackControl
                     if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                     contentDescription = if (playing) "Pause" else "Play",
                     tint = YtText,
-                    modifier = Modifier.size(26.dp),
+                    modifier = Modifier.size(30.dp),
                 )
             }
             IconButton(onClick = { player.next() }) {
-                Icon(Icons.Filled.SkipNext, "Next", tint = YtText, modifier = Modifier.size(26.dp))
+                Icon(Icons.Filled.SkipNext, "Next", tint = YtText, modifier = Modifier.size(30.dp))
             }
             IconButton(onClick = { player.clear() }) {
-                Icon(Icons.Filled.Close, "Close", tint = YtText, modifier = Modifier.size(22.dp))
+                Icon(Icons.Filled.Close, "Close", tint = YtText, modifier = Modifier.size(26.dp))
             }
         }
     }
 }
 
-private val MaterialTheme14 = androidx.compose.ui.text.TextStyle(
+private val MiniTitle = androidx.compose.ui.text.TextStyle(
     fontWeight = FontWeight.Medium,
-    fontSize = 13.5.sp,
-    lineHeight = 18.sp,
+    fontSize = 15.sp,
+    lineHeight = 20.sp,
 )
-private val MaterialTheme11 = androidx.compose.ui.text.TextStyle(
-    fontSize = 11.5.sp,
-    lineHeight = 15.sp,
+private val MiniMeta = androidx.compose.ui.text.TextStyle(
+    fontSize = 12.5.sp,
+    lineHeight = 16.sp,
 )

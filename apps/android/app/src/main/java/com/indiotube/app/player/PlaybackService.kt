@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -29,6 +30,20 @@ class PlaybackService : MediaSessionService() {
             )
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
+            // Tuned for snappy starts: the stock player waits for 2.5s of
+            // buffered media before resuming, which is exactly the lag felt
+            // when switching to a higher quality. 1s is plenty to avoid
+            // stutter on a healthy link, and 2s after a rebuffer.
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        20_000, // min buffer
+                        50_000, // max buffer
+                        1_000,  // buffer needed to start/resume playback
+                        2_000,  // buffer needed to resume after a rebuffer
+                    )
+                    .build(),
+            )
             .setMediaSourceFactory(IndioMediaSourceFactory(app.container))
             .build()
 

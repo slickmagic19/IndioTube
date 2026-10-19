@@ -114,7 +114,22 @@ data class HistoryEntry(
     val video: VideoItem,
     val ts: Long = 0,
     val positionMs: Long = 0,
+    val durationMs: Long = 0,
 )
+
+// Progress through a history entry (0..1), fed by the player's position and
+// duration. Null when the entry can't be measured (never played, or no
+// duration known at all). Drives the red "watched" bar on thumbnails.
+fun HistoryEntry.watchedFraction(): Float? {
+    if (positionMs <= 0) return null
+    val duration = if (durationMs > 0) durationMs else video.durationSec * 1000L
+    if (duration <= 0) return null
+    return (positionMs.toDouble() / duration).coerceIn(0.0, 1.0).toFloat()
+}
+
+// A video counts as finished once playback got this far in — the local
+// recommender sinks finished videos and a re-watch starts from the top again.
+const val COMPLETED_FRACTION = 0.92f
 
 @Serializable
 data class LocalPlaylist(

@@ -32,6 +32,9 @@ internal data class FeedSignals(
     val watchedIds: Set<String>,
     val seedIds: Set<String>,
     val searchTerms: Set<String>,
+    // Videos already watched to (near) the end. These sink much deeper than
+    // merely-watched ones: YouTube stops pushing what you've finished.
+    val completedIds: Set<String> = emptySet(),
 )
 
 private val STOP_WORDS = setOf(
@@ -67,6 +70,7 @@ internal fun rankAndSample(
         if (v.channelId != null && v.channelId in signals.likedChannelIds) s *= 1.15
         if (v.videoId in signals.seedIds) s *= 2.3
         if (v.videoId in signals.watchedIds) s *= 0.12
+        if (v.videoId in signals.completedIds) s *= 0.22
         if (signals.searchTerms.isNotEmpty()) {
             val title = v.title.lowercase()
             val matches = signals.searchTerms.count { title.contains(it) }
@@ -215,6 +219,7 @@ suspend fun Container.localRecommendations(force: Boolean = false): List<VideoIt
         watchedIds = history.map { it.video.videoId }.toSet(),
         seedIds = seedIds,
         searchTerms = searchTerms,
+        completedIds = library.completedIds(),
     )
     return rankAndSample(pool.values.toList(), signals, rotation)
 }

@@ -13,8 +13,11 @@ import androidx.media3.common.Player
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.indiotube.app.Container
 import com.indiotube.app.data.LibraryStore
+import com.indiotube.app.data.QualityOption
 import com.indiotube.app.data.QualityUris
+import com.indiotube.app.data.ResolvedStream
 import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
@@ -29,12 +32,16 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import okhttp3.Request
 
 // UI-facing playback facade. Talks to PlaybackService through a MediaController
 // so the notification/lock-screen controls and the in-app UI stay in lockstep.
 class PlaybackController(
     private val context: Context,
     private val store: LibraryStore,
+    // Optional: when present, quality switches warm the CDN connection for
+    // the incoming stream before the player starts loading it.
+    private val container: Container? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -125,7 +132,9 @@ class PlaybackController(
                     if (now - lastPositionSave > 5000) {
                         lastPositionSave = now
                         val v = _queue.value.getOrNull(c.currentMediaItemIndex)
-                        if (v != null) store.notePosition(v, c.currentPosition.coerceAtLeast(0))
+                        if (v != null) {
+                            store.notePosition(v, c.currentPosition.coerceAtLeast(0), if (d > 0) d else 0)
+                        }
                     }
                 }
             }
@@ -137,7 +146,8 @@ class PlaybackController(
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _playing.value = isPlaying
                 val v = _queue.value.getOrNull(c.currentMediaItemIndex) ?: return
-                store.notePosition(v, c.currentPosition.coerceAtLeast(0))
+                val d = c.duration
+                store.notePosition(v, c.currentPosition.coerceAtLeast(0), if (d > 0) d else 0)
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -356,7 +366,13 @@ class PlaybackController(
         }
 
         val position = c.currentPosition.coerceAtLeast(0)
-        store.notePosition(video, position)
+        val duration = c.duration
+        store.notePosition(video, position, if (duration > 0) duration else 0)
+
+        // Warm the connection for the incoming stream while the player swaps
+        // its source, so DNS + TLS setup for the new CDN host overlaps the
+        // teardown and the target quality starts noticeably sooner.
+        warmConnections(rung, qualities)
 
         replacingItem = true
         try {
@@ -371,6 +387,34 @@ class PlaybackController(
         }
         _qualityHeight.value = appliedHeight
         if (autoPlay) c.play()
+    }
+
+    // Fire-and-forget 1-byte range requests that make the CDN answer the real
+    // load faster: DNS, TCP and TLS for the googlevideo host are already done
+    // by the time ExoPlayer opens the stream.
+    private fun warmConnections(rung: QualityOption?, qualities: VideoQualities) {
+        val http = container?.http ?: return
+        val targets = ArrayList<ResolvedStream>(3)
+        if (rung == null) {
+            qualities.auto?.let { targets.add(it) }
+        } else {
+            rung.muxed?.let { targets.add(it) }
+            rung.videoOnly?.let { targets.add(it) }
+            if (rung.videoOnly != null) qualities.audio?.let { targets.add(it) }
+        }
+        for (stream in targets) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    http.newCall(
+                        Request.Builder()
+                            .url(stream.url)
+                            .header("Range", "bytes=0-1")
+                            .header("User-Agent", IndioTubeDataSource.USER_AGENT)
+                            .build(),
+                    ).execute().close()
+                } catch (_: Exception) { /* warming is best-effort */ }
+            }
+        }
     }
 
     // Attach (or remove) a caption track on the video that is playing. The
@@ -414,7 +458,8 @@ class PlaybackController(
 
         val wasPlaying = c.playWhenReady
         val position = c.currentPosition.coerceAtLeast(0)
-        store.notePosition(video, position)
+        val duration = c.duration
+        store.notePosition(video, position, if (duration > 0) duration else 0)
         replacingItem = true
         try {
             c.replaceMediaItem(idx, current.buildUpon().setSubtitleConfigurations(configs).build())
@@ -429,7 +474,10 @@ class PlaybackController(
     fun stop() {
         val c = controller ?: return
         val v = _queue.value.getOrNull(c.currentMediaItemIndex)
-        if (v != null) store.notePosition(v, c.currentPosition.coerceAtLeast(0))
+        if (v != null) {
+            val d = c.duration
+            store.notePosition(v, c.currentPosition.coerceAtLeast(0), if (d > 0) d else 0)
+        }
         c.stop()
     }
 
@@ -437,7 +485,10 @@ class PlaybackController(
     fun clear() {
         val c = controller ?: return
         val v = _queue.value.getOrNull(c.currentMediaItemIndex)
-        if (v != null) store.notePosition(v, c.currentPosition.coerceAtLeast(0))
+        if (v != null) {
+            val d = c.duration
+            store.notePosition(v, c.currentPosition.coerceAtLeast(0), if (d > 0) d else 0)
+        }
         c.stop()
         c.clearMediaItems()
         _queue.value = emptyList()

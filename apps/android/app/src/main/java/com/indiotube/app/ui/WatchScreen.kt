@@ -109,6 +109,7 @@ import coil.compose.AsyncImage
 import com.indiotube.app.Container
 import com.indiotube.app.data.CaptionPrefs
 import com.indiotube.app.data.CaptionStyleSettings
+import com.indiotube.app.data.COMPLETED_FRACTION
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
@@ -247,12 +248,14 @@ fun WatchScreen(
         if (subtitle?.url != track.url) player.setSubtitles(video.videoId, track)
     }
 
-    // pick up where the user left off
+    // pick up where the user left off — but a video watched to the end starts
+    // over, the way YouTube replays finished videos from the beginning.
     LaunchedEffect(duration, video.videoId) {
         if (!resumed && duration > 0 && player.current.value?.videoId == video.videoId) {
             resumed = true
             val resume = container.library.resumePosition(video.videoId)
-            if (resume > 20_000 && resume < duration - 10_000) player.seekTo(resume)
+            val finished = (container.library.watchedFraction(video.videoId) ?: 0f) >= COMPLETED_FRACTION
+            if (!finished && resume > 20_000 && resume < duration - 10_000) player.seekTo(resume)
         }
     }
 
@@ -1627,6 +1630,26 @@ private fun CaptionStyleSheet(
                 modifier = Modifier.padding(horizontal = 20.dp),
             )
 
+            CaptionSettingLabel("Bottom margin — ${style.bottomMarginPercent}%")
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Slider(
+                    value = style.bottomMarginPercent.toFloat(),
+                    onValueChange = { prefs.setBottomMargin(it.toInt()) },
+                    valueRange = 0f..30f,
+                    steps = 5,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "${style.bottomMarginPercent}%",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtMuted,
+                )
+            }
+
             CaptionSettingLabel("Edge style")
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 20.dp),
@@ -1737,7 +1760,9 @@ private fun applyCaptionStyle(
         setApplyEmbeddedStyles(false)
         setApplyEmbeddedFontSizes(false)
         setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, style.textSizeSp)
-        setBottomPaddingFraction(0.16f)
+        // User-tunable distance from the bottom edge — small by default so
+        // captions hug the bottom like YouTube, with a little breathing room.
+        setBottomPaddingFraction(style.bottomPaddingFraction)
     }
 }
 

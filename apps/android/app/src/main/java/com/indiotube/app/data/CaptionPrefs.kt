@@ -14,10 +14,18 @@ data class CaptionStyleSettings(
     val backgroundOpacity: Int = 50,
     val edgeStyle: Int = EDGE_NONE,
     val fontFamily: String = "sans-serif",
+    // How far captions sit above the bottom edge of the player, in percent of
+    // its height. Small default: captions hug the bottom the way YouTube
+    // plays them, with just a little breathing room above the controls.
+    val bottomMarginPercent: Int = 6,
 ) {
     // Black box whose transparency follows the chosen opacity, like YouTube.
     val backgroundColor: Int
         get() = Math.round(backgroundOpacity.coerceIn(0, 100) * 255f / 100f) shl 24
+
+    // The same margin as PlayerView wants it: a fraction of the player height.
+    val bottomPaddingFraction: Float
+        get() = bottomMarginPercent.coerceIn(0, 30) / 100f
 
     companion object {
         const val EDGE_NONE = 0
@@ -70,6 +78,10 @@ class CaptionPrefs(context: Context) {
         update(_style.value.copy(fontFamily = fontFamily))
     }
 
+    fun setBottomMargin(percent: Int) {
+        update(_style.value.copy(bottomMarginPercent = percent.coerceIn(0, 30)))
+    }
+
     private fun update(next: CaptionStyleSettings) {
         prefs.edit()
             .putFloat(KEY_TEXT_SIZE, next.textSizeSp)
@@ -77,6 +89,7 @@ class CaptionPrefs(context: Context) {
             .putInt(KEY_BACKGROUND_OPACITY, next.backgroundOpacity)
             .putInt(KEY_EDGE_STYLE, next.edgeStyle)
             .putString(KEY_FONT_FAMILY, next.fontFamily)
+            .putInt(KEY_BOTTOM_MARGIN, next.bottomMarginPercent)
             .apply()
         _style.value = next
     }
@@ -88,6 +101,7 @@ class CaptionPrefs(context: Context) {
         edgeStyle = prefs.getInt(KEY_EDGE_STYLE, CaptionStyleSettings.EDGE_NONE)
             .coerceIn(CaptionStyleSettings.EDGE_NONE, CaptionStyleSettings.EDGE_SHADOW),
         fontFamily = prefs.getString(KEY_FONT_FAMILY, "sans-serif") ?: "sans-serif",
+        bottomMarginPercent = prefs.getInt(KEY_BOTTOM_MARGIN, 6).coerceIn(0, 30),
     )
 
     private companion object {
@@ -97,5 +111,6 @@ class CaptionPrefs(context: Context) {
         const val KEY_BACKGROUND_OPACITY = "background_opacity"
         const val KEY_EDGE_STYLE = "edge_style"
         const val KEY_FONT_FAMILY = "font_family"
+        const val KEY_BOTTOM_MARGIN = "bottom_margin_percent"
     }
 }

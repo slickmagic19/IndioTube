@@ -25,6 +25,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +42,11 @@ import com.indiotube.app.data.VideoItem
 
 // ---- thumbnails ---------------------------------------------------------------
 
+// Ambient lookup for the red "already watched" progress bar under thumbnails.
+// Provided once at the app root from the library history; the default returns
+// nothing, so previews and tests don't need a provider.
+val LocalWatchProgress = compositionLocalOf<(VideoItem) -> Float?> { { null } }
+
 @Composable
 fun Thumb(
     model: Any?,
@@ -48,6 +54,7 @@ fun Thumb(
     badge: String? = null,
     live: Boolean = false,
     corner: Dp = 12.dp,
+    progress: Float? = null,
 ) {
     Box(modifier) {
         Box(
@@ -69,6 +76,16 @@ fun Thumb(
                     null,
                     tint = Color(0xFF555555),
                     modifier = Modifier.align(Alignment.Center).size(36.dp),
+                )
+            }
+            // YouTube's red watch-progress line along the bottom edge.
+            if (progress != null && progress > 0f) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(progress.coerceIn(0f, 1f))
+                        .height(3.dp)
+                        .background(YtRed),
                 )
             }
         }
@@ -154,6 +171,7 @@ fun VideoCard(
             model = video.thumbnail,
             badge = video.durationText,
             live = video.isLive,
+            progress = LocalWatchProgress.current(video),
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
@@ -223,6 +241,7 @@ fun VideoRow(
             badge = video.durationText,
             live = video.isLive,
             corner = 8.dp,
+            progress = LocalWatchProgress.current(video),
             modifier = Modifier
                 .width(height * 16f / 9f)
                 .height(height),

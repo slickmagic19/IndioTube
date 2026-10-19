@@ -87,6 +87,25 @@ class FeedRankingTest {
     }
 
     @Test
+    fun completedVideosSinkBelowMerelyWatchedOnes() {
+        val pool = (1..200).map { video("v$it", "channel${it % 20}") }
+        val watched = (1..100).map { "v$it" }.toSet()
+        val completed = (1..50).map { "v$it" }.toSet()
+        val signals = emptySignals.copy(watchedIds = watched, completedIds = completed)
+        val runs = (1..20).map { rankAndSample(pool, signals, rotation = it, limit = 60) }
+        val total = runs.sumOf { it.size }.toDouble()
+        val completedShare = runs.sumOf { f -> f.count { it.videoId in completed } } / total
+        val watchedOnlyShare = runs.sumOf { f ->
+            f.count { it.videoId in watched && it.videoId !in completed }
+        } / total
+        assertTrue(
+            "finished videos must be rarer than unfinished watched ones, " +
+                "completed=$completedShare watchedOnly=$watchedOnlyShare",
+            completedShare < watchedOnlyShare,
+        )
+    }
+
+    @Test
     fun searchTermsBoostMatchingTitles() {
         val pool = (1..200).map { video("v$it", "channel${it % 20}", title = "Random clip $it") } +
             (1..20).map { video("s$it", "channelS$it", title = "Lofi beats mix $it") }

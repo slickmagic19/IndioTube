@@ -32,6 +32,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -46,6 +47,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indiotube.app.Container
 import com.indiotube.app.data.HomeFeed
+import com.indiotube.app.data.SearchEntry
+import com.indiotube.app.data.SearchFilter
 import com.indiotube.app.data.VideoItem
 import kotlinx.coroutines.launch
 
@@ -58,12 +61,14 @@ fun HomeScreen(container: Container, ui: UiRefs) {
 
     var feed by remember { mutableStateOf<HomeFeed?>(null) }
     var selectedChip by remember { mutableIntStateOf(0) }
+    var localChip by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var localVideos by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var localLoading by remember { mutableStateOf(false) }
+    val localFeeds = remember { mutableStateMapOf<String, LocalCategoryFeed>() }
 
     suspend fun load(force: Boolean = false, params: String? = null, token: String? = null) {
         // Returning to an old feed shouldn't show yesterday's picks — rebuild
@@ -101,22 +106,61 @@ fun HomeScreen(container: Container, ui: UiRefs) {
         }
     }
 
+    // Local-mode filter tab: pull one page of search results for the category
+    // and cache it, so returning to a tab doesn't refetch.
+    suspend fun loadLocalCategory(label: String, force: Boolean = false) {
+        val existing = localFeeds[label]
+        if (!force && existing != null && (existing.loading || existing.videos.isNotEmpty())) return
+        localFeeds[label] = LocalCategoryFeed(loading = true)
+        try {
+            val r = container.innerTube.search(label.lowercase(), SearchFilter.VIDEOS)
+            localFeeds[label] = LocalCategoryFeed(
+                videos = r.entries.filterIsInstance<SearchEntry.Video>().map { it.video },
+                continuation = r.continuation,
+            )
+        } catch (_: Exception) {
+            localFeeds[label] = LocalCategoryFeed(error = true)
+        }
+    }
+
     LaunchedEffect(account?.id) {
         loading = true
         load()
         loading = false
     }
 
-    LaunchedEffect(listState, feed) {
+    LaunchedEffect(listState, feed, localChip, localVideos) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .collect { last ->
-                val f = feed ?: return@collect
-                val token = f.continuation ?: return@collect
-                if (last >= f.videos.size - 3 && !loadingMore && last >= 0) {
+                if (last < 0 || loadingMore) return@collect
+                val f = feed
+                val usingLocalNow = f != null && f.videos.isEmpty() && localVideos.isNotEmpty()
+                if (usingLocalNow && localChip > 0) {
+                    val label = LOCAL_FEED_CHIPS.getOrNull(localChip) ?: return@collect
+                    val catFeed = localFeeds[label] ?: return@collect
+                    val token = catFeed.continuation ?: return@collect
+                    if (catFeed.videos.isEmpty() || last < catFeed.videos.size - 3) return@collect
+                    loadingMore = true
+                    try {
+                        val r = container.innerTube.searchContinuation(token)
+                        localFeeds[label]?.let { cur ->
+                            localFeeds[label] = cur.copy(
+                                videos = (cur.videos + r.entries.filterIsInstance<SearchEntry.Video>()
+                                    .map { it.video }).distinctBy { it.videoId },
+                                continuation = r.continuation,
+                            )
+                        }
+                    } catch (_: Exception) { /* keep what we have */ }
+                    loadingMore = false
+                    return@collect
+                }
+                val token = f?.continuation ?: return@collect
+                if (last >= f.videos.size - 3) {
                     loadingMore = true
                     try {
                         val more = container.innerTube.homeContinuation(token)
-                        feed = HomeFeed(f.chips, f.videos + more.videos, more.continuation)
+                        val latest = feed ?: f
+                        feed = HomeFeed(latest.chips, latest.videos + more.videos, more.continuation)
                     } catch (_: Exception) { /* keep what we have */ }
                     loadingMore = false
                 }
@@ -173,6 +217,8 @@ fun HomeScreen(container: Container, ui: UiRefs) {
             onRefresh = {
                 scope.launch {
                     refreshing = true
+                    localChip = 0
+                    localFeeds.clear()
                     load(force = true)
                     refreshing = false
                     // a refreshed feed is a new mix — start it from the top
@@ -192,9 +238,40 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                 }, modifier = Modifier.fillMaxSize())
                 else -> {
                     val f = feed
+                    val videos = f?.videos.orEmpty()
+                    val usingLocal = videos.isEmpty() && localVideos.isNotEmpty()
+                    val localLabel = LOCAL_FEED_CHIPS.getOrNull(localChip)
+                    val categoryMode = usingLocal && localChip > 0
+                    val categoryFeed = if (categoryMode) localFeeds[localLabel] else null
+                    val shown = when {
+                        categoryMode -> categoryFeed?.videos.orEmpty()
+                        usingLocal -> localVideos
+                        else -> videos
+                    }
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         val chips = f?.chips.orEmpty()
-                        if (chips.isNotEmpty()) {
+                        if (usingLocal) {
+                            // Local feed: YouTube-style category tabs, filled
+                            // from search since a signed-out home has no chips.
+                            item(key = "local-chips") {
+                                LazyRow(
+                                    Modifier.padding(vertical = 2.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                                ) {
+                                    itemsIndexed(LOCAL_FEED_CHIPS) { i, title ->
+                                        FeedChip(
+                                            title = title,
+                                            selected = i == localChip,
+                                            onClick = {
+                                                localChip = i
+                                                if (i > 0) scope.launch { loadLocalCategory(title) }
+                                            },
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                    }
+                                }
+                            }
+                        } else if (chips.isNotEmpty()) {
                             item(key = "chips") {
                                 LazyRow(
                                     Modifier.padding(vertical = 2.dp),
@@ -216,12 +293,9 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                 }
                             }
                         }
-                        val videos = f?.videos.orEmpty()
-                        val usingLocal = videos.isEmpty() && localVideos.isNotEmpty()
-                        val shown = if (usingLocal) localVideos else videos
                         if (usingLocal) {
                             item(key = "recommended") {
-                                SectionHeader("Recommended for you")
+                                SectionHeader(if (categoryMode) localLabel.orEmpty() else "Recommended for you")
                             }
                         }
                         items(shown, key = { it.videoId }) { video ->
@@ -231,12 +305,26 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                 onChannelClick = { ui.openChannelOf(video) },
                             )
                         }
-                        if (localLoading && shown.isEmpty()) {
+                        if (categoryMode && categoryFeed == null) {
+                            item(key = "category-loading") { LoadingBox(Modifier.height(160.dp)) }
+                        }
+                        if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
+                            item(key = "category-error") {
+                                ErrorState(
+                                    "Couldn't load ${localLabel.orEmpty()} right now",
+                                    onRetry = {
+                                        scope.launch { loadLocalCategory(localLabel.orEmpty(), force = true) }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                        if (localLoading && shown.isEmpty() && !categoryMode) {
                             item(key = "local-loading") { LoadingBox(Modifier.height(160.dp)) }
                         }
                         // Only show the signed-out prompt when neither YouTube
                         // nor the local fallback feed had anything to offer.
-                        if (f != null && shown.isEmpty() && !loadingMore && !localLoading) {
+                        if (f != null && shown.isEmpty() && !loadingMore && !localLoading && !categoryMode) {
                             item(key = "empty") {
                                 EmptyState(
                                     title = "Try searching to get started",
@@ -264,6 +352,20 @@ fun HomeScreen(container: Container, ui: UiRefs) {
         }
     }
 }
+
+// Filter tabs for the locally computed feed (a signed-out YouTube home has no
+// chips of its own). "All" is the ranked recommendation mix; every other tab
+// is filled from search, like YouTube's topic chips.
+private val LOCAL_FEED_CHIPS = listOf(
+    "All", "Music", "Gaming", "News", "Sports", "Movies", "Podcasts", "Live", "Learning",
+)
+
+private data class LocalCategoryFeed(
+    val videos: List<VideoItem> = emptyList(),
+    val continuation: String? = null,
+    val loading: Boolean = false,
+    val error: Boolean = false,
+)
 
 @Composable
 fun FeedChip(title: String, selected: Boolean, onClick: () -> Unit) {
