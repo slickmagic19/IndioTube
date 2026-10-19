@@ -2,6 +2,7 @@ package com.indiotube.app.player
 
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
@@ -12,6 +13,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.indiotube.app.data.LibraryStore
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.VideoQualities
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -61,6 +63,11 @@ class PlaybackController(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    // The quality chosen for the video that is playing right now (null = Auto).
+    // YouTube-style, this is per video: the next item starts on Auto again.
+    private val _qualityHeight = MutableStateFlow<Int?>(null)
+    val qualityHeight: StateFlow<Int?> = _qualityHeight.asStateFlow()
+
     val current: StateFlow<VideoItem?> = combine(_queue, _index) { q, i -> q.getOrNull(i) }
         .stateIn(scope, SharingStarted.Eagerly, null)
 
@@ -69,6 +76,8 @@ class PlaybackController(
     private var pendingPlay = false
     private var pendingShuffle = false
     private var lastPositionSave = 0L
+    private var lastMediaId: String? = null
+    private var applyingQuality = false
 
     init {
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
@@ -123,7 +132,16 @@ class PlaybackController(
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 val idx = c.currentMediaItemIndex
                 _index.value = idx
-                if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
+                // A genuinely different video starts back on Auto; replacing
+                // the current item to change quality keeps the same media id
+                // and must not be treated as a new watch.
+                val id = mediaItem?.mediaId
+                val newVideo = id != null && id != lastMediaId
+                if (newVideo) {
+                    lastMediaId = id
+                    if (!applyingQuality) _qualityHeight.value = null
+                }
+                if (newVideo && reason != Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                     _queue.value.getOrNull(idx)?.let { store.noteOpen(it) }
                 }
             }
@@ -165,6 +183,8 @@ class PlaybackController(
         val start = startIndex.coerceIn(0, videos.lastIndex)
         _queue.value = videos
         _index.value = start
+        _qualityHeight.value = null
+        lastMediaId = null
         val c = controller ?: run {
             pendingPlay = play
             pendingShuffle = shuffleOn
@@ -208,6 +228,72 @@ class PlaybackController(
         c.seekTo((c.currentPosition + deltaMs).coerceAtLeast(0))
     }
 
+    // Switch the video that is playing to a specific height (null = Auto),
+    // keeping the position and play/pause state. The replacement media item
+    // carries the quality in its URI, so the source factory creates either a
+    // single muxed source or a video+audio merge on the fly.
+    fun setQuality(videoId: String, height: Int?, qualities: VideoQualities) {
+        _qualityHeight.value = height
+        val c = controller ?: return
+        val idx = c.currentMediaItemIndex
+        if (idx < 0) return
+        val video = _queue.value.getOrNull(idx) ?: return
+        if (video.videoId != videoId) return
+        applyQuality(c, idx, video, qualities, height)
+    }
+
+    private fun applyQuality(
+        c: MediaController,
+        idx: Int,
+        video: VideoItem,
+        qualities: VideoQualities,
+        height: Int?,
+    ) {
+        val current = c.getMediaItemAt(idx)
+        val currentUri = current.localConfiguration?.uri
+        val currentHeight = currentUri?.getQueryParameter("h")?.toIntOrNull()
+
+        if (height == null && currentUri?.host == "stream" && currentHeight == null) return
+
+        val uri: Uri = if (height == null) {
+            Uri.Builder()
+                .scheme("indio")
+                .authority("stream")
+                .appendPath(video.videoId)
+                .build()
+        } else {
+            val option = qualities.nearest(height) ?: return
+            if (currentHeight == option.height) return
+            when {
+                option.muxed != null -> Uri.Builder()
+                    .scheme("indio")
+                    .authority("stream")
+                    .appendPath(video.videoId)
+                    .appendQueryParameter("type", "muxed")
+                    .appendQueryParameter("h", option.height.toString())
+                    .build()
+                option.videoOnly != null -> Uri.Builder()
+                    .scheme("indio")
+                    .authority("merge")
+                    .appendPath(video.videoId)
+                    .appendQueryParameter("h", option.height.toString())
+                    .build()
+                else -> return
+            }
+        }
+
+        val wasPlaying = c.playWhenReady
+        val position = c.currentPosition.coerceAtLeast(0)
+        applyingQuality = true
+        try {
+            c.replaceMediaItem(idx, current.buildUpon().setUri(uri).build())
+            c.seekTo(idx, position)
+            if (wasPlaying) c.play()
+        } finally {
+            applyingQuality = false
+        }
+    }
+
     fun stop() {
         val c = controller ?: return
         val v = _queue.value.getOrNull(c.currentMediaItemIndex)
@@ -227,6 +313,8 @@ class PlaybackController(
         _playing.value = false
         _position.value = 0
         _duration.value = 0
+        _qualityHeight.value = null
+        lastMediaId = null
     }
 
     private fun toMediaItem(v: VideoItem): MediaItem {

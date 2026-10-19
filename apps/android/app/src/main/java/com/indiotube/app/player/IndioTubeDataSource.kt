@@ -10,8 +10,13 @@ import com.indiotube.app.Container
 import java.io.IOException
 
 // URI scheme for the player:
-//   indio://stream/{videoId}  → resolve a fresh ad-free URL (NewPipeExtractor)
-//   indio://offline/{videoId} → play the saved file, else fall back to stream
+//   indio://stream/{videoId}                    -> auto: best muxed stream
+//   indio://stream/{videoId}?type=muxed&h=720   -> a specific muxed file
+//   indio://stream/{videoId}?type=video&h=720   -> video-only track
+//   indio://stream/{videoId}?type=audio         -> best audio-only track
+//   indio://merge/{videoId}?h=720               -> video + audio merged by
+//                                                  IndioMediaSourceFactory
+//   indio://offline/{videoId}                   -> saved file, else fallback
 // Everything else falls through to plain HTTP(S).
 class IndioTubeDataSource(private val container: Container) : BaseDataSource(true) {
 
@@ -34,7 +39,12 @@ class IndioTubeDataSource(private val container: Container) : BaseDataSource(tru
                 spec = dataSpec.withUri(Uri.fromFile(offline))
                 FileDataSource()
             } else {
-                val resolved = container.resolver.resolveBlocking(last)
+                val type = dataSpec.uri.getQueryParameter("type")
+                val height = dataSpec.uri.getQueryParameter("h")?.toIntOrNull() ?: 0
+                val resolved = when (type) {
+                    "video", "audio", "muxed" -> container.resolver.resolveTrackBlocking(last, type, height)
+                    else -> container.resolver.resolveBlocking(last)
+                }
                 spec = dataSpec.withUri(Uri.parse(resolved.url))
                 httpSource()
             }

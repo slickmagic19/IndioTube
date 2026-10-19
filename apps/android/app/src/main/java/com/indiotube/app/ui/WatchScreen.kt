@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.outlined.Download
@@ -100,10 +101,13 @@ import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.VideoQualities
 import com.indiotube.app.data.formatDuration
 import com.indiotube.app.player.PlaybackController
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -145,6 +149,10 @@ fun WatchScreen(
     var disliked by remember(video.videoId) { mutableStateOf(false) }
     var descExpanded by remember(video.videoId) { mutableStateOf(false) }
     var saveSheet by remember { mutableStateOf(false) }
+    var qualitySheet by remember { mutableStateOf(false) }
+    var qualities by remember(video.videoId) { mutableStateOf<VideoQualities?>(null) }
+    var qualityError by remember(video.videoId) { mutableStateOf(false) }
+    val qualityHeight by player.qualityHeight.collectAsState()
     var resumed by remember(video.videoId) { mutableStateOf(false) }
 
     // make sure the tapped video is the one actually playing
@@ -189,6 +197,16 @@ fun WatchScreen(
                 loadingComments = false
             }
         } catch (_: Exception) { /* player still works without metadata */ }
+    }
+
+    // Available quality ladder (muxed + video-only heights). Loaded in the
+    // background; the player keeps running on Auto until the user picks one.
+    LaunchedEffect(video.videoId) {
+        val loaded = runCatching {
+            withContext(Dispatchers.IO) { container.resolver.qualities(video.videoId) }
+        }.getOrNull()
+        qualities = loaded
+        qualityError = loaded == null
     }
 
     // pick up where the user left off
@@ -303,6 +321,7 @@ fun WatchScreen(
     val durationF = duration.coerceAtLeast(1L).toFloat()
     val sliderValue = scrub ?: (position.toFloat() / durationF).coerceIn(0f, 1f)
     val posShown = scrub?.times(duration)?.toLong() ?: position
+    val qualityLabel = qualityHeight?.let { h -> qualities?.labelFor(h) ?: "${h}p" } ?: "Auto"
 
     Column(Modifier.fillMaxSize()) {
         // ---- player surface -------------------------------------------------
@@ -448,6 +467,8 @@ fun WatchScreen(
                 scrubbing = scrub != null,
                 positionText = formatDuration(posShown / 1000),
                 durationText = formatDuration(duration / 1000),
+                qualityLabel = qualityLabel,
+                onQuality = { qualitySheet = true },
                 onBack = { ui.back() },
                 onTogglePlay = { player.togglePlayPause() },
                 onSeekBy = { player.seekBy(it) },
@@ -734,6 +755,21 @@ fun WatchScreen(
             onDismiss = { saveSheet = false },
         )
     }
+
+    if (qualitySheet) {
+        QualitySheet(
+            qualities = qualities,
+            error = qualityError,
+            selectedHeight = qualityHeight,
+            downloaded = downloaded,
+            onSelect = { height ->
+                val q = qualities
+                if (q != null) player.setQuality(video.videoId, height, q)
+                qualitySheet = false
+            },
+            onDismiss = { qualitySheet = false },
+        )
+    }
 }
 
 @Composable
@@ -748,6 +784,8 @@ private fun PlayerChrome(
     scrubbing: Boolean,
     positionText: String,
     durationText: String,
+    qualityLabel: String,
+    onQuality: () -> Unit,
     onBack: () -> Unit,
     onTogglePlay: () -> Unit,
     onSeekBy: (Long) -> Unit,
@@ -859,6 +897,15 @@ private fun PlayerChrome(
                         IconButton(onClick = onNext, modifier = Modifier.size(40.dp)) {
                             Icon(Icons.Filled.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(26.dp))
                         }
+                    }
+                    Text(qualityLabel, color = Color.White, fontSize = 11.sp)
+                    IconButton(onClick = onQuality, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            Icons.Filled.Settings,
+                            "Quality",
+                            tint = Color.White,
+                            modifier = Modifier.size(23.dp),
+                        )
                     }
                     IconButton(onClick = onToggleFullscreen, modifier = Modifier.size(40.dp)) {
                         Icon(
@@ -1098,6 +1145,120 @@ private fun SheetRow(
         )
         if (checked) {
             Icon(Icons.Filled.Check, "Saved", tint = YtBlue, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QualitySheet(
+    qualities: VideoQualities?,
+    error: Boolean,
+    selectedHeight: Int?,
+    downloaded: Boolean,
+    onSelect: (Int?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState()
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = YtSurface,
+        contentColor = YtText,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(
+                "Quality",
+                style = MaterialTheme.typography.titleMedium,
+                color = YtText,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+            )
+            when {
+                downloaded -> {
+                    QualityRow(
+                        label = "Original (downloaded)",
+                        subtitle = "Delete the download to stream in another quality",
+                        selected = true,
+                        enabled = false,
+                        onClick = {},
+                    )
+                }
+                qualities == null -> {
+                    if (error) {
+                        Text(
+                            "Couldn't load the quality options. Playback stays on Auto.",
+                            color = YtMuted,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                        )
+                    } else {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(
+                                color = YtMuted,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text("Checking available qualities…", color = YtMuted)
+                        }
+                    }
+                }
+                else -> {
+                    val autoHeight = qualities.auto?.height
+                    QualityRow(
+                        label = "Auto",
+                        subtitle = if (autoHeight != null) "${autoHeight}p" else null,
+                        selected = selectedHeight == null,
+                        onClick = { onSelect(null) },
+                    )
+                    qualities.options.forEach { option ->
+                        QualityRow(
+                            label = option.label,
+                            subtitle = when {
+                                option.height >= 2160 -> "4K"
+                                option.height >= 1440 -> "2K"
+                                option.height >= 720 -> "HD"
+                                else -> null
+                            },
+                            selected = selectedHeight == option.height,
+                            onClick = { onSelect(option.height) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QualityRow(
+    label: String,
+    subtitle: String?,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (selected) YtBlue else if (enabled) YtText else YtMuted,
+            )
+            if (subtitle != null) {
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = YtMuted)
+            }
+        }
+        if (selected) {
+            Icon(Icons.Filled.Check, "Selected", tint = YtBlue, modifier = Modifier.size(20.dp))
         }
     }
 }

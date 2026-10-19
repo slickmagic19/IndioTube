@@ -5,7 +5,6 @@ import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.indiotube.app.IndioTubeApplication
@@ -30,7 +29,7 @@ class PlaybackService : MediaSessionService() {
             )
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(IndioTubeDataSource.Factory(app.container)))
+            .setMediaSourceFactory(IndioMediaSourceFactory(app.container))
             .build()
 
         session = MediaSession.Builder(this, player)

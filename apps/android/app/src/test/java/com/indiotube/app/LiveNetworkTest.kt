@@ -7,6 +7,7 @@ import com.indiotube.app.data.StreamResolver
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -138,5 +139,74 @@ class LiveNetworkTest {
         assertTrue("suggestions expected", suggestions.isNotEmpty())
         assertTrue("suggestions should be non-blank", suggestions.all { it.isNotBlank() })
         assertTrue("suggestions should be relevant", suggestions.any { it.contains("lofi", true) })
+    }
+
+    // The quality sheet is only honest if it lists the real ladder: muxed
+    // heights plus the higher video-only heights that get paired with audio.
+    @Test
+    fun qualityLadderExtracts() = runBlocking {
+        StreamResolver.init(http)
+        val resolver = StreamResolver(http)
+        val qualities = resolver.qualities(videoId)
+
+        assertTrue("qualities expected", qualities.options.isNotEmpty())
+        assertTrue("multiple qualities expected", qualities.options.size >= 2)
+        assertTrue(
+            "ladder must be sorted highest first",
+            qualities.options.map { it.height }.zipWithNext().all { (a, b) -> a > b },
+        )
+        assertNotNull("auto (muxed) stream expected", qualities.auto)
+        assertTrue("auto should carry video", qualities.auto!!.height > 0)
+        assertTrue("every option needs a source", qualities.options.all { it.hasStream })
+        assertTrue(
+            "labels look like YouTube",
+            qualities.options.all { it.label.matches(Regex("\\d+p\\d*")) },
+        )
+        assertNotNull("audio track expected for video-only qualities", qualities.audio)
+        assertTrue("audio mime should be audio/*", qualities.audio!!.isAudio)
+    }
+
+    // Both halves of a merged quality must be fetchable media URLs, otherwise
+    // selecting that quality would break playback.
+    @Test
+    fun explicitQualityTracksArePlayable() = runBlocking {
+        StreamResolver.init(http)
+        val resolver = StreamResolver(http)
+        val qualities = resolver.qualities(videoId)
+        val option = qualities.options.firstOrNull { it.videoOnly != null && it.height <= 1080 }
+            ?: qualities.options.first()
+
+        val video = option.videoOnly ?: resolver.resolveTrackBlocking(videoId, "muxed", option.height)
+        assertTrue("video mime expected, got ${video.mime}", video.isVideo)
+        val (videoCode, videoBytes) = probeStream(video.url)
+        assertTrue("video track should respond (got $videoCode)", videoCode == 200 || videoCode == 206)
+        assertTrue("video track should carry data", videoBytes > 0)
+
+        if (option.videoOnly != null) {
+            val audio = resolver.resolveTrackBlocking(videoId, "audio", 0)
+            assertTrue("audio mime expected, got ${audio.mime}", audio.isAudio)
+            val (audioCode, audioBytes) = probeStream(audio.url)
+            assertTrue("audio track should respond (got $audioCode)", audioCode == 200 || audioCode == 206)
+            assertTrue("audio track should carry data", audioBytes > 0)
+        }
+
+        // Auto must keep resolving to the single muxed file as before.
+        val muxed = resolver.resolveTrackBlocking(videoId, "muxed", qualities.auto!!.height)
+        assertTrue("muxed mime expected", muxed.isVideo)
+    }
+
+    private fun probeStream(url: String): Pair<Int, Long> {
+        val request = Request.Builder()
+            .url(url)
+            .header("Range", "bytes=0-4095")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Mobile Safari/537.36",
+            )
+            .build()
+        http.newCall(request).execute().use { response ->
+            val bytes = response.body?.bytes()?.size ?: 0
+            return response.code to bytes.toLong()
+        }
     }
 }
