@@ -394,23 +394,24 @@ fun WatchScreen(
                         setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                         setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        // YouTube-like captions: bold white text with a black
-                        // outline, slightly above the bottom edge.
+                        // YouTube-like captions: white text on a 50% black
+                        // box, no outline, a touch smaller, and lifted well
+                        // clear of the bottom edge.
                         subtitleView?.apply {
                             setStyle(
                                 CaptionStyleCompat(
                                     android.graphics.Color.WHITE,
+                                    android.graphics.Color.argb(128, 0, 0, 0),
                                     android.graphics.Color.TRANSPARENT,
+                                    CaptionStyleCompat.EDGE_TYPE_NONE,
                                     android.graphics.Color.TRANSPARENT,
-                                    CaptionStyleCompat.EDGE_TYPE_OUTLINE,
-                                    android.graphics.Color.BLACK,
-                                    Typeface.create("sans-serif-medium", Typeface.NORMAL),
+                                    Typeface.create("sans-serif", Typeface.NORMAL),
                                 ),
                             )
                             setApplyEmbeddedStyles(false)
                             setApplyEmbeddedFontSizes(false)
-                            setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-                            setBottomPaddingFraction(0.10f)
+                            setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            setBottomPaddingFraction(0.15f)
                         }
                     }
                 },

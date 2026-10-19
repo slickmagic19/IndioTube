@@ -46,13 +46,17 @@ class IndioMediaSourceFactory(private val container: Container) : MediaSource.Fa
             mediaItem.buildUpon().setSubtitleConfigurations(emptyList()).build()
         }
         val content = contentSource(bare)
-        if (subtitleConfigs.isEmpty()) return content
-        val subtitles = subtitleConfigs.mapNotNull { subtitleSource(it) }
-        return if (subtitles.isEmpty()) {
+        val source = if (subtitleConfigs.isEmpty()) {
             content
         } else {
-            MergingMediaSource(content, *subtitles.toTypedArray())
+            val subtitles = subtitleConfigs.mapNotNull { subtitleSource(it) }
+            if (subtitles.isEmpty()) content else MergingMediaSource(content, *subtitles.toTypedArray())
         }
+        // Media3 decides in place whether a replaced item can keep its media
+        // source (ProgressiveMediaSource only compares the URI), so without
+        // this wrapper replacing an item to toggle captions never builds the
+        // subtitle source and captions stay invisible until a quality change.
+        return RebuildOnReplaceMediaSource(source)
     }
 
     private fun contentSource(mediaItem: MediaItem): MediaSource {

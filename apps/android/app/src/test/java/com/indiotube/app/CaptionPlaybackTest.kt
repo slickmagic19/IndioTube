@@ -16,8 +16,10 @@ import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.source.SilenceMediaSource
@@ -35,6 +37,7 @@ import androidx.media3.test.utils.FakeVideoRenderer
 import androidx.media3.test.utils.TestExoPlayerBuilder
 import androidx.media3.test.utils.robolectric.TestPlayerRunHelper
 import androidx.test.core.app.ApplicationProvider
+import com.indiotube.app.player.RebuildOnReplaceMediaSource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -177,5 +180,121 @@ class CaptionPlaybackTest {
 
         player.release()
         shadowOf(mainLooper).idle()
+    }
+
+    // Reproduces enabling captions while a video is already playing: the app
+    // replaces the current media item with one that carries the subtitle
+    // configuration (PlaybackController.setSubtitles). The track must attach
+    // and render immediately, not only after the next quality change.
+    @Test
+    fun attachingCaptionsWhilePlayingTakesEffectImmediately() {
+        val delivered = mutableListOf<Cue>()
+        val handler = Clock.DEFAULT.createHandler(mainLooper, null)
+        val renderers = arrayOf<Renderer>(
+            FakeVideoRenderer(handler, object : VideoRendererEventListener {}),
+            FakeAudioRenderer(handler, object : AudioRendererEventListener {}),
+            TextRenderer(TextOutput { group -> delivered += group.cues }, mainLooper),
+        )
+
+        val dataSet = FakeDataSet()
+            .newData(CONTENT_URL).appendReadData(wavBytes()).endData()
+            .newData(CAPTION_URL).appendReadData(webvtt).endData()
+        val dataSourceFactory = DataSource.Factory {
+            RecordingDataSource(FakeDataSource(dataSet), openedUris)
+        }
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        val loggingFactory = object : MediaSource.Factory {
+            override fun createMediaSource(mediaItem: MediaItem): MediaSource {
+                events += "create:subs=${mediaItem.localConfiguration?.subtitleConfigurations?.size ?: -1}"
+                return RebuildOnReplaceMediaSource(mediaSourceFactory.createMediaSource(mediaItem))
+            }
+
+            override fun getSupportedTypes(): IntArray = mediaSourceFactory.supportedTypes
+
+            override fun setDrmSessionManagerProvider(
+                provider: androidx.media3.exoplayer.drm.DrmSessionManagerProvider,
+            ): MediaSource.Factory {
+                mediaSourceFactory.setDrmSessionManagerProvider(provider)
+                return this
+            }
+
+            override fun setLoadErrorHandlingPolicy(
+                policy: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy,
+            ): MediaSource.Factory {
+                mediaSourceFactory.setLoadErrorHandlingPolicy(policy)
+                return this
+            }
+        }
+        val player = TestExoPlayerBuilder(context)
+            .setRenderers(*renderers)
+            .setMediaSourceFactory(loggingFactory)
+            .build()
+
+        player.setMediaItem(MediaItem.fromUri(CONTENT_URL))
+        player.prepare()
+        TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_READY)
+        shadowOf(mainLooper).idle()
+        TestPlayerRunHelper.playUntilPosition(player, 0, 500)
+        shadowOf(mainLooper).idle()
+        assertTrue(
+            "test setup: no caption track before attaching",
+            player.currentTracks.groups.none { it.type == C.TRACK_TYPE_TEXT },
+        )
+
+        // Same sequence PlaybackController.setSubtitles performs: replace the
+        // current item, keep the position, resume when it was playing.
+        val position = player.currentPosition
+        val withCaptions = player.getMediaItemAt(0).buildUpon()
+            .setSubtitleConfigurations(
+                listOf(
+                    MediaItem.SubtitleConfiguration.Builder(Uri.parse(CAPTION_URL))
+                        .setMimeType(MimeTypes.TEXT_VTT)
+                        .setLanguage("en")
+                        .setLabel("English")
+                        .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                        .setRoleFlags(C.ROLE_FLAG_CAPTION)
+                        .build(),
+                ),
+            )
+            .build()
+        player.replaceMediaItem(0, withCaptions)
+        player.seekTo(0, position)
+        if (player.playbackState == Player.STATE_IDLE) player.prepare()
+        events += "subsInItemAfterReplace=${player.getMediaItemAt(0).localConfiguration?.subtitleConfigurations?.size ?: -1}"
+
+        listOf(1_000L, 1_500L, 2_000L).forEach { target ->
+            TestPlayerRunHelper.playUntilPosition(player, 0, target)
+            shadowOf(mainLooper).idle()
+        }
+        val textGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        val texts = delivered.map { it.text?.toString() }
+        assertTrue(
+            "captions attached while playing must show without a quality change" +
+                " (tracks=${player.currentTracks.groups.map { "${it.type}:${it.isTrackSelected(0)}" }}," +
+                " opened=$openedUris, emitted=$texts at ${player.currentPosition}ms, events=$events)",
+            textGroups.isNotEmpty() &&
+                textGroups.first().isTrackSelected(0) &&
+                texts.contains("Hello captions"),
+        )
+
+        player.release()
+        shadowOf(mainLooper).idle()
+    }
+
+    // Minimal silent PCM WAV so the content source exposes a real audio track.
+    private fun wavBytes(sampleRate: Int = 8_000, seconds: Int = 3): ByteArray {
+        val dataSize = sampleRate * seconds * 2
+        val buffer = java.nio.ByteBuffer.allocate(44 + dataSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buffer.put("RIFF".toByteArray()).putInt(36 + dataSize).put("WAVE".toByteArray())
+        buffer.put("fmt ".toByteArray()).putInt(16).putShort(1).putShort(1)
+            .putInt(sampleRate).putInt(sampleRate * 2).putShort(2).putShort(16)
+        buffer.put("data".toByteArray()).putInt(dataSize)
+        buffer.put(ByteArray(dataSize))
+        return buffer.array()
+    }
+
+    private companion object {
+        const val CONTENT_URL = "https://video.test/content.wav"
+        const val CAPTION_URL = "https://cc.test/captions.vtt"
     }
 }
