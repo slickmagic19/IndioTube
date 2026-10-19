@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- The IndioTube mark: YouTube-style red play badge -->
+    <path
+        android:pathData="M38,38 L70,38 A12,12 0 0 1 82,50 L82,58 A12,12 0 0 1 70,70 L38,70 A12,12 0 0 1 26,58 L26,50 A12,12 0 0 1 38,38 Z"
+        android:fillColor="#FF0033" />
+    <path
+        android:pathData="M48,45 L48,63 L64,54 Z"
+        android:fillColor="#FFFFFF" />
+</vector>
