@@ -15,7 +15,7 @@ Unofficial YouTube client. No ads, no Shorts, no sign-in required. Dark theme on
 - Search with YouTube's own type-ahead suggestions as you type
 - The bottom navigation never disappears while you browse: it stays on search, channel, playlist and watch screens (it only steps aside for fullscreen playback), with the mini player docked above it
 - Player controls match YouTube mobile: slim seek bar with drag preview, ±10s double-tap, centre play/pause, skip-next and fullscreen — fullscreen rotates straight into landscape in one clean turn (plain lock, works even with the system rotation lock on) and letterboxes on pure black instead of a thumbnail backdrop
-- Real quality selector like YouTube: Auto or any resolution the video actually offers, from 144p up to 4K — high resolutions that YouTube only serves as separate video and audio files are paired transparently, and switching keeps your position and play state (Auto stays on the single muxed file, so playback starts fast even on slow connections)
+- Real quality selector like YouTube: Auto or any resolution the video actually offers, from 144p up to 4K — high resolutions that YouTube only serves as separate video and audio files are paired transparently, switching keeps your position and resumes instantly, and a resolution the device can't play steps down the ladder instead of interrupting the video (Auto stays on the single muxed file, so playback starts fast even on slow connections)
 - Mini player like the real app: keeps playing while you browse, swipe down on the player to minimise, tap to expand, play/pause + next + close inline
 - Channel photos load from the real avatar data in YouTube's lockups (not just channel pages), with a lettered placeholder as the fallback
 

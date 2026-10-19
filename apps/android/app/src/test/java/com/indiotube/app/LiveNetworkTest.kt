@@ -8,6 +8,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -193,6 +194,38 @@ class LiveNetworkTest {
         // Auto must keep resolving to the single muxed file as before.
         val muxed = resolver.resolveTrackBlocking(videoId, "muxed", qualities.auto!!.height)
         assertTrue("muxed mime expected", muxed.isVideo)
+    }
+
+    // Switching quality used to be able to serve another video's stream. The
+    // resolver cache is per video; pin that two videos never share tracks.
+    @Test
+    fun qualityLaddersArePerVideo() = runBlocking {
+        StreamResolver.init(http)
+        val resolver = StreamResolver(http)
+        val first = resolver.qualities(videoId)
+        val second = resolver.qualities("9bZkp7q19f0")
+
+        assertNotNull(first.auto)
+        assertNotNull(second.auto)
+        assertTrue("ladders expected for both videos", first.options.isNotEmpty() && second.options.isNotEmpty())
+        assertTrue(
+            "different videos must resolve different muxed streams",
+            first.auto!!.url != second.auto!!.url,
+        )
+
+        val firstVideoTrack = first.options.firstNotNullOfOrNull { it.videoOnly }
+        val secondVideoTrack = second.options.firstNotNullOfOrNull { it.videoOnly }
+        if (firstVideoTrack != null && secondVideoTrack != null) {
+            assertTrue(
+                "video-only tracks must stay with their own video",
+                firstVideoTrack.url != secondVideoTrack.url,
+            )
+        }
+
+        // The cache is also allowed to exist, as long as it stays per video.
+        val cached = resolver.qualities(videoId)
+        assertEquals(first.auto!!.url, cached.auto!!.url)
+        assertEquals(first.options.map { it.height }, cached.options.map { it.height })
     }
 
     private fun probeStream(url: String): Pair<Int, Long> {

@@ -1,6 +1,7 @@
 package com.indiotube.app
 
 import com.indiotube.app.data.QualityOption
+import com.indiotube.app.data.QualityUris
 import com.indiotube.app.data.ResolvedStream
 import com.indiotube.app.data.VideoQualities
 import org.junit.Assert.assertEquals
@@ -89,5 +90,65 @@ class QualitySelectionTest {
         val empty = VideoQualities(emptyList(), null, null)
         assertNull(empty.nearest(720))
         assertEquals(0, empty.bestHeight)
+    }
+
+    // A quality that fails on the device must fall back exactly one rung at a
+    // time, ending on Auto - never onto a different video.
+    @Test
+    fun belowStepsDownOneRungAtATime() {
+        assertEquals(720, qualities.below(1080)?.height)
+        assertEquals(480, qualities.below(720)?.height)
+        assertEquals(240, qualities.below(360)?.height)
+        assertNull(qualities.below(144))
+        assertNull(VideoQualities(emptyList(), null, null).below(1080))
+    }
+
+    @Test
+    fun autoTargetIsThePlainMuxedStream() {
+        assertEquals("indio://stream/abc123", QualityUris.auto("abc123"))
+        assertEquals(
+            "indio://stream/abc123",
+            QualityUris.target("abc123", null, qualities),
+        )
+    }
+
+    @Test
+    fun muxedQualityMapsToASingleFile() {
+        assertEquals(
+            "indio://stream/abc123?type=muxed&h=720",
+            QualityUris.target("abc123", 720, qualities),
+        )
+    }
+
+    @Test
+    fun videoOnlyQualityMapsToAMergedStream() {
+        assertEquals(
+            "indio://merge/abc123?h=1080",
+            QualityUris.target("abc123", 1080, qualities),
+        )
+    }
+
+    @Test
+    fun staleHeightMapsToTheNearestRung() {
+        assertEquals(
+            "indio://merge/abc123?h=480",
+            QualityUris.target("abc123", 600, qualities),
+        )
+        assertEquals(
+            "indio://merge/abc123?h=1080",
+            QualityUris.target("abc123", 2160, qualities),
+        )
+    }
+
+    @Test
+    fun targetIsNullOnlyWhenTheRungHasNoSource() {
+        val broken = VideoQualities(
+            options = listOf(
+                QualityOption(600, "600p", 30, muxed = null, videoOnly = null),
+            ),
+            auto = null,
+            audio = stream(0, "audio/mp4"),
+        )
+        assertNull(QualityUris.target("abc123", 600, broken))
     }
 }

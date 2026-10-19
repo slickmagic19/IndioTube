@@ -65,6 +65,11 @@ data class VideoQualities(
     fun labelFor(height: Int?): String? =
         if (height == null) null else options.firstOrNull { it.height == height }?.label
 
+    // The rung directly below the given height (used when a quality turns out
+    // to be unplayable on this device: drop one step instead of giving up).
+    fun below(height: Int): QualityOption? =
+        options.filter { it.height < height }.maxByOrNull { it.height }
+
     fun muxedAt(height: Int): ResolvedStream? =
         options.filter { it.muxed != null && it.height <= height }
             .maxByOrNull { it.height }?.muxed
@@ -74,6 +79,33 @@ data class VideoQualities(
         options.filter { it.videoOnly != null && it.height <= height }
             .maxByOrNull { it.height }?.videoOnly
             ?: options.filter { it.videoOnly != null }.minByOrNull { it.height }?.videoOnly
+}
+
+// The player URIs a quality selection maps to. Pure strings on purpose so the
+// mapping is unit-testable without Android:
+//   auto            -> indio://stream/{id}                (best muxed file)
+//   muxed quality   -> indio://stream/{id}?type=muxed&h=N  (one file)
+//   merged quality  -> indio://merge/{id}?h=N              (video + audio)
+object QualityUris {
+    fun auto(videoId: String): String = "indio://stream/$videoId"
+
+    fun muxed(videoId: String, height: Int): String =
+        "indio://stream/$videoId?type=muxed&h=$height"
+
+    fun merged(videoId: String, height: Int): String =
+        "indio://merge/$videoId?h=$height"
+
+    // Null means the requested height has no playable source at all, in which
+    // case the player must keep what it has instead of switching blindly.
+    fun target(videoId: String, height: Int?, qualities: VideoQualities): String? {
+        if (height == null) return auto(videoId)
+        val option = qualities.nearest(height) ?: return null
+        return when {
+            option.muxed != null -> muxed(videoId, option.height)
+            option.videoOnly != null -> merged(videoId, option.height)
+            else -> null
+        }
+    }
 }
 
 class StreamResolver(private val http: OkHttpClient) {

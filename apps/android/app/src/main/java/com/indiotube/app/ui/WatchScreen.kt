@@ -14,6 +14,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -158,8 +159,15 @@ fun WatchScreen(
     // make sure the tapped video is the one actually playing
     LaunchedEffect(video.videoId) {
         if (player.current.value?.videoId != video.videoId) {
-            val idx = context.indexOfFirst { it.videoId == video.videoId }.coerceAtLeast(0)
-            player.setQueue(context, idx, play = true)
+            val idx = context.indexOfFirst { it.videoId == video.videoId }
+            // If the tapped video isn't in the list (stale "up next" payload),
+            // play it alone instead of falling back to the list's first item,
+            // which would start an unrelated video under this screen.
+            if (idx >= 0) {
+                player.setQueue(context, idx, play = true)
+            } else {
+                player.setQueue(listOf(video), 0, play = true)
+            }
         }
         container.library.noteOpen(video)
     }
@@ -764,7 +772,12 @@ fun WatchScreen(
             downloaded = downloaded,
             onSelect = { height ->
                 val q = qualities
-                if (q != null) player.setQuality(video.videoId, height, q)
+                if (q != null) {
+                    val label = if (height == null) "Auto" else q.labelFor(height) ?: "${height}p"
+                    val same = height == qualityHeight
+                    player.setQuality(video.videoId, height, q)
+                    if (!same) ui.toast("Switching to $label")
+                }
                 qualitySheet = false
             },
             onDismiss = { qualitySheet = false },
@@ -1166,18 +1179,29 @@ private fun QualitySheet(
         containerColor = YtSurface,
         contentColor = YtText,
     ) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 20.dp),
+        ) {
             Text(
                 "Quality",
                 style = MaterialTheme.typography.titleMedium,
                 color = YtText,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp),
+            )
+            Text(
+                "Switching keeps your position — the video resumes right away.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YtMuted,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 8.dp),
             )
             when {
                 downloaded -> {
                     QualityRow(
-                        label = "Original (downloaded)",
-                        subtitle = "Delete the download to stream in another quality",
+                        label = "Downloaded file",
+                        subtitle = "Original quality — delete the download to stream another one",
                         selected = true,
                         enabled = false,
                         onClick = {},
@@ -1185,11 +1209,20 @@ private fun QualitySheet(
                 }
                 qualities == null -> {
                     if (error) {
-                        Text(
-                            "Couldn't load the quality options. Playback stays on Auto.",
-                            color = YtMuted,
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-                        )
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Couldn't load the quality options", color = YtText)
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    "Playback stays on Auto. Reopen this menu to try again.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = YtMuted,
+                                )
+                            }
+                        }
                     } else {
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
@@ -1209,23 +1242,43 @@ private fun QualitySheet(
                     val autoHeight = qualities.auto?.height
                     QualityRow(
                         label = "Auto",
-                        subtitle = if (autoHeight != null) "${autoHeight}p" else null,
+                        subtitle = if (autoHeight != null) {
+                            "Starts fastest (${autoHeight}p) • recommended"
+                        } else {
+                            "Recommended"
+                        },
                         selected = selectedHeight == null,
                         onClick = { onSelect(null) },
                     )
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                            .height(1.dp)
+                            .background(Color(0x1FFFFFFF)),
+                    )
                     qualities.options.forEach { option ->
+                        val badges = buildList {
+                            when {
+                                option.height >= 2160 -> add("4K")
+                                option.height >= 1440 -> add("2K")
+                                option.height >= 720 -> add("HD")
+                            }
+                            if (option.muxed == null && option.videoOnly != null) add("Video + audio")
+                        }
                         QualityRow(
                             label = option.label,
-                            subtitle = when {
-                                option.height >= 2160 -> "4K"
-                                option.height >= 1440 -> "2K"
-                                option.height >= 720 -> "HD"
-                                else -> null
-                            },
+                            subtitle = badges.joinToString(" • ").ifBlank { null },
                             selected = selectedHeight == option.height,
                             onClick = { onSelect(option.height) },
                         )
                     }
+                    Text(
+                        "Higher qualities use more data.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = YtMuted,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    )
                 }
             }
         }
@@ -1243,6 +1296,7 @@ private fun QualityRow(
     Row(
         Modifier
             .fillMaxWidth()
+            .background(if (selected) YtSurfaceHi else Color.Transparent)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1252,6 +1306,7 @@ private fun QualityRow(
                 label,
                 style = MaterialTheme.typography.bodyLarge,
                 color = if (selected) YtBlue else if (enabled) YtText else YtMuted,
+                fontWeight = if (selected) FontWeight.SemiBold else null,
             )
             if (subtitle != null) {
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = YtMuted)

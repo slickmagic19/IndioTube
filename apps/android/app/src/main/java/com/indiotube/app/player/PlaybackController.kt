@@ -2,7 +2,6 @@ package com.indiotube.app.player
 
 import android.content.ComponentName
 import android.content.Context
-import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
@@ -12,6 +11,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.indiotube.app.data.LibraryStore
+import com.indiotube.app.data.QualityUris
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
 import kotlinx.coroutines.CoroutineScope
@@ -72,12 +72,16 @@ class PlaybackController(
         .stateIn(scope, SharingStarted.Eagerly, null)
 
     private var lastErrorShownAt = 0L
-    private var consecutiveErrors = 0
     private var pendingPlay = false
     private var pendingShuffle = false
     private var lastPositionSave = 0L
     private var lastMediaId: String? = null
     private var applyingQuality = false
+
+    // Quality state for the video that is playing: the ladder we last showed
+    // the user, and how many times we stepped down after a failed switch.
+    private var currentQualities: VideoQualities? = null
+    private var qualityFallbackAttempts = 0
 
     init {
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
@@ -120,7 +124,6 @@ class PlaybackController(
         c.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _playing.value = isPlaying
-                if (isPlaying) consecutiveErrors = 0
                 val v = _queue.value.getOrNull(c.currentMediaItemIndex) ?: return
                 store.notePosition(v, c.currentPosition.coerceAtLeast(0))
             }
@@ -140,6 +143,8 @@ class PlaybackController(
                 if (newVideo) {
                     lastMediaId = id
                     if (!applyingQuality) _qualityHeight.value = null
+                    currentQualities = null
+                    qualityFallbackAttempts = 0
                 }
                 if (newVideo && reason != Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                     _queue.value.getOrNull(idx)?.let { store.noteOpen(it) }
@@ -147,17 +152,34 @@ class PlaybackController(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                consecutiveErrors += 1
+                val idx = c.currentMediaItemIndex
+                val video = _queue.value.getOrNull(idx)
+                val qualities = currentQualities
+                val active = _qualityHeight.value
+
+                // A quality that fails on this device must never knock the
+                // user into another video: step down the same video's ladder
+                // (ending on Auto) and keep playing. Only when nothing is
+                // playable is an error surfaced, and even then the current
+                // item stays put instead of auto-skipping elsewhere.
+                if (video != null && qualities != null && active != null &&
+                    qualityFallbackAttempts < qualities.options.size + 1
+                ) {
+                    qualityFallbackAttempts += 1
+                    val lower = qualities.below(active)
+                    _error.value = if (lower != null) {
+                        "That quality wouldn't play — switching to ${lower.label}"
+                    } else {
+                        "That quality wouldn't play — back to Auto"
+                    }
+                    scope.launch { applyQuality(c, idx, video, qualities, lower?.height) }
+                    return
+                }
+
                 val now = System.currentTimeMillis()
                 if (now - lastErrorShownAt > 5000) {
                     lastErrorShownAt = now
                     _error.value = friendlyError(error)
-                }
-                if (consecutiveErrors <= 5 && c.mediaItemCount > 1 && c.currentMediaItemIndex < c.mediaItemCount - 1) {
-                    scope.launch {
-                        delay(1200)
-                        controller?.seekToNextMediaItem()
-                    }
                 }
             }
         })
@@ -184,6 +206,8 @@ class PlaybackController(
         _queue.value = videos
         _index.value = start
         _qualityHeight.value = null
+        currentQualities = null
+        qualityFallbackAttempts = 0
         lastMediaId = null
         val c = controller ?: run {
             pendingPlay = play
@@ -228,17 +252,19 @@ class PlaybackController(
         c.seekTo((c.currentPosition + deltaMs).coerceAtLeast(0))
     }
 
-    // Switch the video that is playing to a specific height (null = Auto),
-    // keeping the position and play/pause state. The replacement media item
-    // carries the quality in its URI, so the source factory creates either a
-    // single muxed source or a video+audio merge on the fly.
+    // Switch the video that is playing to a specific height (null = Auto).
+    // The replacement media item carries the quality in its URI, so the source
+    // factory creates either a single muxed source or a video+audio merge on
+    // the fly. The position is kept and playback always resumes, exactly like
+    // YouTube: it should never strand the user on a paused frame.
     fun setQuality(videoId: String, height: Int?, qualities: VideoQualities) {
-        _qualityHeight.value = height
         val c = controller ?: return
         val idx = c.currentMediaItemIndex
         if (idx < 0) return
         val video = _queue.value.getOrNull(idx) ?: return
         if (video.videoId != videoId) return
+        currentQualities = qualities
+        qualityFallbackAttempts = 0
         applyQuality(c, idx, video, qualities, height)
     }
 
@@ -248,50 +274,44 @@ class PlaybackController(
         video: VideoItem,
         qualities: VideoQualities,
         height: Int?,
+        autoPlay: Boolean = true,
     ) {
+        // Guard against a queue change between the decision and the action:
+        // the item at this index must still be the video we mean to switch.
+        if (_queue.value.getOrNull(idx)?.videoId != video.videoId) return
         val current = c.getMediaItemAt(idx)
-        val currentUri = current.localConfiguration?.uri
-        val currentHeight = currentUri?.getQueryParameter("h")?.toIntOrNull()
+        if (current.mediaId != video.videoId) return
 
-        if (height == null && currentUri?.host == "stream" && currentHeight == null) return
+        val rung = if (height == null) null else qualities.nearest(height) ?: return
+        val target = QualityUris.target(video.videoId, rung?.height, qualities) ?: return
+        val appliedHeight = rung?.height
 
-        val uri: Uri = if (height == null) {
-            Uri.Builder()
-                .scheme("indio")
-                .authority("stream")
-                .appendPath(video.videoId)
-                .build()
-        } else {
-            val option = qualities.nearest(height) ?: return
-            if (currentHeight == option.height) return
-            when {
-                option.muxed != null -> Uri.Builder()
-                    .scheme("indio")
-                    .authority("stream")
-                    .appendPath(video.videoId)
-                    .appendQueryParameter("type", "muxed")
-                    .appendQueryParameter("h", option.height.toString())
-                    .build()
-                option.videoOnly != null -> Uri.Builder()
-                    .scheme("indio")
-                    .authority("merge")
-                    .appendPath(video.videoId)
-                    .appendQueryParameter("h", option.height.toString())
-                    .build()
-                else -> return
+        // Already on the right stream: just make sure it is playing.
+        if (current.localConfiguration?.uri?.toString() == target) {
+            _qualityHeight.value = appliedHeight
+            if (autoPlay) {
+                if (c.playbackState == Player.STATE_IDLE) c.prepare()
+                if (!c.isPlaying) c.play()
             }
+            return
         }
 
-        val wasPlaying = c.playWhenReady
         val position = c.currentPosition.coerceAtLeast(0)
+        store.notePosition(video, position)
+
         applyingQuality = true
         try {
-            c.replaceMediaItem(idx, current.buildUpon().setUri(uri).build())
+            c.replaceMediaItem(idx, current.buildUpon().setUri(target.toUri()).build())
             c.seekTo(idx, position)
-            if (wasPlaying) c.play()
+            // A replaced item can come back idle (and after a decoder/network
+            // error the player is idle too). play() alone would then only flip
+            // playWhenReady and leave the video stuck on a paused frame.
+            if (c.playbackState == Player.STATE_IDLE) c.prepare()
         } finally {
             applyingQuality = false
         }
+        _qualityHeight.value = appliedHeight
+        if (autoPlay) c.play()
     }
 
     fun stop() {
@@ -314,6 +334,8 @@ class PlaybackController(
         _position.value = 0
         _duration.value = 0
         _qualityHeight.value = null
+        currentQualities = null
+        qualityFallbackAttempts = 0
         lastMediaId = null
     }
 
@@ -334,11 +356,11 @@ class PlaybackController(
         return when (e.errorCode) {
             PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
             PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
-            -> "Couldn't fetch this video — skipping."
+            -> "Couldn't fetch this video. Tap play to retry."
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
             -> "No connection to YouTube right now."
-            else -> "This video wouldn't play — skipping."
+            else -> "This video wouldn't play. Tap play to retry."
         }
     }
 }
