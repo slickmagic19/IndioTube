@@ -3,6 +3,7 @@ package com.indiotube.app
 import android.content.Context
 import android.net.Uri
 import android.os.Looper
+import android.text.Layout
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
@@ -28,16 +29,18 @@ import androidx.media3.exoplayer.text.TextRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorsFactory
-import androidx.media3.extractor.text.DefaultSubtitleParserFactory
 import androidx.media3.extractor.text.SubtitleExtractor
 import androidx.media3.test.utils.FakeAudioRenderer
 import androidx.media3.test.utils.FakeDataSet
 import androidx.media3.test.utils.FakeDataSource
 import androidx.media3.test.utils.FakeVideoRenderer
 import androidx.media3.test.utils.TestExoPlayerBuilder
+import androidx.media3.test.utils.robolectric.RobolectricUtil
 import androidx.media3.test.utils.robolectric.TestPlayerRunHelper
 import androidx.test.core.app.ApplicationProvider
+import com.indiotube.app.player.CenteringSubtitleParserFactory
 import com.indiotube.app.player.RebuildOnReplaceMediaSource
+import java.util.concurrent.TimeoutException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -65,7 +68,7 @@ class CaptionPlaybackTest {
 
     private val webvtt: ByteArray = (
         "WEBVTT\n\n" +
-            "00:00:00.000 --> 00:00:04.000\n" +
+            "00:00:00.000 --> 00:00:09.000 align:start position:0%\n" +
             "Hello captions\n"
         ).toByteArray()
 
@@ -97,7 +100,7 @@ class CaptionPlaybackTest {
             .setRoleFlags(C.ROLE_FLAG_CAPTION)
             .setLabel("English")
             .build()
-        val parserFactory = DefaultSubtitleParserFactory()
+        val parserFactory = CenteringSubtitleParserFactory()
         val extractorsFactory = ExtractorsFactory {
             arrayOf<Extractor>(SubtitleExtractor(parserFactory.create(format), format))
         }
@@ -177,6 +180,16 @@ class CaptionPlaybackTest {
                 " opened=$openedUris events=$events)",
             texts.contains("Hello captions"),
         )
+        // The source file is left-aligned (auto-caption style); the app's
+        // parser factory must centre it and let the player own the placement.
+        assertTrue(
+            "cues must be centred regardless of the file's alignment" +
+                " (align=${delivered.map { it.textAlignment }}, pos=${delivered.map { it.position }})",
+            delivered.isNotEmpty() && delivered.all {
+                it.textAlignment == Layout.Alignment.ALIGN_CENTER &&
+                    it.position == Cue.DIMEN_UNSET
+            },
+        )
 
         player.release()
         shadowOf(mainLooper).idle()
@@ -188,16 +201,16 @@ class CaptionPlaybackTest {
     // and render immediately, not only after the next quality change.
     @Test
     fun attachingCaptionsWhilePlayingTakesEffectImmediately() {
-        val delivered = mutableListOf<Cue>()
+        val groups = mutableListOf<List<Cue>>()
         val handler = Clock.DEFAULT.createHandler(mainLooper, null)
         val renderers = arrayOf<Renderer>(
             FakeVideoRenderer(handler, object : VideoRendererEventListener {}),
             FakeAudioRenderer(handler, object : AudioRendererEventListener {}),
-            TextRenderer(TextOutput { group -> delivered += group.cues }, mainLooper),
+            TextRenderer(TextOutput { group -> groups += group.cues.toList() }, mainLooper),
         )
 
         val dataSet = FakeDataSet()
-            .newData(CONTENT_URL).appendReadData(wavBytes()).endData()
+            .newData(CONTENT_URL).appendReadData(wavBytes(seconds = 10)).endData()
             .newData(CAPTION_URL).appendReadData(webvtt).endData()
         val dataSourceFactory = DataSource.Factory {
             RecordingDataSource(FakeDataSource(dataSet), openedUris)
@@ -229,6 +242,14 @@ class CaptionPlaybackTest {
             .setRenderers(*renderers)
             .setMediaSourceFactory(loggingFactory)
             .build()
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onPlayerError(
+                eventTime: AnalyticsListener.EventTime,
+                error: androidx.media3.common.PlaybackException,
+            ) {
+                events += "error:${error.errorCodeName}:${error.message}"
+            }
+        })
 
         player.setMediaItem(MediaItem.fromUri(CONTENT_URL))
         player.prepare()
@@ -262,12 +283,31 @@ class CaptionPlaybackTest {
         if (player.playbackState == Player.STATE_IDLE) player.prepare()
         events += "subsInItemAfterReplace=${player.getMediaItemAt(0).localConfiguration?.subtitleConfigurations?.size ?: -1}"
 
-        listOf(1_000L, 1_500L, 2_000L).forEach { target ->
-            TestPlayerRunHelper.playUntilPosition(player, 0, target)
+        // Pump playback in small steps until the caption shows, the way a
+        // viewer watches it appear; the loader thread needs looper cycles to
+        // hand the parsed cue to the renderer, so a single jump to one
+        // position is racy under the fake clock.
+        var target = position + 250
+        var emittedText: String? = null
+        while (emittedText == null && target <= 9_500L && player.playbackState != Player.STATE_ENDED) {
+            try {
+                TestPlayerRunHelper.playUntilPosition(player, 0, target)
+            } catch (e: Exception) {
+                throw AssertionError(
+                    "playback stalled at $target ms (state=${player.playbackState}," +
+                        " pos=${player.currentPosition}, pwr=${player.playWhenReady}," +
+                        " opened=$openedUris, events=$events)",
+                    e,
+                )
+            }
             shadowOf(mainLooper).idle()
+            emittedText = groups.flatten()
+                .mapNotNull { it.text?.toString() }
+                .firstOrNull { it == "Hello captions" }
+            target += 250
         }
         val textGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
-        val texts = delivered.map { it.text?.toString() }
+        val texts = groups.flatten().map { it.text?.toString() }
         assertTrue(
             "captions attached while playing must show without a quality change" +
                 " (tracks=${player.currentTracks.groups.map { "${it.type}:${it.isTrackSelected(0)}" }}," +
@@ -275,6 +315,45 @@ class CaptionPlaybackTest {
             textGroups.isNotEmpty() &&
                 textGroups.first().isTrackSelected(0) &&
                 texts.contains("Hello captions"),
+        )
+
+        // Turning captions off mirrors setSubtitles(videoId, null): replace the
+        // item with one that carries no subtitle configuration. The text track
+        // must disappear and the renderer must clear the cues on screen.
+        // Playback is paused so the fake clock cannot race the reloaded
+        // source; track removal does not depend on the clock advancing.
+        player.pause()
+        val offPosition = player.currentPosition
+        val withoutCaptions = player.getMediaItemAt(0).buildUpon()
+            .setSubtitleConfigurations(emptyList())
+            .build()
+        player.replaceMediaItem(0, withoutCaptions)
+        player.seekTo(0, offPosition)
+        if (player.playbackState == Player.STATE_IDLE) player.prepare()
+        try {
+            RobolectricUtil.runMainLooperUntil {
+                player.currentTracks.groups.none { it.type == C.TRACK_TYPE_TEXT } &&
+                    groups.isNotEmpty() && groups.last().isEmpty()
+            }
+        } catch (e: TimeoutException) {
+            throw AssertionError(
+                "turning captions off must remove the track and clear the cues" +
+                    " (tracks=${player.currentTracks.groups.map { it.type }}," +
+                    " groups=${groups.map { it.size }} at ${player.currentPosition}ms, events=$events)",
+                e,
+            )
+        }
+        shadowOf(mainLooper).idle()
+        assertTrue(
+            "turning captions off must remove the text track" +
+                " (tracks=${player.currentTracks.groups.map { it.type }}," +
+                " groups=${groups.map { it.size }} at ${player.currentPosition}ms, events=$events)",
+            player.currentTracks.groups.none { it.type == C.TRACK_TYPE_TEXT },
+        )
+        assertTrue(
+            "turning captions off must clear the rendered cues" +
+                " (groups=${groups.map { it.size }} at ${player.currentPosition}ms, events=$events)",
+            groups.isNotEmpty() && groups.last().isEmpty(),
         )
 
         player.release()

@@ -11,7 +11,6 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorsFactory
-import androidx.media3.extractor.text.DefaultSubtitleParserFactory
 import androidx.media3.extractor.text.SubtitleExtractor
 import com.indiotube.app.Container
 
@@ -33,7 +32,7 @@ class IndioMediaSourceFactory(private val container: Container) : MediaSource.Fa
 
     private val dataSourceFactory = IndioTubeDataSource.Factory(container)
     private val base = DefaultMediaSourceFactory(dataSourceFactory)
-    private val subtitleParserFactory = DefaultSubtitleParserFactory()
+    private val subtitleParserFactory = CenteringSubtitleParserFactory()
 
     override fun createMediaSource(mediaItem: MediaItem): MediaSource {
         val subtitleConfigs = mediaItem.localConfiguration?.subtitleConfigurations.orEmpty()

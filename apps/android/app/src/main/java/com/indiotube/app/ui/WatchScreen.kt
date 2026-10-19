@@ -18,6 +18,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -35,6 +36,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -64,6 +66,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -85,11 +88,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -102,6 +107,8 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.indiotube.app.Container
+import com.indiotube.app.data.CaptionPrefs
+import com.indiotube.app.data.CaptionStyleSettings
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
@@ -158,10 +165,12 @@ fun WatchScreen(
     var saveSheet by remember { mutableStateOf(false) }
     var qualitySheet by remember { mutableStateOf(false) }
     var captionsSheet by remember { mutableStateOf(false) }
+    var captionStyleSheet by remember { mutableStateOf(false) }
     var qualities by remember(video.videoId) { mutableStateOf<VideoQualities?>(null) }
     var qualityError by remember(video.videoId) { mutableStateOf(false) }
     val qualityHeight by player.qualityHeight.collectAsState()
     val captionLanguage by container.captions.language.collectAsState()
+    val captionStyle by container.captions.style.collectAsState()
     val subtitle by player.subtitle.collectAsState()
     val playingVideo by player.current.collectAsState()
     val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
@@ -394,28 +403,13 @@ fun WatchScreen(
                         setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                         setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        // YouTube-like captions: white text on a 50% black
-                        // box, no outline, a touch smaller, and lifted well
-                        // clear of the bottom edge.
-                        subtitleView?.apply {
-                            setStyle(
-                                CaptionStyleCompat(
-                                    android.graphics.Color.WHITE,
-                                    android.graphics.Color.argb(128, 0, 0, 0),
-                                    android.graphics.Color.TRANSPARENT,
-                                    CaptionStyleCompat.EDGE_TYPE_NONE,
-                                    android.graphics.Color.TRANSPARENT,
-                                    Typeface.create("sans-serif", Typeface.NORMAL),
-                                ),
-                            )
-                            setApplyEmbeddedStyles(false)
-                            setApplyEmbeddedFontSizes(false)
-                            setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                            setBottomPaddingFraction(0.15f)
-                        }
+                        applyCaptionStyle(this, captionStyle)
                     }
                 },
-                update = { view -> if (connected) view.player = player.mediaController },
+                update = { view ->
+                    applyCaptionStyle(view, captionStyle)
+                    if (connected) view.player = player.mediaController
+                },
                 onRelease = { view -> view.player = null },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -845,7 +839,19 @@ fun WatchScreen(
                 }
                 captionsSheet = false
             },
+            onStyle = {
+                captionsSheet = false
+                captionStyleSheet = true
+            },
             onDismiss = { captionsSheet = false },
+        )
+    }
+
+    if (captionStyleSheet) {
+        CaptionStyleSheet(
+            prefs = container.captions,
+            style = captionStyle,
+            onDismiss = { captionStyleSheet = false },
         )
     }
 }
@@ -1387,6 +1393,7 @@ private fun CaptionsSheet(
     error: Boolean,
     selected: SubtitleTrack?,
     onSelect: (SubtitleTrack?) -> Unit,
+    onStyle: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState()
@@ -1471,7 +1478,266 @@ private fun CaptionsSheet(
                     }
                 }
             }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 4.dp)
+                    .height(1.dp)
+                    .background(Color(0x1FFFFFFF)),
+            )
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onStyle)
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = null,
+                    tint = YtText,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(14.dp))
+                Text(
+                    "Caption settings",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = YtText,
+                )
+            }
         }
+    }
+}
+
+// YouTube-style caption customization: live preview, size, text colour,
+// background opacity, edge style and font. Every change is applied to the
+// player immediately (the style is observed by WatchScreen) and persisted.
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CaptionStyleSheet(
+    prefs: CaptionPrefs,
+    style: CaptionStyleSettings,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState()
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = YtSurface,
+        contentColor = YtText,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 24.dp),
+        ) {
+            Text(
+                "Caption settings",
+                style = MaterialTheme.typography.titleMedium,
+                color = YtText,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp),
+            )
+            Text(
+                "Applies to every video, including auto-generated captions.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YtMuted,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp),
+            )
+
+            // Live preview with the exact colours and size in use.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 16.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF161616))
+                    .height(96.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Captions preview",
+                    color = Color(style.textColor),
+                    fontSize = style.textSizeSp.sp,
+                    fontFamily = captionFontFamily(style.fontFamily),
+                    modifier = Modifier
+                        .background(Color(style.backgroundColor))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+
+            CaptionSettingLabel("Text size")
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Slider(
+                    value = style.textSizeSp,
+                    onValueChange = { prefs.setTextSize(it) },
+                    valueRange = 10f..24f,
+                    steps = 13,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    "${style.textSizeSp.toInt()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtMuted,
+                )
+            }
+
+            CaptionSettingLabel("Text colour")
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                CAPTION_TEXT_COLORS.forEach { (color, name) ->
+                    val selected = style.textColor == color
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(Color(color))
+                            .border(
+                                width = if (selected) 3.dp else 1.dp,
+                                color = if (selected) Color.White else Color(0x33FFFFFF),
+                                shape = CircleShape,
+                            )
+                            .clickable { prefs.setTextColor(color) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (selected) {
+                            Icon(
+                                Icons.Filled.Check,
+                                contentDescription = name,
+                                tint = if (Color(color).luminance() > 0.5f) Color.Black else Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            CaptionSettingLabel("Background opacity — ${style.backgroundOpacity}%")
+            Slider(
+                value = style.backgroundOpacity.toFloat(),
+                onValueChange = { prefs.setBackgroundOpacity(it.toInt()) },
+                valueRange = 0f..100f,
+                steps = 9,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
+
+            CaptionSettingLabel("Edge style")
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CAPTION_EDGE_OPTIONS.forEach { (value, label) ->
+                    CaptionOptionPill(
+                        label = label,
+                        selected = style.edgeStyle == value,
+                        onClick = { prefs.setEdgeStyle(value) },
+                    )
+                }
+            }
+
+            CaptionSettingLabel("Font")
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CAPTION_FONT_OPTIONS.forEach { (value, label) ->
+                    CaptionOptionPill(
+                        label = label,
+                        selected = style.fontFamily == value,
+                        onClick = { prefs.setFontFamily(value) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaptionSettingLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelLarge,
+        color = YtText,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 6.dp),
+    )
+}
+
+@Composable
+private fun CaptionOptionPill(label: String, selected: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        style = MaterialTheme.typography.labelLarge,
+        color = if (selected) Color.Black else YtText,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) Color.White else Color(0x1FFFFFFF))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+private fun captionFontFamily(name: String) = when (name) {
+    "serif" -> FontFamily.Serif
+    "monospace" -> FontFamily.Monospace
+    else -> FontFamily.SansSerif
+}
+
+private val CAPTION_TEXT_COLORS = listOf(
+    0xFFFFFFFF.toInt() to "White",
+    0xFFFFFF00.toInt() to "Yellow",
+    0xFF00FF00.toInt() to "Green",
+    0xFF00FFFF.toInt() to "Cyan",
+    0xFFFF00FF.toInt() to "Magenta",
+    0xFFFF0000.toInt() to "Red",
+    0xFF000000.toInt() to "Black",
+)
+
+private val CAPTION_EDGE_OPTIONS = listOf(
+    CaptionStyleSettings.EDGE_NONE to "None",
+    CaptionStyleSettings.EDGE_OUTLINE to "Outline",
+    CaptionStyleSettings.EDGE_SHADOW to "Shadow",
+)
+
+private val CAPTION_FONT_OPTIONS = listOf(
+    "sans-serif" to "Sans",
+    "serif" to "Serif",
+    "monospace" to "Mono",
+)
+
+// Applies the user's caption look to a PlayerView. Embedded styles stay off so
+// auto-generated captions cannot override the chosen appearance, and the
+// bottom padding lifts captions clear of the player controls.
+private fun applyCaptionStyle(
+    view: PlayerView,
+    style: CaptionStyleSettings,
+) {
+    view.subtitleView?.apply {
+        setStyle(
+            CaptionStyleCompat(
+                style.textColor,
+                style.backgroundColor,
+                android.graphics.Color.TRANSPARENT,
+                when (style.edgeStyle) {
+                    CaptionStyleSettings.EDGE_OUTLINE ->
+                        CaptionStyleCompat.EDGE_TYPE_OUTLINE
+                    CaptionStyleSettings.EDGE_SHADOW ->
+                        CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW
+                    else -> CaptionStyleCompat.EDGE_TYPE_NONE
+                },
+                android.graphics.Color.BLACK,
+                Typeface.create(style.fontFamily, Typeface.NORMAL),
+            ),
+        )
+        setApplyEmbeddedStyles(false)
+        setApplyEmbeddedFontSizes(false)
+        setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, style.textSizeSp)
+        setBottomPaddingFraction(0.16f)
     }
 }
 
