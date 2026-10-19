@@ -2,6 +2,7 @@ package com.indiotube.app.player
 
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.media3.common.C
@@ -9,6 +10,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.indiotube.app.data.LibraryStore
@@ -169,13 +171,23 @@ class PlaybackController(
                 val qualities = currentQualities
                 val active = _qualityHeight.value
 
-                // Captions are the most likely culprit for a sudden load
-                // failure right after one was attached. Turn them off and
-                // retry the same stream once, so a stale caption URL can
-                // never stop a playable video.
-                if (video != null && _subtitle.value != null && !captionRetryAttempted) {
+                // A caption track that fails to load (stale URL, 403, offline)
+                // must not stop a playable video, but a video/CDN failure must
+                // not silently kill captions either. Only drop them when the
+                // failing request is the caption URL itself, then retry the
+                // same stream once without them.
+                val subtitle = _subtitle.value
+                val failedUri = errorFailingUri(error)
+                if (video != null && subtitle != null && failedUri != null &&
+                    failedUri.toString() == subtitle.url && !captionRetryAttempted
+                ) {
                     captionRetryAttempted = true
-                    _error.value = "Captions unavailable — playing without them"
+                    val code = errorHttpStatusCode(error)
+                    _error.value = if (code != null) {
+                        "Captions unavailable ($code) — playing without them"
+                    } else {
+                        "Captions unavailable — playing without them"
+                    }
                     setSubtitles(video.videoId, null)
                     return
                 }
@@ -221,6 +233,28 @@ class PlaybackController(
 
     fun clearError() {
         _error.value = null
+    }
+
+    // The URI whose request failed, walking the cause chain of a playback
+    // error down to the http data source exception that carries the data spec.
+    private fun errorFailingUri(error: Throwable): Uri? {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is HttpDataSource.HttpDataSourceException) return cause.dataSpec.uri
+            cause = cause.cause
+        }
+        return null
+    }
+
+    // HTTP status of the failed request when the cause chain has one, so the
+    // user sees "Captions unavailable (403)" instead of a generic message.
+    private fun errorHttpStatusCode(error: Throwable): Int? {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is HttpDataSource.InvalidResponseCodeException) return cause.responseCode
+            cause = cause.cause
+        }
+        return null
     }
 
     fun setQueue(videos: List<VideoItem>, startIndex: Int, play: Boolean, shuffleOn: Boolean = false) {

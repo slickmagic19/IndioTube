@@ -115,10 +115,8 @@ class IndioMediaSourceFactory(private val container: Container) : MediaSource.Fa
         val extractorsFactory = ExtractorsFactory {
             arrayOf<Extractor>(SubtitleExtractor(subtitleParserFactory.create(format), format))
         }
-        return runCatching {
-            ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory)
-                .createMediaSource(MediaItem.fromUri(config.uri))
-        }.getOrNull()
+        return ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory)
+            .createMediaSource(MediaItem.fromUri(config.uri))
     }
 
     override fun getSupportedTypes(): IntArray = base.supportedTypes

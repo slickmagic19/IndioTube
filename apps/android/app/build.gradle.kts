@@ -13,8 +13,8 @@ android {
         applicationId = "com.indiotube.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 104
-        versionName = "0.1.4"
+        versionCode = 105
+        versionName = "0.1.5"
     }
 
     // The keystore and its passwords are never committed. Provide them in
@@ -91,4 +91,5 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.13")
     testImplementation("androidx.media3:media3-test-utils:1.4.1")
+    testImplementation("androidx.media3:media3-test-utils-robolectric:1.4.1")
 }
