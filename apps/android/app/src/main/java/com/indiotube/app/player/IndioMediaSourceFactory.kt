@@ -1,11 +1,13 @@
 package com.indiotube.app.player
 
 import android.net.Uri
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import com.indiotube.app.Container
 
@@ -17,7 +19,9 @@ import com.indiotube.app.Container
 // copy is always muxed), so no double audio and no network use.
 class IndioMediaSourceFactory(private val container: Container) : MediaSource.Factory {
 
-    private val base = DefaultMediaSourceFactory(IndioTubeDataSource.Factory(container))
+    private val dataSourceFactory = IndioTubeDataSource.Factory(container)
+    private val base = DefaultMediaSourceFactory(dataSourceFactory)
+    private val singleSample = SingleSampleMediaSource.Factory(dataSourceFactory)
 
     override fun createMediaSource(mediaItem: MediaItem): MediaSource {
         val uri = mediaItem.localConfiguration?.uri
@@ -35,8 +39,15 @@ class IndioMediaSourceFactory(private val container: Container) : MediaSource.Fa
         }
 
         val height = uri?.getQueryParameter("h") ?: return base.createMediaSource(mediaItem)
+        // Captions belong to the merged item as a whole, so they must not be
+        // attached to the video and audio children (four subtitle sources for
+        // one track would fight over the text renderer). Keep them aside, give
+        // the children caption-free copies, then merge them back in.
+        val subtitleConfigs = mediaItem.localConfiguration?.subtitleConfigurations.orEmpty()
+        val bare = mediaItem.buildUpon().setSubtitleConfigurations(emptyList()).build()
+
         val video = base.createMediaSource(
-            mediaItem.buildUpon()
+            bare.buildUpon()
                 .setUri(
                     Uri.Builder()
                         .scheme("indio")
@@ -49,7 +60,7 @@ class IndioMediaSourceFactory(private val container: Container) : MediaSource.Fa
                 .build(),
         )
         val audio = base.createMediaSource(
-            mediaItem.buildUpon()
+            bare.buildUpon()
                 .setUri(
                     Uri.Builder()
                         .scheme("indio")
@@ -60,7 +71,14 @@ class IndioMediaSourceFactory(private val container: Container) : MediaSource.Fa
                 )
                 .build(),
         )
-        return MergingMediaSource(video, audio)
+        val subtitles = subtitleConfigs.mapNotNull { config ->
+            runCatching { singleSample.createMediaSource(config, C.TIME_UNSET) }.getOrNull()
+        }
+        return if (subtitles.isEmpty()) {
+            MergingMediaSource(video, audio)
+        } else {
+            MergingMediaSource(video, audio, *subtitles.toTypedArray())
+        }
     }
 
     override fun getSupportedTypes(): IntArray = base.supportedTypes

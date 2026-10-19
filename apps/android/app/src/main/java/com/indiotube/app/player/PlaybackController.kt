@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -12,6 +13,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.indiotube.app.data.LibraryStore
 import com.indiotube.app.data.QualityUris
+import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
 import kotlinx.coroutines.CoroutineScope
@@ -68,6 +70,10 @@ class PlaybackController(
     private val _qualityHeight = MutableStateFlow<Int?>(null)
     val qualityHeight: StateFlow<Int?> = _qualityHeight.asStateFlow()
 
+    // The caption track currently attached to the playing video (null = off).
+    private val _subtitle = MutableStateFlow<SubtitleTrack?>(null)
+    val subtitle: StateFlow<SubtitleTrack?> = _subtitle.asStateFlow()
+
     val current: StateFlow<VideoItem?> = combine(_queue, _index) { q, i -> q.getOrNull(i) }
         .stateIn(scope, SharingStarted.Eagerly, null)
 
@@ -76,12 +82,16 @@ class PlaybackController(
     private var pendingShuffle = false
     private var lastPositionSave = 0L
     private var lastMediaId: String? = null
-    private var applyingQuality = false
+    private var replacingItem = false
 
     // Quality state for the video that is playing: the ladder we last showed
     // the user, and how many times we stepped down after a failed switch.
     private var currentQualities: VideoQualities? = null
     private var qualityFallbackAttempts = 0
+
+    // If a caption file fails to load it must not take the video down with
+    // it: drop captions and retry the stream once before touching quality.
+    private var captionRetryAttempted = false
 
     init {
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
@@ -142,9 +152,11 @@ class PlaybackController(
                 val newVideo = id != null && id != lastMediaId
                 if (newVideo) {
                     lastMediaId = id
-                    if (!applyingQuality) _qualityHeight.value = null
+                    if (!replacingItem) _qualityHeight.value = null
                     currentQualities = null
                     qualityFallbackAttempts = 0
+                    _subtitle.value = null
+                    captionRetryAttempted = false
                 }
                 if (newVideo && reason != Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                     _queue.value.getOrNull(idx)?.let { store.noteOpen(it) }
@@ -156,6 +168,17 @@ class PlaybackController(
                 val video = _queue.value.getOrNull(idx)
                 val qualities = currentQualities
                 val active = _qualityHeight.value
+
+                // Captions are the most likely culprit for a sudden load
+                // failure right after one was attached. Turn them off and
+                // retry the same stream once, so a stale caption URL can
+                // never stop a playable video.
+                if (video != null && _subtitle.value != null && !captionRetryAttempted) {
+                    captionRetryAttempted = true
+                    _error.value = "Captions unavailable — playing without them"
+                    setSubtitles(video.videoId, null)
+                    return
+                }
 
                 // A quality that fails on this device must never knock the
                 // user into another video: step down the same video's ladder
@@ -209,6 +232,8 @@ class PlaybackController(
         currentQualities = null
         qualityFallbackAttempts = 0
         lastMediaId = null
+        _subtitle.value = null
+        captionRetryAttempted = false
         val c = controller ?: run {
             pendingPlay = play
             pendingShuffle = shuffleOn
@@ -299,7 +324,7 @@ class PlaybackController(
         val position = c.currentPosition.coerceAtLeast(0)
         store.notePosition(video, position)
 
-        applyingQuality = true
+        replacingItem = true
         try {
             c.replaceMediaItem(idx, current.buildUpon().setUri(target.toUri()).build())
             c.seekTo(idx, position)
@@ -308,10 +333,63 @@ class PlaybackController(
             // playWhenReady and leave the video stuck on a paused frame.
             if (c.playbackState == Player.STATE_IDLE) c.prepare()
         } finally {
-            applyingQuality = false
+            replacingItem = false
         }
         _qualityHeight.value = appliedHeight
         if (autoPlay) c.play()
+    }
+
+    // Attach (or remove) a caption track on the video that is playing. The
+    // whole item is rebuilt from the current one, so the chosen quality URI is
+    // preserved, and the position is kept. Replacing an item while playing can
+    // leave the player idle, so it is prepared again when needed.
+    fun setSubtitles(videoId: String, track: SubtitleTrack?) {
+        val c = controller ?: return
+        val idx = c.currentMediaItemIndex
+        if (idx < 0) return
+        val video = _queue.value.getOrNull(idx) ?: return
+        if (video.videoId != videoId) return
+        val current = c.getMediaItemAt(idx)
+        if (current.mediaId != videoId) return
+
+        val existing = current.localConfiguration?.subtitleConfigurations.orEmpty()
+        val alreadyAttached = if (track == null) {
+            existing.isEmpty()
+        } else {
+            existing.size == 1 &&
+                existing[0].language == track.languageTag &&
+                existing[0].uri.toString() == track.url
+        }
+        _subtitle.value = track
+        if (track != null) captionRetryAttempted = false
+        if (alreadyAttached) return
+
+        val configs = if (track == null) {
+            emptyList()
+        } else {
+            listOf(
+                MediaItem.SubtitleConfiguration.Builder(track.url.toUri())
+                    .setMimeType(track.mime)
+                    .setLanguage(track.languageTag)
+                    .setLabel(track.label)
+                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                    .setRoleFlags(C.ROLE_FLAG_CAPTION)
+                    .build(),
+            )
+        }
+
+        val wasPlaying = c.playWhenReady
+        val position = c.currentPosition.coerceAtLeast(0)
+        store.notePosition(video, position)
+        replacingItem = true
+        try {
+            c.replaceMediaItem(idx, current.buildUpon().setSubtitleConfigurations(configs).build())
+            c.seekTo(idx, position)
+            if (c.playbackState == Player.STATE_IDLE) c.prepare()
+        } finally {
+            replacingItem = false
+        }
+        if (wasPlaying) c.play()
     }
 
     fun stop() {
@@ -337,6 +415,8 @@ class PlaybackController(
         currentQualities = null
         qualityFallbackAttempts = 0
         lastMediaId = null
+        _subtitle.value = null
+        captionRetryAttempted = false
     }
 
     private fun toMediaItem(v: VideoItem): MediaItem {

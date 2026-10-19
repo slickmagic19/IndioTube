@@ -4,11 +4,14 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Typeface
+import android.util.TypedValue
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -95,14 +98,17 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.indiotube.app.Container
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
+import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
+import com.indiotube.app.data.forLanguage
 import com.indiotube.app.data.formatDuration
 import com.indiotube.app.player.PlaybackController
 import kotlinx.coroutines.Dispatchers
@@ -151,9 +157,14 @@ fun WatchScreen(
     var descExpanded by remember(video.videoId) { mutableStateOf(false) }
     var saveSheet by remember { mutableStateOf(false) }
     var qualitySheet by remember { mutableStateOf(false) }
+    var captionsSheet by remember { mutableStateOf(false) }
     var qualities by remember(video.videoId) { mutableStateOf<VideoQualities?>(null) }
     var qualityError by remember(video.videoId) { mutableStateOf(false) }
     val qualityHeight by player.qualityHeight.collectAsState()
+    val captionLanguage by container.captions.language.collectAsState()
+    val subtitle by player.subtitle.collectAsState()
+    val playingVideo by player.current.collectAsState()
+    val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
     var resumed by remember(video.videoId) { mutableStateOf(false) }
 
     // make sure the tapped video is the one actually playing
@@ -215,6 +226,16 @@ fun WatchScreen(
         }.getOrNull()
         qualities = loaded
         qualityError = loaded == null
+    }
+
+    // Re-apply the remembered caption language once this video's tracks load,
+    // so captions stay on across videos like the real app. Turning captions
+    // off clears the preference, which also makes this a no-op.
+    LaunchedEffect(video.videoId, playingVideo?.videoId, qualities, captionLanguage) {
+        if (playingVideo?.videoId != video.videoId) return@LaunchedEffect
+        val remembered = captionLanguage ?: return@LaunchedEffect
+        val track = qualities?.subtitles?.forLanguage(remembered) ?: return@LaunchedEffect
+        if (subtitle?.url != track.url) player.setSubtitles(video.videoId, track)
     }
 
     // pick up where the user left off
@@ -373,6 +394,24 @@ fun WatchScreen(
                         setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                         setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        // YouTube-like captions: bold white text with a black
+                        // outline, slightly above the bottom edge.
+                        subtitleView?.apply {
+                            setStyle(
+                                CaptionStyleCompat(
+                                    android.graphics.Color.WHITE,
+                                    android.graphics.Color.TRANSPARENT,
+                                    android.graphics.Color.TRANSPARENT,
+                                    CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                                    android.graphics.Color.BLACK,
+                                    Typeface.create("sans-serif-medium", Typeface.NORMAL),
+                                ),
+                            )
+                            setApplyEmbeddedStyles(false)
+                            setApplyEmbeddedFontSizes(false)
+                            setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                            setBottomPaddingFraction(0.10f)
+                        }
                     }
                 },
                 update = { view -> if (connected) view.player = player.mediaController },
@@ -476,7 +515,10 @@ fun WatchScreen(
                 positionText = formatDuration(posShown / 1000),
                 durationText = formatDuration(duration / 1000),
                 qualityLabel = qualityLabel,
+                captionsAvailable = captionsAvailable,
+                captionsOn = subtitle != null,
                 onQuality = { qualitySheet = true },
+                onCaptions = { captionsSheet = true },
                 onBack = { ui.back() },
                 onTogglePlay = { player.togglePlayPause() },
                 onSeekBy = { player.seekBy(it) },
@@ -783,6 +825,28 @@ fun WatchScreen(
             onDismiss = { qualitySheet = false },
         )
     }
+
+    if (captionsSheet) {
+        CaptionsSheet(
+            subtitles = qualities?.subtitles.orEmpty(),
+            loading = qualities == null && !qualityError,
+            error = qualityError,
+            selected = subtitle,
+            onSelect = { track ->
+                if (track == null) {
+                    player.setSubtitles(video.videoId, null)
+                    container.captions.setLanguage(null)
+                    ui.toast("Captions off")
+                } else {
+                    player.setSubtitles(video.videoId, track)
+                    container.captions.setLanguage(track.languageTag)
+                    ui.toast("Captions: ${track.label}")
+                }
+                captionsSheet = false
+            },
+            onDismiss = { captionsSheet = false },
+        )
+    }
 }
 
 @Composable
@@ -798,7 +862,10 @@ private fun PlayerChrome(
     positionText: String,
     durationText: String,
     qualityLabel: String,
+    captionsAvailable: Boolean,
+    captionsOn: Boolean,
     onQuality: () -> Unit,
+    onCaptions: () -> Unit,
     onBack: () -> Unit,
     onTogglePlay: () -> Unit,
     onSeekBy: (Long) -> Unit,
@@ -909,6 +976,32 @@ private fun PlayerChrome(
                     if (queueSize > 1) {
                         IconButton(onClick = onNext, modifier = Modifier.size(40.dp)) {
                             Icon(Icons.Filled.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(26.dp))
+                        }
+                    }
+                    // CC chip: outlined when off, filled white when on, just
+                    // like YouTube's player button.
+                    if (captionsAvailable) {
+                        Box(
+                            Modifier
+                                .size(40.dp)
+                                .clickable(onClick = onCaptions),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(if (captionsOn) Color.White else Color.Transparent)
+                                    .border(1.2.dp, Color.White, RoundedCornerShape(3.dp))
+                                    .padding(horizontal = 3.dp, vertical = 1.dp),
+                            ) {
+                                Text(
+                                    "CC",
+                                    color = if (captionsOn) Color.Black else Color.White,
+                                    fontSize = 9.sp,
+                                    lineHeight = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
                         }
                     }
                     Text(qualityLabel, color = Color.White, fontSize = 11.sp)
@@ -1199,7 +1292,7 @@ private fun QualitySheet(
             )
             when {
                 downloaded -> {
-                    QualityRow(
+                    ChoiceRow(
                         label = "Downloaded file",
                         subtitle = "Original quality — delete the download to stream another one",
                         selected = true,
@@ -1240,7 +1333,7 @@ private fun QualitySheet(
                 }
                 else -> {
                     val autoHeight = qualities.auto?.height
-                    QualityRow(
+                    ChoiceRow(
                         label = "Auto",
                         subtitle = if (autoHeight != null) {
                             "Starts fastest (${autoHeight}p) • recommended"
@@ -1266,7 +1359,7 @@ private fun QualitySheet(
                             }
                             if (option.muxed == null && option.videoOnly != null) add("Video + audio")
                         }
-                        QualityRow(
+                        ChoiceRow(
                             label = option.label,
                             subtitle = badges.joinToString(" • ").ifBlank { null },
                             selected = selectedHeight == option.height,
@@ -1285,8 +1378,104 @@ private fun QualitySheet(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun QualityRow(
+private fun CaptionsSheet(
+    subtitles: List<SubtitleTrack>,
+    loading: Boolean,
+    error: Boolean,
+    selected: SubtitleTrack?,
+    onSelect: (SubtitleTrack?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState()
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = YtSurface,
+        contentColor = YtText,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 20.dp),
+        ) {
+            Text(
+                "Captions",
+                style = MaterialTheme.typography.titleMedium,
+                color = YtText,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp),
+            )
+            Text(
+                "The language stays on for the next videos too.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YtMuted,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 8.dp),
+            )
+            ChoiceRow(
+                label = "Off",
+                subtitle = null,
+                selected = selected == null,
+                onClick = { onSelect(null) },
+            )
+            when {
+                error -> Text(
+                    "Couldn't load captions for this video.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtMuted,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+                loading -> Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        color = YtMuted,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text("Checking available captions…", color = YtMuted)
+                }
+                subtitles.isEmpty() -> Text(
+                    "No captions available for this video.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtMuted,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+                else -> {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                            .height(1.dp)
+                            .background(Color(0x1FFFFFFF)),
+                    )
+                    subtitles.forEach { track ->
+                        ChoiceRow(
+                            label = track.label,
+                            subtitle = null,
+                            selected = selected != null && selected.languageTag == track.languageTag,
+                            onClick = { onSelect(track) },
+                        )
+                    }
+                    if (subtitles.any { it.autoGenerated }) {
+                        Text(
+                            "Auto-generated captions may be inaccurate.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = YtMuted,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChoiceRow(
     label: String,
     subtitle: String?,
     selected: Boolean,
