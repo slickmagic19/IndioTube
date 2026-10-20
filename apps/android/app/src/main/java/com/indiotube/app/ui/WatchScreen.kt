@@ -156,6 +156,15 @@ fun WatchScreen(
     var loadingComments by remember { mutableStateOf(false) }
     var loadingMoreComments by remember { mutableStateOf(false) }
 
+    // Loaded reply threads, keyed by the parent comment id.
+    var replyStates by remember(video.videoId) {
+        mutableStateOf<Map<String, CommentRepliesState>>(emptyMap())
+    }
+
+    // Kept so turning captions off can clear the rendered cues immediately,
+    // even before the player finishes rebuilding the item without them.
+    var playerView by remember { mutableStateOf<PlayerView?>(null) }
+
     var controlsVisible by remember { mutableStateOf(true) }
     var fullscreen by remember { mutableStateOf(false) }
     var scrub by remember { mutableStateOf<Float?>(null) }
@@ -226,6 +235,60 @@ fun WatchScreen(
                 loadingComments = false
             }
         } catch (_: Exception) { /* player still works without metadata */ }
+    }
+
+    // Reply threads are loaded per parent comment, the first time the user
+    // expands them, then cached in this map. Replies arrive from the same
+    // continuation endpoint as the top-level comments.
+    fun toggleReplies(comment: CommentItem) {
+        val token = comment.repliesToken ?: return
+        val current = replyStates[comment.id]
+        if (current?.expanded == true) {
+            replyStates = replyStates + (comment.id to current.copy(expanded = false))
+            return
+        }
+        if (current != null && (current.loading || current.replies.isNotEmpty())) {
+            replyStates = replyStates + (comment.id to current.copy(expanded = true))
+            return
+        }
+        replyStates = replyStates + (comment.id to CommentRepliesState(expanded = true, loading = true))
+        scope.launch {
+            try {
+                val page = container.innerTube.comments(token)
+                replyStates = replyStates + (
+                    comment.id to CommentRepliesState(
+                        expanded = true,
+                        replies = page.comments,
+                        continuation = page.continuation,
+                    )
+                    )
+            } catch (_: Exception) {
+                replyStates = replyStates + (comment.id to CommentRepliesState(expanded = true, error = true))
+            }
+        }
+    }
+
+    fun loadMoreReplies(comment: CommentItem) {
+        val current = replyStates[comment.id] ?: return
+        val token = current.continuation ?: return
+        if (current.loading) return
+        replyStates = replyStates + (comment.id to current.copy(loading = true))
+        scope.launch {
+            try {
+                val page = container.innerTube.comments(token)
+                val latest = replyStates[comment.id] ?: current
+                replyStates = replyStates + (
+                    comment.id to latest.copy(
+                        loading = false,
+                        error = false,
+                        replies = (latest.replies + page.comments).distinctBy { it.id },
+                        continuation = page.continuation,
+                    )
+                    )
+            } catch (_: Exception) {
+                replyStates = replyStates + (comment.id to current.copy(loading = false, error = true))
+            }
+        }
     }
 
     // Available quality ladder (muxed + video-only heights). Loaded in the
@@ -407,13 +470,17 @@ fun WatchScreen(
                         setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         applyCaptionStyle(this, captionStyle)
+                        playerView = this
                     }
                 },
                 update = { view ->
                     applyCaptionStyle(view, captionStyle)
                     if (connected) view.player = player.mediaController
                 },
-                onRelease = { view -> view.player = null },
+                onRelease = { view ->
+                    view.player = null
+                    if (playerView === view) playerView = null
+                },
                 modifier = Modifier.fillMaxSize(),
             )
 
@@ -749,7 +816,21 @@ fun WatchScreen(
                     item { LoadingBox(Modifier.height(80.dp)) }
                 }
                 items(comments, key = { it.id }) { c ->
-                    CommentRow(c)
+                    val replies = replyStates[c.id]
+                    CommentRow(
+                        c = c,
+                        replies = replies,
+                        onToggleReplies = if (c.repliesToken != null) {
+                            { toggleReplies(c) }
+                        } else {
+                            null
+                        },
+                        onLoadMoreReplies = if (replies?.continuation != null) {
+                            { loadMoreReplies(c) }
+                        } else {
+                            null
+                        },
+                    )
                 }
                 if (commentsToken != null) {
                     item {
@@ -832,6 +913,7 @@ fun WatchScreen(
             selected = subtitle,
             onSelect = { track ->
                 if (track == null) {
+                    playerView?.subtitleView?.setCues(null)
                     player.setSubtitles(video.videoId, null)
                     container.captions.setLanguage(null)
                     ui.toast("Captions off")
@@ -1112,31 +1194,125 @@ private fun YtSeekBar(
     )
 }
 
+private data class CommentRepliesState(
+    val expanded: Boolean = false,
+    val loading: Boolean = false,
+    val replies: List<CommentItem> = emptyList(),
+    val continuation: String? = null,
+    val error: Boolean = false,
+)
+
 @Composable
-private fun CommentRow(c: CommentItem) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-        ChannelAvatar(c.author, c.avatar, 32.dp)
-        Spacer(Modifier.width(12.dp))
+private fun CommentRow(
+    c: CommentItem,
+    replies: CommentRepliesState? = null,
+    onToggleReplies: (() -> Unit)? = null,
+    onLoadMoreReplies: (() -> Unit)? = null,
+    nested: Boolean = false,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(
+                start = if (nested) 6.dp else 12.dp,
+                end = 12.dp,
+                top = if (nested) 5.dp else 8.dp,
+                bottom = if (nested) 3.dp else 8.dp,
+            ),
+    ) {
+        ChannelAvatar(c.author, c.avatar, if (nested) 24.dp else 32.dp)
+        Spacer(Modifier.width(if (nested) 9.dp else 12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(c.author, fontSize = 12.sp, color = YtMuted, maxLines = 1)
+                Text(
+                    c.author,
+                    fontSize = if (nested) 11.5.sp else 12.sp,
+                    color = YtMuted,
+                    maxLines = 1,
+                )
                 if (!c.publishedText.isNullOrBlank()) {
                     Spacer(Modifier.width(6.dp))
-                    Text(c.publishedText, fontSize = 11.sp, color = YtMuted, maxLines = 1)
+                    Text(
+                        c.publishedText,
+                        fontSize = if (nested) 10.5.sp else 11.sp,
+                        color = YtMuted,
+                        maxLines = 1,
+                    )
                 }
             }
             Spacer(Modifier.height(3.dp))
-            Text(c.text, style = MaterialTheme.typography.bodyMedium, color = YtText, lineHeight = 19.sp)
+            Text(
+                c.text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = YtText,
+                lineHeight = if (nested) 17.sp else 19.sp,
+            )
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.ThumbUp, null, tint = YtMuted, modifier = Modifier.size(15.dp))
+                Icon(
+                    Icons.Outlined.ThumbUp,
+                    null,
+                    tint = YtMuted,
+                    modifier = Modifier.size(if (nested) 13.dp else 15.dp),
+                )
                 if (!c.likesText.isNullOrBlank() && c.likesText != "0") {
                     Spacer(Modifier.width(5.dp))
                     Text(c.likesText, fontSize = 11.5.sp, color = YtMuted)
                 }
-                if (!c.replyCountText.isNullOrBlank()) {
+                if (!c.replyCountText.isNullOrBlank() || onToggleReplies != null) {
                     Spacer(Modifier.width(14.dp))
-                    Text(c.replyCountText, fontSize = 11.5.sp, color = YtMuted)
+                    val label = when {
+                        replies?.expanded == true -> "Hide replies"
+                        !c.replyCountText.isNullOrBlank() -> c.replyCountText
+                        else -> "View replies"
+                    }
+                    Text(
+                        label,
+                        fontSize = 11.5.sp,
+                        color = YtMuted,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable(enabled = onToggleReplies != null) { onToggleReplies?.invoke() }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                }
+            }
+            if (replies != null && replies.expanded) {
+                Spacer(Modifier.height(4.dp))
+                when {
+                    replies.loading && replies.replies.isEmpty() ->
+                        LoadingBox(Modifier.height(36.dp))
+                    replies.error && replies.replies.isEmpty() ->
+                        Text(
+                            "Couldn't load replies — tap to retry",
+                            fontSize = 11.5.sp,
+                            color = YtMuted,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable { onToggleReplies?.invoke() }
+                                .padding(vertical = 4.dp),
+                        )
+                    else -> {
+                        replies.replies.forEach { reply ->
+                            CommentRow(reply, nested = true)
+                        }
+                        if (replies.continuation != null) {
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { onLoadMoreReplies?.invoke() }
+                                    .padding(horizontal = 6.dp, vertical = 5.dp),
+                            ) {
+                                Text(
+                                    "Show more replies",
+                                    fontSize = 11.5.sp,
+                                    color = YtMuted,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

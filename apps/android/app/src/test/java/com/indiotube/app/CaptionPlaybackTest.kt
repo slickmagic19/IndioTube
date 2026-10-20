@@ -35,12 +35,10 @@ import androidx.media3.test.utils.FakeDataSet
 import androidx.media3.test.utils.FakeDataSource
 import androidx.media3.test.utils.FakeVideoRenderer
 import androidx.media3.test.utils.TestExoPlayerBuilder
-import androidx.media3.test.utils.robolectric.RobolectricUtil
 import androidx.media3.test.utils.robolectric.TestPlayerRunHelper
 import androidx.test.core.app.ApplicationProvider
 import com.indiotube.app.player.CenteringSubtitleParserFactory
 import com.indiotube.app.player.RebuildOnReplaceMediaSource
-import java.util.concurrent.TimeoutException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -319,10 +317,9 @@ class CaptionPlaybackTest {
 
         // Turning captions off mirrors setSubtitles(videoId, null): replace the
         // item with one that carries no subtitle configuration. The text track
-        // must disappear and the renderer must clear the cues on screen.
-        // Playback is paused so the fake clock cannot race the reloaded
-        // source; track removal does not depend on the clock advancing.
-        player.pause()
+        // must disappear and the renderer must clear the cues on screen while
+        // the video is still playing â€” the on-device report was that captions
+        // lingered until the next quality change.
         val offPosition = player.currentPosition
         val withoutCaptions = player.getMediaItemAt(0).buildUpon()
             .setSubtitleConfigurations(emptyList())
@@ -330,18 +327,17 @@ class CaptionPlaybackTest {
         player.replaceMediaItem(0, withoutCaptions)
         player.seekTo(0, offPosition)
         if (player.playbackState == Player.STATE_IDLE) player.prepare()
-        try {
-            RobolectricUtil.runMainLooperUntil {
-                player.currentTracks.groups.none { it.type == C.TRACK_TYPE_TEXT } &&
-                    groups.isNotEmpty() && groups.last().isEmpty()
+
+        var offTarget = offPosition + 250
+        while (offTarget <= 9_500L) {
+            TestPlayerRunHelper.playUntilPosition(player, 0, offTarget)
+            shadowOf(mainLooper).idle()
+            if (player.currentTracks.groups.none { it.type == C.TRACK_TYPE_TEXT } &&
+                groups.isNotEmpty() && groups.last().isEmpty()
+            ) {
+                break
             }
-        } catch (e: TimeoutException) {
-            throw AssertionError(
-                "turning captions off must remove the track and clear the cues" +
-                    " (tracks=${player.currentTracks.groups.map { it.type }}," +
-                    " groups=${groups.map { it.size }} at ${player.currentPosition}ms, events=$events)",
-                e,
-            )
+            offTarget += 250
         }
         shadowOf(mainLooper).idle()
         assertTrue(

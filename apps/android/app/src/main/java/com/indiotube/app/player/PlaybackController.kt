@@ -102,6 +102,19 @@ class PlaybackController(
     // it: drop captions and retry the stream once before touching quality.
     private var captionRetryAttempted = false
 
+    // What is actually attached to the playing item. Media items that cross
+    // the MediaSession boundary arrive without their local configuration
+    // (subtitle configs included), so the controller cannot use the item it
+    // reads back to decide whether captions are on. That made turning them
+    // off a no-op: the item looked like it had no captions already.
+    private var attachedSubtitleVideoId: String? = null
+    private var attachedSubtitleUrl: String? = null
+
+    // URI of the stream currently selected by applyQuality (null = the item's
+    // own indio:// Auto URI), so re-picking the same quality is a no-op even
+    // though the controller item hides its local configuration.
+    private var currentStreamUrl: String? = null
+
     init {
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val future = MediaController.Builder(context, token).buildAsync()
@@ -169,6 +182,9 @@ class PlaybackController(
                     qualityFallbackAttempts = 0
                     _subtitle.value = null
                     captionRetryAttempted = false
+                    attachedSubtitleVideoId = null
+                    attachedSubtitleUrl = null
+                    currentStreamUrl = null
                 }
                 if (newVideo && reason != Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                     _queue.value.getOrNull(idx)?.let { store.noteOpen(it) }
@@ -278,6 +294,9 @@ class PlaybackController(
         lastMediaId = null
         _subtitle.value = null
         captionRetryAttempted = false
+        attachedSubtitleVideoId = null
+        attachedSubtitleUrl = null
+        currentStreamUrl = null
         val c = controller ?: run {
             pendingPlay = play
             pendingShuffle = shuffleOn
@@ -355,8 +374,10 @@ class PlaybackController(
         val target = QualityUris.target(video.videoId, rung?.height, qualities) ?: return
         val appliedHeight = rung?.height
 
-        // Already on the right stream: just make sure it is playing.
-        if (current.localConfiguration?.uri?.toString() == target) {
+        // Already on the right stream: just make sure it is playing. The URI
+        // is tracked locally because the controller's media item has no local
+        // configuration to read it back from.
+        if (currentStreamUrl == target) {
             _qualityHeight.value = appliedHeight
             if (autoPlay) {
                 if (c.playbackState == Player.STATE_IDLE) c.prepare()
@@ -374,9 +395,23 @@ class PlaybackController(
         // teardown and the target quality starts noticeably sooner.
         warmConnections(rung, qualities)
 
+        // A quality swap rebuilds the whole item, so the captions have to ride
+        // along explicitly or they would silently disappear on the new stream.
+        val subtitles = if (attachedSubtitleVideoId == video.videoId) {
+            _subtitle.value?.let { listOf(subtitleConfiguration(it)) }.orEmpty()
+        } else {
+            emptyList()
+        }
+
         replacingItem = true
         try {
-            c.replaceMediaItem(idx, current.buildUpon().setUri(target.toUri()).build())
+            c.replaceMediaItem(
+                idx,
+                current.buildUpon()
+                    .setUri(target.toUri())
+                    .setSubtitleConfigurations(subtitles)
+                    .build(),
+            )
             c.seekTo(idx, position)
             // A replaced item can come back idle (and after a decoder/network
             // error the player is idle too). play() alone would then only flip
@@ -385,6 +420,7 @@ class PlaybackController(
         } finally {
             replacingItem = false
         }
+        currentStreamUrl = target
         _qualityHeight.value = appliedHeight
         if (autoPlay) c.play()
     }
@@ -430,31 +466,24 @@ class PlaybackController(
         val current = c.getMediaItemAt(idx)
         if (current.mediaId != videoId) return
 
-        val existing = current.localConfiguration?.subtitleConfigurations.orEmpty()
-        val alreadyAttached = if (track == null) {
-            existing.isEmpty()
-        } else {
-            existing.size == 1 &&
-                existing[0].language == track.languageTag &&
-                existing[0].uri.toString() == track.url
-        }
+        val previous = _subtitle.value
+        // Attaching the same track twice is a no-op; turning captions off must
+        // always rebuild the item, because the session copy of it cannot be
+        // trusted to carry the subtitle configuration.
+        val alreadyAttached = track != null &&
+            attachedSubtitleVideoId == videoId &&
+            attachedSubtitleUrl == track.url
+        if (track == null && previous == null && attachedSubtitleVideoId == null) return
         _subtitle.value = track
         if (track != null) captionRetryAttempted = false
         if (alreadyAttached) return
 
-        val configs = if (track == null) {
-            emptyList()
-        } else {
-            listOf(
-                MediaItem.SubtitleConfiguration.Builder(track.url.toUri())
-                    .setMimeType(track.mime)
-                    .setLanguage(track.languageTag)
-                    .setLabel(track.label)
-                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                    .setRoleFlags(C.ROLE_FLAG_CAPTION)
-                    .build(),
-            )
-        }
+        val configs = if (track == null) emptyList() else listOf(subtitleConfiguration(track))
+        // Keep a URI on the replacement even when the controller copy lost its
+        // local configuration; without one the item cannot be played.
+        val baseUri = currentStreamUrl?.toUri()
+            ?: current.localConfiguration?.uri
+            ?: "indio://stream/${video.videoId}".toUri()
 
         val wasPlaying = c.playWhenReady
         val position = c.currentPosition.coerceAtLeast(0)
@@ -462,14 +491,31 @@ class PlaybackController(
         store.notePosition(video, position, if (duration > 0) duration else 0)
         replacingItem = true
         try {
-            c.replaceMediaItem(idx, current.buildUpon().setSubtitleConfigurations(configs).build())
+            c.replaceMediaItem(
+                idx,
+                current.buildUpon()
+                    .setUri(baseUri)
+                    .setSubtitleConfigurations(configs)
+                    .build(),
+            )
             c.seekTo(idx, position)
             if (c.playbackState == Player.STATE_IDLE) c.prepare()
         } finally {
             replacingItem = false
         }
+        attachedSubtitleVideoId = if (track == null) null else videoId
+        attachedSubtitleUrl = track?.url
         if (wasPlaying) c.play()
     }
+
+    private fun subtitleConfiguration(track: SubtitleTrack): MediaItem.SubtitleConfiguration =
+        MediaItem.SubtitleConfiguration.Builder(track.url.toUri())
+            .setMimeType(track.mime)
+            .setLanguage(track.languageTag)
+            .setLabel(track.label)
+            .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+            .setRoleFlags(C.ROLE_FLAG_CAPTION)
+            .build()
 
     fun stop() {
         val c = controller ?: return
@@ -502,6 +548,9 @@ class PlaybackController(
         lastMediaId = null
         _subtitle.value = null
         captionRetryAttempted = false
+        attachedSubtitleVideoId = null
+        attachedSubtitleUrl = null
+        currentStreamUrl = null
     }
 
     private fun toMediaItem(v: VideoItem): MediaItem {

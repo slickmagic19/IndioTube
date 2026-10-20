@@ -35,8 +35,8 @@ import com.indiotube.app.data.SearchFilter
 import com.indiotube.app.data.VideoItem
 import kotlinx.coroutines.launch
 
-// Explore, the way YouTube's tab works: Trending first (YouTube's own
-// FEtrending list for this region), then one feed per category borrowed from
+// Explore, the way YouTube's tab works: Trending first (this week's most
+// viewed videos for the region), then one feed per category borrowed from
 // search. Everything is fetched lazily and cached in InnerTube, so flipping
 // between chips is instant after the first visit.
 private data class ExploreCategory(val label: String, val query: String?)
@@ -166,7 +166,7 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
         ) {
             when {
                 feed == null || (feed.loading && feed.videos.isEmpty()) ->
-                    LoadingBox(Modifier.fillMaxSize())
+                    SkeletonFeed(Modifier.fillMaxSize())
                 feed.error && feed.videos.isEmpty() -> ErrorState(
                     "Couldn't load Explore right now",
                     onRetry = {

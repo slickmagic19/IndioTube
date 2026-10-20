@@ -81,6 +81,8 @@ data class CommentItem(
     val likesText: String?,
     val publishedText: String?,
     val replyCountText: String?,
+    // Continuation token that loads this comment's replies, null when none.
+    val repliesToken: String? = null,
 )
 
 // ---- local accounts (no sign-in: these are on-device profiles) --------------

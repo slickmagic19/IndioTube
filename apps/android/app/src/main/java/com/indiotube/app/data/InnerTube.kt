@@ -47,6 +47,10 @@ object SearchFilter {
     const val PLAYLISTS = "EgIQAw%3D%3D"
 }
 
+// Search params for "this week, videos only, sorted by view count" - the
+// closest signed-out equivalent of the retired FEtrending feed.
+private const val TRENDING_PARAMS = "EgYIAxABGAM%3D"
+
 // channel tab params
 private const val CHANNEL_TAB_VIDEOS = "EgZ2aWRlb3PyBgQKAjoA"
 private const val CHANNEL_TAB_PLAYLISTS = "EgZwbGF5bGlzdHPyBgQKAkIA"
@@ -230,43 +234,33 @@ class InnerTube(private val http: OkHttpClient) {
         return parseFeed(root)
     }
 
-    // YouTube's own Trending list for this region (the FEtrending feed). Used
-    // by the Explore tab; falls back to an empty feed when offline so the UI
-    // can show its retry state instead of crashing.
+    // YouTube retired the signed-out FEtrending feed (it answers HTTP 400 on
+    // every client now), so Trending is the popular list of the past week:
+    // the search endpoint with an empty query, videos only, sorted by views.
+    // Used by the Explore tab; falls back to an empty feed when offline so the
+    // UI can show its retry state instead of crashing.
     suspend fun trending(force: Boolean = false): HomeFeed = try {
         cached("trending:$country", 10 * 60_000L, force) {
-            parseTrending(browse("FEtrending"))
+            val results = search("", TRENDING_PARAMS)
+            HomeFeed(
+                emptyList(),
+                results.entries.filterIsInstance<SearchEntry.Video>().map { it.video },
+                results.continuation,
+            )
         }
     } catch (_: Exception) {
         HomeFeed(emptyList(), emptyList(), null)
     }
 
     suspend fun trendingContinuation(token: String): HomeFeed = try {
-        parseTrending(browse("FEtrending", continuation = token))
+        val results = searchContinuation(token)
+        HomeFeed(
+            emptyList(),
+            results.entries.filterIsInstance<SearchEntry.Video>().map { it.video },
+            results.continuation,
+        )
     } catch (_: Exception) {
         HomeFeed(emptyList(), emptyList(), null)
-    }
-
-    // Trending pages come in several layouts: newer ones nest rich items, the
-    // classic one lists plain videoRenderers under section lists. Both are
-    // accepted; Shorts are filtered out by the same checks as everywhere else.
-    internal fun parseTrending(root: JsonElement): HomeFeed {
-        val videos = ArrayList<VideoItem>()
-        root.findAll("richItemRenderer", maxDepth = 14, limit = 120).forEach { item ->
-            item.field("content")?.let { content ->
-                parseAnyVideo(content)?.let { videos.add(it) }
-            }
-        }
-        if (videos.isEmpty()) {
-            root.findAll("videoRenderer", maxDepth = 14, limit = 120).forEach { vr ->
-                parseVideoRenderer(vr)?.let { videos.add(it) }
-            }
-        }
-        return HomeFeed(
-            chips = emptyList(),
-            videos = videos.distinctBy { it.videoId },
-            continuation = feedContinuation(root),
-        )
     }
 
     internal fun parseFeed(root: JsonElement): HomeFeed {
@@ -770,6 +764,10 @@ class InnerTube(private val http: OkHttpClient) {
                 el.obj("commentRenderer") != null -> parseCommentRenderer(el.obj("commentRenderer")!!)?.let {
                     comments.add(it)
                 }
+                // reply continuations return bare commentViewModel items
+                el.obj("commentViewModel") != null -> parseCommentThread(el, entities)?.let {
+                    comments.add(it)
+                }
                 el.obj("continuationItemRenderer") != null -> extractContinuation(el.obj("continuationItemRenderer")!!)?.let {
                     continuation = it
                 }
@@ -841,11 +839,28 @@ class InnerTube(private val http: OkHttpClient) {
             ?: vm.pathStr("publishedTimeText", "simpleText")
             ?: vm.path("publishedTimeText").runsText()
             ?: vm.pathStr("publishedTimeText", "content")
-        val replies = entity?.pathStr("toolbar", "replyCount")
+        val replies = (entity?.pathStr("toolbar", "replyCount")
             ?: vm.pathStr("replyCount")
-            ?: vm.pathStr("repliesCountText", "simpleText")
+            ?: vm.pathStr("repliesCountText", "simpleText"))
+            ?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { if (COUNT_RE.matches(it)) "$it replies" else it }
         if (text.isBlank()) return null
-        return CommentItem(commentId, author, avatar, text, likes, published, replies)
+        return CommentItem(commentId, author, avatar, text, likes, published, replies, replyToken(th))
+    }
+
+    // The "show replies" continuation lives under the thread's replies node.
+    // Older layouts nest it in commentRepliesRenderer.contents; newer ones
+    // keep the same continuationItemRenderer shape at another depth.
+    private fun replyToken(th: JsonElement): String? {
+        val replies = th.path("replies") ?: return null
+        replies.pathStr(
+            "commentRepliesRenderer", "contents", 0,
+            "continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token",
+        )?.let { return it }
+        replies.findAll("continuationItemRenderer", maxDepth = 8, limit = 4).forEach { cont ->
+            extractContinuation(cont)?.let { return it }
+        }
+        return null
     }
 
     private fun parseCommentRenderer(c: JsonElement): CommentItem? {

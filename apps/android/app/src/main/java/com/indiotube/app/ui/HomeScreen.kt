@@ -129,6 +129,22 @@ fun HomeScreen(container: Container, ui: UiRefs) {
         loading = false
     }
 
+    // Tapping the Home tab again (or the IndioTube wordmark) reloads the feed
+    // and jumps back to the top. The initial tick is marked as already handled
+    // so returning to this screen doesn't fetch twice.
+    val refreshTick = ui.homeRefreshTick
+    var handledRefreshTick by remember { mutableIntStateOf(refreshTick) }
+    LaunchedEffect(refreshTick) {
+        if (refreshTick == handledRefreshTick) return@LaunchedEffect
+        handledRefreshTick = refreshTick
+        loading = true
+        localChip = 0
+        localFeeds.clear()
+        load(force = true)
+        loading = false
+        listState.scrollToItem(0)
+    }
+
     LaunchedEffect(listState, feed, localChip, localVideos) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .collect { last ->
@@ -175,29 +191,37 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                 .padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                Modifier
-                    .size(width = 26.dp, height = 18.dp)
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(YtRed),
-                contentAlignment = Alignment.Center,
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { ui.refreshHome() }
+                    .padding(horizontal = 2.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    null,
-                    tint = Color.White,
-                    modifier = Modifier.size(14.dp),
+                Box(
+                    Modifier
+                        .size(width = 26.dp, height = 18.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(YtRed),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        null,
+                        tint = Color.White,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    "IndioTube",
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = (-0.6).sp,
+                    ),
+                    color = YtText,
                 )
             }
-            Spacer(Modifier.width(7.dp))
-            Text(
-                "IndioTube",
-                style = MaterialTheme.typography.titleLarge.copy(
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = (-0.6).sp,
-                ),
-                color = YtText,
-            )
             Spacer(Modifier.weight(1f))
             IconButton(onClick = { ui.open(Screen.Search) }) {
                 Icon(Icons.Outlined.Search, "Search", tint = YtText, modifier = Modifier.size(25.dp))
@@ -228,7 +252,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
             modifier = Modifier.fillMaxSize(),
         ) {
             when {
-                loading && feed == null -> LoadingBox(Modifier.fillMaxSize())
+                loading && feed == null -> SkeletonFeed(Modifier.fillMaxSize())
                 error != null && feed == null -> ErrorState(error!!, onRetry = {
                     scope.launch {
                         loading = true
@@ -306,7 +330,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                             )
                         }
                         if (categoryMode && categoryFeed == null) {
-                            item(key = "category-loading") { LoadingBox(Modifier.height(160.dp)) }
+                            item(key = "category-loading") { SkeletonFeed(rows = 2) }
                         }
                         if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
                             item(key = "category-error") {
@@ -320,7 +344,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                             }
                         }
                         if (localLoading && shown.isEmpty() && !categoryMode) {
-                            item(key = "local-loading") { LoadingBox(Modifier.height(160.dp)) }
+                            item(key = "local-loading") { SkeletonFeed(rows = 2) }
                         }
                         // Only show the signed-out prompt when neither YouTube
                         // nor the local fallback feed had anything to offer.

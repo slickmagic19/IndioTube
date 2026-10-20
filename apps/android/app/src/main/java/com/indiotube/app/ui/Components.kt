@@ -1,5 +1,11 @@
 package com.indiotube.app.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -203,6 +210,61 @@ fun VideoCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+        }
+    }
+}
+
+// Shimmering placeholders for the first page of a feed. One shared alpha keeps
+// the whole skeleton in sync and the layout calm while the network catches up.
+@Composable
+fun SkeletonFeed(modifier: Modifier = Modifier, rows: Int = 4) {
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val shimmer by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "skeletonAlpha",
+    )
+    val bone = YtSurfaceHi.copy(alpha = shimmer)
+    Column(modifier.fillMaxWidth()) {
+        repeat(rows.coerceAtLeast(1)) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(bone),
+            )
+            Row(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 14.dp)) {
+                Box(
+                    Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(bone),
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(0.92f)
+                            .height(14.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(bone),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        Modifier
+                            .fillMaxWidth(0.55f)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(bone),
+                    )
+                }
             }
         }
     }

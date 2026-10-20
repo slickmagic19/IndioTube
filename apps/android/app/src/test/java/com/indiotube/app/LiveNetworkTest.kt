@@ -71,6 +71,32 @@ class LiveNetworkTest {
         assertTrue("comment text expected", page.comments.all { it.text.isNotBlank() })
     }
 
+    // The Explore tab's first chip. YouTube retired the FEtrending browse feed
+    // (HTTP 400), so this exercises the search-based "most viewed this week"
+    // replacement; it must return a real, non-empty feed.
+    @Test
+    fun trendingFeedParses() = runBlocking {
+        val feed = innerTube.trending()
+        assertTrue("trending should return videos", feed.videos.isNotEmpty())
+        assertTrue("trending videos need titles and ids", feed.videos.all { it.title.isNotBlank() && it.videoId.isNotBlank() })
+        val withViews = feed.videos.count { !it.viewsText.isNullOrBlank() }
+        assertTrue("most trending videos should carry view counts", withViews >= feed.videos.size / 2)
+    }
+
+    // "View replies" loads a continuation whose items are bare commentViewModel
+    // entries; the parser must turn those into CommentItems with text.
+    @Test
+    fun commentRepliesLoad() = runBlocking {
+        val token = innerTube.watch(videoId).commentsToken
+        assertNotNull("comments token expected", token)
+        val page = innerTube.comments(token!!)
+        val parent = page.comments.firstOrNull { it.repliesToken != null }
+        assertNotNull("a comment with a replies token expected", parent)
+        val replies = innerTube.comments(parent!!.repliesToken!!)
+        assertTrue("replies expected", replies.comments.isNotEmpty())
+        assertTrue("reply text expected", replies.comments.all { it.text.isNotBlank() })
+    }
+
     @Test
     fun streamResolvesToPlayableUrl() = runBlocking {
         StreamResolver.init(http)

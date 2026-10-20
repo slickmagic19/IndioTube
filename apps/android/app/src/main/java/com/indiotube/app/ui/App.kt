@@ -97,6 +97,15 @@ class UiRefs(
     // the bottom navigation can step aside for true immersive playback
     var playerFullscreen by mutableStateOf(false)
 
+    // Bumped when the Home tab or the wordmark is tapped while Home is on
+    // screen; HomeScreen watches it, refreshes and scrolls back to the top.
+    var homeRefreshTick by mutableIntStateOf(0)
+        private set
+
+    fun refreshHome() {
+        homeRefreshTick += 1
+    }
+
     fun open(s: Screen) = onOpen(s)
     fun back() = onBack()
     fun goTab(i: Int) = onGoTab(i)
@@ -216,6 +225,9 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                     // yields during fullscreen playback.
                     if (!ui.playerFullscreen) {
                         BottomBar(if (stack.isEmpty()) tab else -1) { i ->
+                            // Tapping Home returns to the feed and refreshes
+                            // it, the way YouTube's home tab behaves.
+                            if (i == 0) ui.refreshHome()
                             tab = i
                             stack.clear()
                         }
