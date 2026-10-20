@@ -41,6 +41,15 @@ class LibraryStore(
     private val _searches = MutableStateFlow<List<SearchLogEntry>>(emptyList())
     val searches: StateFlow<List<SearchLogEntry>> = _searches.asStateFlow()
 
+    private val _notInterestedIds = MutableStateFlow<Set<String>>(emptySet())
+    val notInterestedIds: StateFlow<Set<String>> = _notInterestedIds.asStateFlow()
+
+    private val _interestedChannelIds = MutableStateFlow<Set<String>>(emptySet())
+    val interestedChannelIds: StateFlow<Set<String>> = _interestedChannelIds.asStateFlow()
+
+    private val _blockedChannelIds = MutableStateFlow<Set<String>>(emptySet())
+    val blockedChannelIds: StateFlow<Set<String>> = _blockedChannelIds.asStateFlow()
+
     fun switchAccount(accountId: String) {
         if (accountId == currentAccountId && loaded) return
         currentAccountId = accountId
@@ -62,12 +71,18 @@ class LibraryStore(
                 _playlists.value = data.playlists
                 _liked.value = data.liked
                 _searches.value = data.searches
+                _notInterestedIds.value = data.notInterestedIds.toSet()
+                _interestedChannelIds.value = data.interestedChannelIds.toSet()
+                _blockedChannelIds.value = data.blockedChannelIds.toSet()
             } else {
                 _watchLater.value = emptyList()
                 _history.value = emptyList()
                 _playlists.value = emptyList()
                 _liked.value = emptyList()
                 _searches.value = emptyList()
+                _notInterestedIds.value = emptySet()
+                _interestedChannelIds.value = emptySet()
+                _blockedChannelIds.value = emptySet()
             }
         } catch (_: Exception) {
             try {
@@ -78,11 +93,23 @@ class LibraryStore(
             _playlists.value = emptyList()
             _liked.value = emptyList()
             _searches.value = emptyList()
+            _notInterestedIds.value = emptySet()
+            _interestedChannelIds.value = emptySet()
+            _blockedChannelIds.value = emptySet()
         }
     }
 
     private fun persist() {
-        val data = LibraryFile(_watchLater.value, _history.value, _playlists.value, _liked.value, _searches.value)
+        val data = LibraryFile(
+            watchLater = _watchLater.value,
+            history = _history.value,
+            playlists = _playlists.value,
+            liked = _liked.value,
+            searches = _searches.value,
+            notInterestedIds = _notInterestedIds.value.toList(),
+            interestedChannelIds = _interestedChannelIds.value.toList(),
+            blockedChannelIds = _blockedChannelIds.value.toList(),
+        )
         val target = accountFile(currentAccountId)
         scope.launch(Dispatchers.IO) {
             mutex.withLock {
@@ -275,6 +302,37 @@ class LibraryStore(
         _playlists.value = _playlists.value.map { pl ->
             if (pl.id != playlistId) pl else pl.copy(videos = pl.videos.filterNot { it.videoId == videoId })
         }
+        persist()
+    }
+
+    // ---- recommendation feedback ---------------------------------------------
+
+    fun markNotInterested(video: VideoItem) {
+        _notInterestedIds.value = _notInterestedIds.value + video.videoId
+        video.channelId?.let { _interestedChannelIds.value = _interestedChannelIds.value - it }
+        persist()
+    }
+
+    fun undoNotInterested(videoId: String) {
+        _notInterestedIds.value = _notInterestedIds.value - videoId
+        persist()
+    }
+
+    fun markInterested(video: VideoItem) {
+        _notInterestedIds.value = _notInterestedIds.value - video.videoId
+        video.channelId?.let { _interestedChannelIds.value = _interestedChannelIds.value + it }
+        persist()
+    }
+
+    fun blockChannel(video: VideoItem) {
+        val channelId = video.channelId ?: return
+        _blockedChannelIds.value = _blockedChannelIds.value + channelId
+        _interestedChannelIds.value = _interestedChannelIds.value - channelId
+        persist()
+    }
+
+    fun unblockChannel(channelId: String) {
+        _blockedChannelIds.value = _blockedChannelIds.value - channelId
         persist()
     }
 }

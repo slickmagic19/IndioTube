@@ -18,7 +18,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val container = (application as IndioTubeApplication).container
-        val player = PlaybackController(this, container.library, container)
+        val player = PlaybackController(this, container.library, container.playbackPrefs, container)
 
         if (
             Build.VERSION.SDK_INT >= 33 &&

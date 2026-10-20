@@ -111,7 +111,33 @@ class UiRefs(
     fun goTab(i: Int) = onGoTab(i)
     fun openAccounts() = onOpenAccounts()
 
-    fun toast(msg: String) = toasts.show(msg)
+    fun toast(msg: String, actionLabel: String? = null, action: (() -> Unit)? = null) =
+        toasts.show(msg, actionLabel, action)
+
+    // Feed-card overflow feedback, persisted per account and applied by the
+    // recommender on the next build. Negative feedback is undoable, matching
+    // YouTube's snackbar.
+    fun feedback(video: VideoItem, feedback: FeedFeedback) {
+        when (feedback) {
+            FeedFeedback.INTERESTED -> {
+                container.library.markInterested(video)
+                toast("Got it. We'll recommend more videos like this")
+            }
+            FeedFeedback.NOT_INTERESTED -> {
+                container.library.markNotInterested(video)
+                toast("Video removed from recommendations", "Undo") {
+                    container.library.undoNotInterested(video.videoId)
+                }
+            }
+            FeedFeedback.DONT_RECOMMEND_CHANNEL -> {
+                val channelId = video.channelId ?: return
+                container.library.blockChannel(video)
+                toast("Channel removed from recommendations", "Undo") {
+                    container.library.unblockChannel(channelId)
+                }
+            }
+        }
+    }
 
     fun top(): Screen? = topProvider()
 

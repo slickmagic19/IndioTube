@@ -35,6 +35,12 @@ internal data class FeedSignals(
     // Videos already watched to (near) the end. These sink much deeper than
     // merely-watched ones: YouTube stops pushing what you've finished.
     val completedIds: Set<String> = emptySet(),
+    // Explicit "not interested" / "don't recommend channel" feedback removes
+    // candidates outright, while "interested" gives the channel a lasting
+    // boost even when it would otherwise be a weak candidate.
+    val interestedChannelIds: Set<String> = emptySet(),
+    val hiddenIds: Set<String> = emptySet(),
+    val blockedChannelIds: Set<String> = emptySet(),
 )
 
 private val STOP_WORDS = setOf(
@@ -59,6 +65,11 @@ internal fun rankAndSample(
     maxPerChannel: Int = 3,
 ): List<VideoItem> {
     if (pool.isEmpty()) return emptyList()
+    val candidates = pool.filterNot { v ->
+        v.videoId in signals.hiddenIds ||
+            (v.channelId != null && v.channelId in signals.blockedChannelIds)
+    }
+    if (candidates.isEmpty()) return emptyList()
     val rng = Random(rotation * 7919 + 104729)
 
     fun score(v: VideoItem): Double {
@@ -68,6 +79,7 @@ internal fun rankAndSample(
         if (aff > 0.0) s *= 1.0 + 1.6 * (aff / (aff + 2.5)).coerceAtMost(1.0)
         if (v.channelId != null && v.channelId in signals.subIds) s *= 2.2
         if (v.channelId != null && v.channelId in signals.likedChannelIds) s *= 1.15
+        if (v.channelId != null && v.channelId in signals.interestedChannelIds) s *= 2.0
         if (v.videoId in signals.seedIds) s *= 2.3
         if (v.videoId in signals.watchedIds) s *= 0.12
         if (v.videoId in signals.completedIds) s *= 0.22
@@ -85,7 +97,7 @@ internal fun rankAndSample(
         return s.coerceAtLeast(1e-6)
     }
 
-    val scored = pool.distinctBy { it.videoId }.map { it to score(it) }.toMutableList()
+    val scored = candidates.distinctBy { it.videoId }.map { it to score(it) }.toMutableList()
     val out = ArrayList<VideoItem>(limit)
     val overflow = ArrayList<VideoItem>()
     val perChannel = HashMap<String, Int>()
@@ -182,7 +194,8 @@ suspend fun Container.localRecommendations(force: Boolean = false): List<VideoIt
         }.awaitAll()
     }.flatten()
 
-    val channelIds = (subs.map { it.channelId } + topWatched + likedChannels).distinct()
+    val channelIds = (subs.map { it.channelId } + topWatched + likedChannels +
+        library.interestedChannelIds.value).distinct()
     val fromChannels = latestFromChannels(channelIds, perChannel = 20, force = force)
 
     val pool = LinkedHashMap<String, VideoItem>()
@@ -220,6 +233,9 @@ suspend fun Container.localRecommendations(force: Boolean = false): List<VideoIt
         seedIds = seedIds,
         searchTerms = searchTerms,
         completedIds = library.completedIds(),
+        interestedChannelIds = library.interestedChannelIds.value,
+        hiddenIds = library.notInterestedIds.value,
+        blockedChannelIds = library.blockedChannelIds.value,
     )
     return rankAndSample(pool.values.toList(), signals, rotation)
 }

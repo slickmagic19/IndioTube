@@ -2,12 +2,17 @@ package com.indiotube.app.player
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.os.Bundle
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import com.indiotube.app.IndioTubeApplication
 import com.indiotube.app.MainActivity
 
@@ -47,6 +52,11 @@ class PlaybackService : MediaSessionService() {
             .setMediaSourceFactory(IndioMediaSourceFactory(app.container))
             .build()
 
+        // Autoplay is a per-item playlist behaviour: with it off the player
+        // pauses when the current video ends instead of starting the next
+        // queue item.
+        player.setPauseAtEndOfMediaItems(!app.container.playbackPrefs.autoplayNext.value)
+
         session = MediaSession.Builder(this, player)
             .setSessionActivity(
                 PendingIntent.getActivity(
@@ -56,6 +66,34 @@ class PlaybackService : MediaSessionService() {
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                 ),
             )
+            .setCallback(object : MediaSession.Callback {
+                override fun onConnect(
+                    session: MediaSession,
+                    controller: MediaSession.ControllerInfo,
+                ): MediaSession.ConnectionResult {
+                    val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
+                        .buildUpon()
+                        .add(PlaybackCommands.SET_AUTOPLAY_NEXT)
+                        .build()
+                    return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                        .setAvailableSessionCommands(commands)
+                        .build()
+                }
+
+                override fun onCustomCommand(
+                    session: MediaSession,
+                    controller: MediaSession.ControllerInfo,
+                    customCommand: SessionCommand,
+                    args: Bundle,
+                ): ListenableFuture<SessionResult> {
+                    if (customCommand.customAction == PlaybackCommands.SET_AUTOPLAY_NEXT.customAction) {
+                        val autoplay = args.getBoolean(PlaybackCommands.KEY_ENABLED, true)
+                        (session.player as? ExoPlayer)?.setPauseAtEndOfMediaItems(!autoplay)
+                        return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                    }
+                    return super.onCustomCommand(session, controller, customCommand, args)
+                }
+            })
             .build()
     }
 

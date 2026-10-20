@@ -3,6 +3,7 @@ package com.indiotube.app.player
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.media3.common.C
@@ -15,6 +16,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.indiotube.app.Container
 import com.indiotube.app.data.LibraryStore
+import com.indiotube.app.data.PlaybackPrefs
 import com.indiotube.app.data.QualityOption
 import com.indiotube.app.data.QualityUris
 import com.indiotube.app.data.ResolvedStream
@@ -39,6 +41,7 @@ import okhttp3.Request
 class PlaybackController(
     private val context: Context,
     private val store: LibraryStore,
+    private val prefs: PlaybackPrefs,
     // Optional: when present, quality switches warm the CDN connection for
     // the incoming stream before the player starts loading it.
     private val container: Container? = null,
@@ -82,6 +85,10 @@ class PlaybackController(
     // The caption track currently attached to the playing video (null = off).
     private val _subtitle = MutableStateFlow<SubtitleTrack?>(null)
     val subtitle: StateFlow<SubtitleTrack?> = _subtitle.asStateFlow()
+
+    // YouTube's Autoplay switch: when off, the player pauses at the end of the
+    // current video instead of continuing with the next item in the queue.
+    val autoplayNext: StateFlow<Boolean> get() = prefs.autoplayNext
 
     val current: StateFlow<VideoItem?> = combine(_queue, _index) { q, i -> q.getOrNull(i) }
         .stateIn(scope, SharingStarted.Eagerly, null)
@@ -155,6 +162,7 @@ class PlaybackController(
     }
 
     private fun attach(c: MediaController) {
+        sendAutoplay(c)
         c.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _playing.value = isPlaying
@@ -321,6 +329,21 @@ class PlaybackController(
             if (c.playbackState == Player.STATE_IDLE) c.prepare()
             c.play()
         }
+    }
+
+    fun setAutoplayNext(enabled: Boolean) {
+        prefs.setAutoplayNext(enabled)
+        controller?.let { sendAutoplay(it) }
+    }
+
+    // The playlist behavior itself lives on the ExoPlayer inside the service:
+    // MediaController has no direct setPauseAtEndOfMediaItems(), so the switch
+    // travels over a custom session command.
+    private fun sendAutoplay(c: MediaController) {
+        c.sendCustomCommand(
+            PlaybackCommands.SET_AUTOPLAY_NEXT,
+            Bundle().apply { putBoolean(PlaybackCommands.KEY_ENABLED, prefs.autoplayNext.value) },
+        )
     }
 
     fun next() {

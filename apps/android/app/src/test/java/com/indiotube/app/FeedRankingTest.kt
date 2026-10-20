@@ -130,4 +130,37 @@ class FeedRankingTest {
     fun emptyPoolIsSafe() {
         assertTrue(rankAndSample(emptyList(), emptySignals, rotation = 1).isEmpty())
     }
+
+    @Test
+    fun notInterestedVideosNeverComeBack() {
+        val pool = (1..50).map { video("v$it", "channel${it % 10}") }
+        val hidden = setOf("v1", "v2", "v3")
+        val signals = emptySignals.copy(hiddenIds = hidden)
+        val feed = rankAndSample(pool, signals, rotation = 4, limit = 60, maxPerChannel = 10)
+        assertTrue(feed.isNotEmpty())
+        assertTrue("hidden videos must be excluded", feed.none { it.videoId in hidden })
+    }
+
+    @Test
+    fun blockedChannelsAreExcluded() {
+        val pool = (1..50).map { video("v$it", "channel${it % 10}") }
+        val signals = emptySignals.copy(blockedChannelIds = setOf("channel0"))
+        val feed = rankAndSample(pool, signals, rotation = 4, limit = 60, maxPerChannel = 10)
+        assertTrue(feed.isNotEmpty())
+        assertTrue("blocked channels must be excluded", feed.none { it.channelId == "channel0" })
+    }
+
+    @Test
+    fun interestedChannelsAreFavoured() {
+        val pool = (1..200).map { video("v$it", "channel${it % 20}") }
+        val signals = emptySignals.copy(interestedChannelIds = setOf("channel2", "channel3"))
+        val runs = (1..30).map { rankAndSample(pool, signals, rotation = it, limit = 60, maxPerChannel = 10) }
+        val share = runs.sumOf { feed -> feed.count { it.channelId in signals.interestedChannelIds } }.toDouble() /
+            runs.sumOf { it.size }
+        val baseline = 2.0 / 20.0
+        assertTrue(
+            "interested channels should be over-represented, was $share (baseline $baseline)",
+            share > baseline * 1.5,
+        )
+    }
 }

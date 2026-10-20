@@ -58,6 +58,8 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val account by container.accounts.active.collectAsState()
+    val hiddenIds by container.library.notInterestedIds.collectAsState()
+    val blockedChannels by container.library.blockedChannelIds.collectAsState()
 
     var feed by remember { mutableStateOf<HomeFeed?>(null) }
     var selectedChip by remember { mutableIntStateOf(0) }
@@ -65,6 +67,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
+    var chipLoading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var localVideos by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var localLoading by remember { mutableStateOf(false) }
@@ -252,7 +255,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
             modifier = Modifier.fillMaxSize(),
         ) {
             when {
-                loading && feed == null -> SkeletonFeed(Modifier.fillMaxSize())
+                loading && feed == null -> SkeletonFeed(Modifier.fillMaxSize(), showChips = true)
                 error != null && feed == null -> ErrorState(error!!, onRetry = {
                     scope.launch {
                         loading = true
@@ -271,6 +274,9 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                         categoryMode -> categoryFeed?.videos.orEmpty()
                         usingLocal -> localVideos
                         else -> videos
+                    }.filter { v ->
+                        v.videoId !in hiddenIds &&
+                            (v.channelId == null || v.channelId !in blockedChannels)
                     }
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         val chips = f?.chips.orEmpty()
@@ -308,7 +314,9 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                             onClick = {
                                                 selectedChip = i
                                                 scope.launch {
+                                                    chipLoading = true
                                                     load(params = chip.params, token = if (chip.params == null) chip.token else null)
+                                                    chipLoading = false
                                                 }
                                             },
                                         )
@@ -317,53 +325,60 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                 }
                             }
                         }
-                        if (usingLocal) {
-                            item(key = "recommended") {
-                                SectionHeader(if (categoryMode) localLabel.orEmpty() else "Recommended for you")
-                            }
-                        }
-                        items(shown, key = { it.videoId }) { video ->
-                            VideoCard(
-                                video,
-                                onClick = { ui.openWatch(video, shown) },
-                                onChannelClick = { ui.openChannelOf(video) },
-                            )
-                        }
-                        if (categoryMode && categoryFeed == null) {
-                            item(key = "category-loading") { SkeletonFeed(rows = 2) }
-                        }
-                        if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
-                            item(key = "category-error") {
-                                ErrorState(
-                                    "Couldn't load ${localLabel.orEmpty()} right now",
-                                    onRetry = {
-                                        scope.launch { loadLocalCategory(localLabel.orEmpty(), force = true) }
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
-                        if (localLoading && shown.isEmpty() && !categoryMode) {
-                            item(key = "local-loading") { SkeletonFeed(rows = 2) }
-                        }
-                        // Only show the signed-out prompt when neither YouTube
-                        // nor the local fallback feed had anything to offer.
-                        if (f != null && shown.isEmpty() && !loadingMore && !localLoading && !categoryMode) {
-                            item(key = "empty") {
-                                EmptyState(
-                                    title = "Try searching to get started",
-                                    subtitle = "Start watching videos to help us build a feed of videos you'll love.",
-                                    icon = {
-                                        Icon(
-                                            Icons.Outlined.Search,
-                                            null,
-                                            tint = YtMuted,
-                                            modifier = Modifier.size(42.dp),
+                        // A tag/feed switch is in flight: keep the chip row
+                        // visible, replace the old list with skeletons.
+                        val categoryLoading = categoryMode && categoryFeed == null
+                        when {
+                            chipLoading -> item(key = "chip-loading") { SkeletonFeed(rows = 3) }
+                            categoryLoading -> item(key = "category-loading") { SkeletonFeed(rows = 3) }
+                            else -> {
+                                if (usingLocal) {
+                                    item(key = "recommended") {
+                                        SectionHeader(if (categoryMode) localLabel.orEmpty() else "Recommended for you")
+                                    }
+                                }
+                                items(shown, key = { it.videoId }) { video ->
+                                    VideoCard(
+                                        video,
+                                        onClick = { ui.openWatch(video, shown) },
+                                        onChannelClick = { ui.openChannelOf(video) },
+                                        onFeedback = { ui.feedback(video, it) },
+                                    )
+                                }
+                                if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
+                                    item(key = "category-error") {
+                                        ErrorState(
+                                            "Couldn't load ${localLabel.orEmpty()} right now",
+                                            onRetry = {
+                                                scope.launch { loadLocalCategory(localLabel.orEmpty(), force = true) }
+                                            },
+                                            modifier = Modifier.fillMaxWidth(),
                                         )
-                                    },
-                                    actionLabel = "Search",
-                                    onAction = { ui.open(Screen.Search) },
-                                )
+                                    }
+                                }
+                                if (localLoading && shown.isEmpty() && !categoryMode) {
+                                    item(key = "local-loading") { SkeletonFeed(rows = 3) }
+                                }
+                                // Only show the signed-out prompt when neither YouTube
+                                // nor the local fallback feed had anything to offer.
+                                if (f != null && shown.isEmpty() && !loadingMore && !localLoading && !categoryMode) {
+                                    item(key = "empty") {
+                                        EmptyState(
+                                            title = "Try searching to get started",
+                                            subtitle = "Start watching videos to help us build a feed of videos you'll love.",
+                                            icon = {
+                                                Icon(
+                                                    Icons.Outlined.Search,
+                                                    null,
+                                                    tint = YtMuted,
+                                                    modifier = Modifier.size(42.dp),
+                                                )
+                                            },
+                                            actionLabel = "Search",
+                                            onAction = { ui.open(Screen.Search) },
+                                        )
+                                    }
+                                }
                             }
                         }
                         if (loadingMore) {

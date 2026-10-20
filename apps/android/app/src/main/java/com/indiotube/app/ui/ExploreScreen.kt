@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -65,6 +66,8 @@ private data class ExploreFeed(
 fun ExploreScreen(container: Container, ui: UiRefs) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val hiddenIds by container.library.notInterestedIds.collectAsState()
+    val blockedChannels by container.library.blockedChannelIds.collectAsState()
     var selected by remember { mutableIntStateOf(0) }
     var refreshing by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
@@ -177,13 +180,17 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
                     modifier = Modifier.fillMaxSize(),
                 )
                 else -> {
-                    val videos = feed.videos
+                    val videos = feed.videos.filter { v ->
+                        v.videoId !in hiddenIds &&
+                            (v.channelId == null || v.channelId !in blockedChannels)
+                    }
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(videos, key = { it.videoId }) { video ->
                             VideoCard(
                                 video,
                                 onClick = { ui.openWatch(video, videos) },
                                 onChannelClick = { ui.openChannelOf(video) },
+                                onFeedback = { ui.feedback(video, it) },
                             )
                         }
                         if (loadingMore) {

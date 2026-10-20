@@ -148,6 +148,11 @@ data class LibraryFile(
     val playlists: List<LocalPlaylist> = emptyList(),
     val liked: List<VideoItem> = emptyList(),
     val searches: List<SearchLogEntry> = emptyList(),
+    // Recommendation feedback, persisted per account like the rest of the
+    // library so switching accounts also switches the feed's taste.
+    val notInterestedIds: List<String> = emptyList(),
+    val interestedChannelIds: List<String> = emptyList(),
+    val blockedChannelIds: List<String> = emptyList(),
 )
 
 // What this account searched for. Feeds the local recommender the way

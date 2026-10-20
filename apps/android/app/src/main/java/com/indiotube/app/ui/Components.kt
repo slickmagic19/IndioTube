@@ -1,6 +1,6 @@
 package com.indiotube.app.ui
 
-import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -25,14 +25,24 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.ThumbUp
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -161,12 +171,17 @@ fun ChannelAvatar(
 
 // ---- video cards ---------------------------------------------------------------
 
+// Feedback actions offered by the card overflow menu, mirroring YouTube's
+// "Not interested" / "Don't recommend channel" plus a positive counterpart.
+enum class FeedFeedback { INTERESTED, NOT_INTERESTED, DONT_RECOMMEND_CHANNEL }
+
 // Full-width feed card: 16:9 thumbnail, then avatar + title + meta.
 @Composable
 fun VideoCard(
     video: VideoItem,
     onClick: () -> Unit,
     onChannelClick: (() -> Unit)? = null,
+    onFeedback: ((FeedFeedback) -> Unit)? = null,
 ) {
     Column(
         Modifier
@@ -211,26 +226,100 @@ fun VideoCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (onFeedback != null) {
+                CardFeedbackMenu(video, onFeedback)
+            }
         }
     }
 }
 
-// Shimmering placeholders for the first page of a feed. One shared alpha keeps
-// the whole skeleton in sync and the layout calm while the network catches up.
 @Composable
-fun SkeletonFeed(modifier: Modifier = Modifier, rows: Int = 4) {
+private fun CardFeedbackMenu(video: VideoItem, onFeedback: (FeedFeedback) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(
+            onClick = { open = true },
+            modifier = Modifier.size(28.dp),
+        ) {
+            Icon(
+                Icons.Filled.MoreVert,
+                contentDescription = "More options",
+                tint = YtMuted,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Interested") },
+                leadingIcon = { Icon(Icons.Outlined.ThumbUp, null, tint = YtText) },
+                onClick = {
+                    open = false
+                    onFeedback(FeedFeedback.INTERESTED)
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Not interested") },
+                leadingIcon = { Icon(Icons.Outlined.Block, null, tint = YtText) },
+                onClick = {
+                    open = false
+                    onFeedback(FeedFeedback.NOT_INTERESTED)
+                },
+            )
+            if (video.channelId != null) {
+                DropdownMenuItem(
+                    text = { Text("Don't recommend channel") },
+                    leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null, tint = YtText) },
+                    onClick = {
+                        open = false
+                        onFeedback(FeedFeedback.DONT_RECOMMEND_CHANNEL)
+                    },
+                )
+            }
+        }
+    }
+}
+
+// Shimmering placeholders that mirror VideoCard: rounded 16:9 thumbnail,
+// avatar and the two title lines plus meta. One shared alpha keeps the whole
+// skeleton in sync and the layout calm while the network catches up. With
+// showChips it also covers the filter-tag row, so the first paint matches the
+// Home layout before the chips arrive.
+@Composable
+fun SkeletonFeed(
+    modifier: Modifier = Modifier,
+    rows: Int = 4,
+    showChips: Boolean = false,
+) {
     val transition = rememberInfiniteTransition(label = "skeleton")
     val shimmer by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.85f,
+        initialValue = 0.30f,
+        targetValue = 0.80f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 800, easing = LinearEasing),
+            animation = tween(durationMillis = 850, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "skeletonAlpha",
     )
     val bone = YtSurfaceHi.copy(alpha = shimmer)
     Column(modifier.fillMaxWidth()) {
+        if (showChips) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(52.dp, 70.dp, 60.dp, 84.dp).forEach { width ->
+                    Box(
+                        Modifier
+                            .width(width)
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(bone),
+                    )
+                }
+            }
+        }
         repeat(rows.coerceAtLeast(1)) {
             Box(
                 Modifier
@@ -256,10 +345,18 @@ fun SkeletonFeed(modifier: Modifier = Modifier, rows: Int = 4) {
                             .clip(RoundedCornerShape(4.dp))
                             .background(bone),
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(5.dp))
                     Box(
                         Modifier
-                            .fillMaxWidth(0.55f)
+                            .fillMaxWidth(0.64f)
+                            .height(14.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(bone),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Box(
+                        Modifier
+                            .fillMaxWidth(0.45f)
                             .height(12.dp)
                             .clip(RoundedCornerShape(4.dp))
                             .background(bone),

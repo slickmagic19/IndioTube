@@ -83,9 +83,13 @@ fun SearchScreen(container: Container, ui: UiRefs) {
         suggestMode = false
         keyboard?.hide()
         query = trimmed
+        // Clearing the old page makes every new query or filter switch show
+        // the skeleton instead of the previous results.
+        loading = true
+        error = null
+        entries = null
+        continuation = null
         scope.launch {
-            loading = true
-            error = null
             try {
                 val result = container.innerTube.search(trimmed, f)
                 entries = result.entries
@@ -243,7 +247,7 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                     }
                 }
             }
-            loading && entries == null -> LoadingBox(Modifier.fillMaxSize())
+            loading && entries == null -> SkeletonFeed(Modifier.fillMaxSize())
             entries == null -> {
                 // recent searches / idle state
                 if (ui.recentSearches.isEmpty()) {
@@ -293,6 +297,7 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                                         ui.openWatch(e.video, list.filterIsInstance<SearchEntry.Video>().map { it.video })
                                     },
                                     onChannelClick = { ui.openChannelOf(e.video) },
+                                    onFeedback = { ui.feedback(e.video, it) },
                                 )
                                 is SearchEntry.Channel -> ChannelResultRow(e.channel, ui)
                                 is SearchEntry.Playlist -> PlaylistResultRow(e.playlist, ui)

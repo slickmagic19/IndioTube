@@ -8,6 +8,7 @@ import com.indiotube.app.data.Downloads
 import com.indiotube.app.data.InnerTube
 import com.indiotube.app.data.LibraryStore
 import com.indiotube.app.data.Net
+import com.indiotube.app.data.PlaybackPrefs
 import com.indiotube.app.data.StreamResolver
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -51,6 +52,7 @@ class Container(context: Context) {
     val innerTube = InnerTube(http)
     val resolver = StreamResolver(http).also { StreamResolver.init(http) }
     val captions = CaptionPrefs(context)
+    val playbackPrefs = PlaybackPrefs(context)
     val downloads = Downloads(context, resolver, http) { net.online.value }
 
     // Home "For you" feed bookkeeping: when it was last built (so a return to

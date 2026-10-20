@@ -61,12 +61,15 @@ import androidx.compose.material.icons.outlined.ThumbDown
 import androidx.compose.material.icons.outlined.ThumbUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -182,6 +185,7 @@ fun WatchScreen(
     val captionLanguage by container.captions.language.collectAsState()
     val captionStyle by container.captions.style.collectAsState()
     val subtitle by player.subtitle.collectAsState()
+    val autoplayNext by player.autoplayNext.collectAsState()
     val playingVideo by player.current.collectAsState()
     val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
     var resumed by remember(video.videoId) { mutableStateOf(false) }
@@ -858,6 +862,34 @@ fun WatchScreen(
                 // ---- up next ---------------------------------------------------
                 val related = watch?.related.orEmpty()
                 if (related.isNotEmpty()) {
+                    item {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Autoplay",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = YtText,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Switch(
+                                checked = autoplayNext,
+                                onCheckedChange = { player.setAutoplayNext(it) },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = YtRed,
+                                    checkedBorderColor = Color.Transparent,
+                                    uncheckedThumbColor = Color(0xFF909090),
+                                    uncheckedTrackColor = YtSurfaceHi,
+                                    uncheckedBorderColor = Color.Transparent,
+                                ),
+                            )
+                        }
+                        HorizontalDivider(color = YtDivider)
+                    }
                     item { SectionHeader("Up next") }
                     items(related, key = { "rel-" + it.videoId }) { v ->
                         VideoRow(

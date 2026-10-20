@@ -6,11 +6,11 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Info
@@ -37,15 +37,21 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 // App-wide transient messages rendered above every layer (player, sheets).
-data class ToastMsg(val id: Long, val text: String)
+// An optional action turns the toast into YouTube's Undo snackbar.
+data class ToastMsg(
+    val id: Long,
+    val text: String,
+    val actionLabel: String? = null,
+    val action: (() -> Unit)? = null,
+)
 
 class ToastState {
     private val counter = AtomicLong(0)
     private val _current = MutableStateFlow<ToastMsg?>(null)
     val current: StateFlow<ToastMsg?> = _current.asStateFlow()
 
-    fun show(text: String) {
-        _current.value = ToastMsg(counter.incrementAndGet(), text)
+    fun show(text: String, actionLabel: String? = null, action: (() -> Unit)? = null) {
+        _current.value = ToastMsg(counter.incrementAndGet(), text, actionLabel, action)
     }
 
     fun dismiss(id: Long) {
@@ -86,8 +92,27 @@ fun ToastHost(state: ToastState, modifier: Modifier = Modifier) {
                 color = YtText,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 280.dp),
+                modifier = Modifier.weight(1f, fill = false),
             )
+            val actionLabel = msg?.actionLabel
+            val action = msg?.action
+            val id = msg?.id
+            if (actionLabel != null && action != null && id != null) {
+                Spacer(Modifier.size(8.dp))
+                Text(
+                    actionLabel,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = YtBlue,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            action()
+                            state.dismiss(id)
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
         }
     }
 }

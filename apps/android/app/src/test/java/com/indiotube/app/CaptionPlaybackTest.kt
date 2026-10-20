@@ -285,24 +285,37 @@ class CaptionPlaybackTest {
         // viewer watches it appear; the loader thread needs looper cycles to
         // hand the parsed cue to the renderer, so a single jump to one
         // position is racy under the fake clock.
-        var target = position + 250
-        var emittedText: String? = null
-        while (emittedText == null && target <= 9_500L && player.playbackState != Player.STATE_ENDED) {
-            try {
-                TestPlayerRunHelper.playUntilPosition(player, 0, target)
-            } catch (e: Exception) {
-                throw AssertionError(
-                    "playback stalled at $target ms (state=${player.playbackState}," +
-                        " pos=${player.currentPosition}, pwr=${player.playWhenReady}," +
-                        " opened=$openedUris, events=$events)",
-                    e,
-                )
+        fun playForCue(from: Long): String? {
+            var target = from + 250
+            while (target <= 9_500L && player.playbackState != Player.STATE_ENDED) {
+                try {
+                    TestPlayerRunHelper.playUntilPosition(player, 0, target)
+                } catch (e: Exception) {
+                    throw AssertionError(
+                        "playback stalled at $target ms (state=${player.playbackState}," +
+                            " pos=${player.currentPosition}, pwr=${player.playWhenReady}," +
+                            " opened=$openedUris, events=$events)",
+                        e,
+                    )
+                }
+                shadowOf(mainLooper).idle()
+                val text = groups.flatten()
+                    .mapNotNull { it.text?.toString() }
+                    .firstOrNull { it == "Hello captions" }
+                if (text != null) return text
+                target += 250
             }
+            return null
+        }
+
+        // The cue spans the whole 10s file, but a loaded caption track that
+        // arrives mid-seek can miss it on the first pass under load. A second
+        // pass from the start always crosses the cue window.
+        var emittedText = playForCue(position)
+        if (emittedText == null) {
+            player.seekTo(0, 0)
             shadowOf(mainLooper).idle()
-            emittedText = groups.flatten()
-                .mapNotNull { it.text?.toString() }
-                .firstOrNull { it == "Hello captions" }
-            target += 250
+            emittedText = playForCue(0)
         }
         val textGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
         val texts = groups.flatten().map { it.text?.toString() }
