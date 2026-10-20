@@ -133,15 +133,21 @@ fun WatchScreen(
     container: Container,
     player: PlaybackController,
     ui: UiRefs,
-    video: VideoItem,
+    videoArg: VideoItem,
     context: List<VideoItem>,
 ) {
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     val activity = ctx as? Activity
 
-    val currentVideo by player.current.collectAsState()
+    // The queue can move on its own (autoplay) or through Next while this
+    // screen stays on the stack, so the playing item — not the one that opened
+    // the screen — is the source of truth for everything below it: title,
+    // description, comments, qualities and captions all follow it.
+    val playingVideo by player.current.collectAsState()
+    val video = playingVideo ?: videoArg
     val playing by player.playing.collectAsState()
+
     val buffering by player.buffering.collectAsState()
     val position by player.position.collectAsState()
     val duration by player.duration.collectAsState()
@@ -153,13 +159,17 @@ fun WatchScreen(
     val tasks by container.downloads.tasks.collectAsState()
     val dlItems by container.downloads.items.collectAsState()
 
-    var watch by remember { mutableStateOf<com.indiotube.app.data.WatchData?>(null) }
-    var comments by remember { mutableStateOf<List<CommentItem>>(emptyList()) }
-    var commentsToken by remember { mutableStateOf<String?>(null) }
-    var loadingComments by remember { mutableStateOf(false) }
-    var loadingMoreComments by remember { mutableStateOf(false) }
+    // These are keyed to the playing video so an autoplay/Next transition
+    // swaps them in the same recomposition as the title, instead of leaving
+    // the previous video's description or comments on screen.
+    var watch by remember(video.videoId) { mutableStateOf<com.indiotube.app.data.WatchData?>(null) }
+    var comments by remember(video.videoId) { mutableStateOf<List<CommentItem>>(emptyList()) }
+    var commentsToken by remember(video.videoId) { mutableStateOf<String?>(null) }
+    var loadingComments by remember(video.videoId) { mutableStateOf(false) }
+    var loadingMoreComments by remember(video.videoId) { mutableStateOf(false) }
 
     // Loaded reply threads, keyed by the parent comment id.
+
     var replyStates by remember(video.videoId) {
         mutableStateOf<Map<String, CommentRepliesState>>(emptyMap())
     }
@@ -186,11 +196,11 @@ fun WatchScreen(
     val captionStyle by container.captions.style.collectAsState()
     val subtitle by player.subtitle.collectAsState()
     val autoplayNext by player.autoplayNext.collectAsState()
-    val playingVideo by player.current.collectAsState()
     val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
     var resumed by remember(video.videoId) { mutableStateOf(false) }
 
     // make sure the tapped video is the one actually playing
+
     LaunchedEffect(video.videoId) {
         if (player.current.value?.videoId != video.videoId) {
             val idx = context.indexOfFirst { it.videoId == video.videoId }
@@ -208,12 +218,10 @@ fun WatchScreen(
 
     // watch metadata + first page of comments
     LaunchedEffect(video.videoId) {
-        watch = null
-        comments = emptyList()
-        commentsToken = null
         try {
             val w = container.innerTube.watch(video.videoId)
             watch = w
+
             // The watch page knows the real channel photo even when the card
             // that opened it did not; backfill saved copies (history, likes,
             // playlists) so avatars never stay blank.
@@ -861,20 +869,27 @@ fun WatchScreen(
 
                 // ---- up next ---------------------------------------------------
                 val related = watch?.related.orEmpty()
-                if (related.isNotEmpty()) {
+                val hasNext = queue.size > 1
+                if (hasNext || related.isNotEmpty()) {
                     item {
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+                                .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                "Autoplay",
-                                style = MaterialTheme.typography.titleSmall,
+                                "Up next",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                                 color = YtText,
                                 modifier = Modifier.weight(1f),
                             )
+                            Text(
+                                "Autoplay",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = YtMuted,
+                            )
+                            Spacer(Modifier.width(4.dp))
                             Switch(
                                 checked = autoplayNext,
                                 onCheckedChange = { player.setAutoplayNext(it) },
@@ -890,7 +905,6 @@ fun WatchScreen(
                         }
                         HorizontalDivider(color = YtDivider)
                     }
-                    item { SectionHeader("Up next") }
                     items(related, key = { "rel-" + it.videoId }) { v ->
                         VideoRow(
                             v,
@@ -899,6 +913,7 @@ fun WatchScreen(
                         )
                     }
                 }
+
                 item { Spacer(Modifier.height(10.dp)) }
             }
         }

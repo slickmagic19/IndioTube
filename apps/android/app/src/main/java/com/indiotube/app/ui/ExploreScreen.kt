@@ -1,18 +1,25 @@
 package com.indiotube.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -27,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -66,6 +74,7 @@ private data class ExploreFeed(
 fun ExploreScreen(container: Container, ui: UiRefs) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val account by container.accounts.active.collectAsState()
     val hiddenIds by container.library.notInterestedIds.collectAsState()
     val blockedChannels by container.library.blockedChannelIds.collectAsState()
     var selected by remember { mutableIntStateOf(0) }
@@ -123,7 +132,10 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
         }
     }
 
-    LaunchedEffect(selected) { load(selected) }
+    LaunchedEffect(selected) {
+        load(selected)
+        listState.scrollToItem(0)
+    }
 
     LaunchedEffect(listState, selected) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
@@ -134,21 +146,43 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
     }
 
     val feed = feeds[selected]
+    val category = EXPLORE_CATEGORIES[selected]
+    val sectionTitle = if (category.query == null) "Trending now" else category.label
 
     Column(Modifier.fillMaxSize()) {
-        Text(
-            "Explore",
-            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-            color = YtText,
-            modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp),
-        )
+        // Same top-bar rhythm as Home and You: title on the left, search and
+        // the account avatar on the right.
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Explore",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = YtText,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = { ui.open(Screen.Search) }) {
+                Icon(Icons.Outlined.Search, "Search", tint = YtText, modifier = Modifier.size(24.dp))
+            }
+            ChannelAvatar(
+                name = account?.name,
+                url = null,
+                size = 30.dp,
+                modifier = Modifier
+                    .padding(end = 2.dp)
+                    .clickable { ui.openAccounts() },
+            )
+        }
         LazyRow(
-            Modifier.padding(vertical = 4.dp),
+            Modifier.padding(top = 2.dp, bottom = 4.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
         ) {
-            itemsIndexed(EXPLORE_CATEGORIES) { i, category ->
+            itemsIndexed(EXPLORE_CATEGORIES) { i, item ->
                 FeedChip(
-                    title = category.label,
+                    title = item.label,
                     selected = i == selected,
                     onClick = { selected = i },
                 )
@@ -162,6 +196,7 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
                     refreshing = true
                     container.innerTube.invalidate()
                     load(selected, force = true)
+                    listState.scrollToItem(0)
                     refreshing = false
                 }
             },
@@ -169,7 +204,7 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
         ) {
             when {
                 feed == null || (feed.loading && feed.videos.isEmpty()) ->
-                    SkeletonFeed(Modifier.fillMaxSize())
+                    SkeletonFeed(Modifier.fillMaxSize(), showHeader = true)
                 feed.error && feed.videos.isEmpty() -> ErrorState(
                     "Couldn't load Explore right now",
                     onRetry = {
@@ -185,6 +220,16 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
                             (v.channelId == null || v.channelId !in blockedChannels)
                     }
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                        item(key = "section") { SectionHeader(sectionTitle) }
+                        if (videos.isEmpty()) {
+                            item(key = "empty") {
+                                EmptyState(
+                                    title = "Nothing here right now",
+                                    subtitle = "Pull down to refresh, or try another category.",
+                                    modifier = Modifier.fillParentMaxSize(),
+                                )
+                            }
+                        }
                         items(videos, key = { it.videoId }) { video ->
                             VideoCard(
                                 video,
@@ -194,9 +239,9 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
                             )
                         }
                         if (loadingMore) {
-                            item { LoadingBox(Modifier.height(80.dp)) }
+                            item(key = "loading-more") { LoadingBox() }
                         }
-                        item { Spacer(Modifier.height(8.dp)) }
+                        item(key = "bottom-spacer") { Spacer(Modifier.height(8.dp)) }
                     }
                 }
             }

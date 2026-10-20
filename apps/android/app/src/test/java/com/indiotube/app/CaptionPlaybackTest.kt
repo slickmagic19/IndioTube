@@ -285,12 +285,21 @@ class CaptionPlaybackTest {
         // viewer watches it appear; the loader thread needs looper cycles to
         // hand the parsed cue to the renderer, so a single jump to one
         // position is racy under the fake clock.
+        fun cueText(): String? = groups.flatten()
+            .mapNotNull { it.text?.toString() }
+            .firstOrNull { it == "Hello captions" }
+
         fun playForCue(from: Long): String? {
             var target = from + 250
-            while (target <= 9_500L && player.playbackState != Player.STATE_ENDED) {
+            while (target <= 9_500L) {
+                if (player.playbackState == Player.STATE_ENDED) return null
                 try {
                     TestPlayerRunHelper.playUntilPosition(player, 0, target)
                 } catch (e: Exception) {
+                    // The fake clock can outrun the real subtitle decoder and
+                    // hit the end of the item mid-step; the retry loop below
+                    // rewinds and tries again.
+                    if (player.playbackState == Player.STATE_ENDED) return null
                     throw AssertionError(
                         "playback stalled at $target ms (state=${player.playbackState}," +
                             " pos=${player.currentPosition}, pwr=${player.playWhenReady}," +
@@ -299,23 +308,36 @@ class CaptionPlaybackTest {
                     )
                 }
                 shadowOf(mainLooper).idle()
-                val text = groups.flatten()
-                    .mapNotNull { it.text?.toString() }
-                    .firstOrNull { it == "Hello captions" }
-                if (text != null) return text
+                cueText()?.let { return it }
                 target += 250
             }
             return null
         }
 
-        // The cue spans the whole 10s file, but a loaded caption track that
-        // arrives mid-seek can miss it on the first pass under load. A second
-        // pass from the start always crosses the cue window.
+        // The cue spans the whole 10s file, but the subtitle decoder runs on a
+        // real background thread while the fake clock advances almost
+        // instantly. Under load the parsed cue can arrive after the simulated
+        // playback has already passed the cue window. Replay the opening of the
+        // file, giving the decoder real time between attempts, until the cue
+        // reaches the renderer.
         var emittedText = playForCue(position)
         if (emittedText == null) {
-            player.seekTo(0, 0)
-            shadowOf(mainLooper).idle()
-            emittedText = playForCue(0)
+            val deadline = System.currentTimeMillis() + 5_000
+            while (emittedText == null && System.currentTimeMillis() < deadline) {
+                player.seekTo(0, 0)
+                shadowOf(mainLooper).idle()
+                try {
+                    TestPlayerRunHelper.playUntilPosition(player, 0, 500)
+                } catch (e: Exception) {
+                    if (player.playbackState != Player.STATE_ENDED) throw e
+                }
+                shadowOf(mainLooper).idle()
+                emittedText = cueText()
+                if (emittedText == null) {
+                    Thread.sleep(20)
+                    shadowOf(mainLooper).idle()
+                }
+            }
         }
         val textGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
         val texts = groups.flatten().map { it.text?.toString() }

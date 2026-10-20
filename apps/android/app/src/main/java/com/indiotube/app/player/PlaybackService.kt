@@ -15,12 +15,18 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.indiotube.app.IndioTubeApplication
 import com.indiotube.app.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 // Hosts the single ExoPlayer instance. Lives in the foreground-service
 // pipeline so playback (and the notification controls) survive the UI.
 class PlaybackService : MediaSessionService() {
 
     private var session: MediaSession? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     override fun onCreate() {
         super.onCreate()
@@ -54,8 +60,13 @@ class PlaybackService : MediaSessionService() {
 
         // Autoplay is a per-item playlist behaviour: with it off the player
         // pauses when the current video ends instead of starting the next
-        // queue item.
-        player.setPauseAtEndOfMediaItems(!app.container.playbackPrefs.autoplayNext.value)
+        // queue item. Observe the preference directly so the switch works even
+        // if the controller has not (re)connected yet.
+        scope.launch {
+            app.container.playbackPrefs.autoplayNext.collect { enabled ->
+                player.setPauseAtEndOfMediaItems(!enabled)
+            }
+        }
 
         session = MediaSession.Builder(this, player)
             .setSessionActivity(
@@ -107,6 +118,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        scope.cancel()
         session?.run {
             player.release()
             release()

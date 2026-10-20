@@ -283,12 +283,14 @@ private fun CardFeedbackMenu(video: VideoItem, onFeedback: (FeedFeedback) -> Uni
 // avatar and the two title lines plus meta. One shared alpha keeps the whole
 // skeleton in sync and the layout calm while the network catches up. With
 // showChips it also covers the filter-tag row, so the first paint matches the
-// Home layout before the chips arrive.
+// Home layout before the chips arrive; showHeader adds the section title bone
+// used by pages with a category header above the list.
 @Composable
 fun SkeletonFeed(
     modifier: Modifier = Modifier,
     rows: Int = 4,
     showChips: Boolean = false,
+    showHeader: Boolean = false,
 ) {
     val transition = rememberInfiniteTransition(label = "skeleton")
     val shimmer by transition.animateFloat(
@@ -319,6 +321,16 @@ fun SkeletonFeed(
                     )
                 }
             }
+        }
+        if (showHeader) {
+            Box(
+                Modifier
+                    .padding(start = 12.dp, top = 12.dp, bottom = 6.dp)
+                    .width(118.dp)
+                    .height(20.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(bone),
+            )
         }
         repeat(rows.coerceAtLeast(1)) {
             Box(
