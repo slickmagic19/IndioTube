@@ -79,27 +79,45 @@ fun HomeScreen(container: Container, ui: UiRefs) {
         val stale = container.lastHomeRefreshAt > 0 &&
             System.currentTimeMillis() - container.lastHomeRefreshAt > 30 * 60_000L
         val refresh = force || stale
+        val previousFeed = feed
+        val previousLocal = localVideos
         try {
             val result = if (token != null) {
                 container.innerTube.homeContinuation(token)
             } else {
                 container.innerTube.home(params, refresh)
             }
-            feed = result
             error = null
-            if (token == null && result.videos.isEmpty()) {
-                // YouTube serves no recommendations to signed-out sessions,
+            if (token != null) {
+                feed = result
+                if (result.videos.isNotEmpty()) localVideos = emptyList()
+            } else if (result.videos.isNotEmpty()) {
+                feed = result
+                localVideos = emptyList()
+            } else {
+                // YouTube served no recommendations to signed-out sessions,
                 // so fall back to a feed built from this device's data:
                 // subscriptions, watch history and related videos.
                 localLoading = true
-                localVideos = try {
+                val freshLocal = try {
                     container.localRecommendations(refresh)
                 } catch (_: Exception) {
                     emptyList()
                 }
                 localLoading = false
-            } else if (result.videos.isNotEmpty()) {
-                localVideos = emptyList()
+                if (freshLocal.isNotEmpty()) {
+                    feed = result
+                    localVideos = freshLocal
+                } else if (retainPreviousHomeFeed(params, previousFeed?.videos.orEmpty(), previousLocal)) {
+                    // A failed/empty refresh must not erase a feed that was
+                    // already showing, which is what made tapping Home look
+                    // like an empty account.
+                    feed = previousFeed
+                    localVideos = previousLocal
+                } else {
+                    feed = result
+                    localVideos = emptyList()
+                }
             }
             if (token == null && (result.videos.isNotEmpty() || localVideos.isNotEmpty())) {
                 container.lastHomeRefreshAt = System.currentTimeMillis()
@@ -255,7 +273,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
             modifier = Modifier.fillMaxSize(),
         ) {
             when {
-                loading && feed == null -> SkeletonFeed(Modifier.fillMaxSize(), showChips = true)
+                loading && feed == null -> SkeletonFeed(Modifier.fillMaxSize(), showChips = true, scrollable = true)
                 error != null && feed == null -> ErrorState(error!!, onRetry = {
                     scope.launch {
                         loading = true
@@ -361,7 +379,9 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                 }
                                 // Only show the signed-out prompt when neither YouTube
                                 // nor the local fallback feed had anything to offer.
-                                if (f != null && shown.isEmpty() && !loadingMore && !localLoading && !categoryMode) {
+                                if (f != null && shown.isEmpty() && !loadingMore && !localLoading &&
+                                    !categoryMode && !loading && !refreshing
+                                ) {
                                     item(key = "empty") {
                                         EmptyState(
                                             title = "Try searching to get started",
@@ -405,6 +425,15 @@ private data class LocalCategoryFeed(
     val loading: Boolean = false,
     val error: Boolean = false,
 )
+
+// A Home-tab refresh has no params. If it comes back empty (offline, or the
+// signed-out API returning nothing) keep the feed that is already on screen
+// instead of replacing it with the empty-account prompt.
+internal fun retainPreviousHomeFeed(
+    params: String?,
+    previousVideos: List<VideoItem>,
+    previousLocal: List<VideoItem>,
+): Boolean = params == null && (previousVideos.isNotEmpty() || previousLocal.isNotEmpty())
 
 @Composable
 fun FeedChip(title: String, selected: Boolean, onClick: () -> Unit) {

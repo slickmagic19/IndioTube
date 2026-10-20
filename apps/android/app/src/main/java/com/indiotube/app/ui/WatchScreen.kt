@@ -35,7 +35,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -198,6 +200,11 @@ fun WatchScreen(
     val autoplayNext by player.autoplayNext.collectAsState()
     val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
     var resumed by remember(video.videoId) { mutableStateOf(false) }
+    val pageState = rememberLazyListState()
+
+    // A new video is a new page: start it at the top instead of leaving the
+    // previous video's scroll position (often mid-description or comments).
+    LaunchedEffect(video.videoId) { pageState.scrollToItem(0) }
 
     // make sure the tapped video is the one actually playing
 
@@ -421,7 +428,15 @@ fun WatchScreen(
     val description = watch?.description
     val subscribersText = watch?.subscribersText
 
+    // Collapsed previews flatten the description's blank lines; otherwise a
+    // description that starts with a title followed by an empty line renders
+    // the overflow ellipsis alone on the second line, which looks broken.
+    val descriptionPreview = remember(description) {
+        description?.replace(Regex("\\s+"), " ")?.trim()
+    }
+
     val merged = video.copy(
+
         title = title,
         channelName = channelName,
         channelId = channelId,
@@ -594,8 +609,11 @@ fun WatchScreen(
                 qualityLabel = qualityLabel,
                 captionsAvailable = captionsAvailable,
                 captionsOn = subtitle != null,
+                autoplayOn = autoplayNext,
+                onToggleAutoplay = { player.setAutoplayNext(!autoplayNext) },
                 onQuality = { qualitySheet = true },
                 onCaptions = { captionsSheet = true },
+
                 onBack = { ui.back() },
                 onTogglePlay = { player.togglePlayPause() },
                 onSeekBy = { player.seekBy(it) },
@@ -611,8 +629,9 @@ fun WatchScreen(
 
         // ---- page below the player -------------------------------------------
         if (!effectiveFullscreen) {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(state = pageState, modifier = Modifier.fillMaxSize()) {
                 item {
+
                     Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
                         Text(
                             title,
@@ -800,7 +819,7 @@ fun WatchScreen(
                                 Spacer(Modifier.height(8.dp))
                             }
                             Text(
-                                description,
+                                if (descExpanded) description else descriptionPreview.orEmpty(),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = YtText,
                                 maxLines = if (descExpanded) Int.MAX_VALUE else 2,
@@ -808,6 +827,7 @@ fun WatchScreen(
                                 lineHeight = 19.sp,
                             )
                             Spacer(Modifier.height(6.dp))
+
                             Text(
                                 if (descExpanded) "Show less" else "Show more",
                                 style = MaterialTheme.typography.labelLarge,
@@ -1003,8 +1023,11 @@ private fun PlayerChrome(
     qualityLabel: String,
     captionsAvailable: Boolean,
     captionsOn: Boolean,
+    autoplayOn: Boolean,
+    onToggleAutoplay: () -> Unit,
     onQuality: () -> Unit,
     onCaptions: () -> Unit,
+
     onBack: () -> Unit,
     onTogglePlay: () -> Unit,
     onSeekBy: (Long) -> Unit,
@@ -1111,8 +1134,35 @@ private fun PlayerChrome(
                     Modifier.fillMaxWidth().padding(top = 1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Autoplay pill, styled like the CC button: filled when
+                    // on, outlined when off. It sits on the left so the row
+                    // still ends with the regular quality/fullscreen controls.
+                    Box(
+                        Modifier
+                            .height(40.dp)
+                            .clickable(onClick = onToggleAutoplay)
+                            .padding(horizontal = 4.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(if (autoplayOn) Color.White else Color.Transparent)
+                                .border(1.2.dp, Color.White, RoundedCornerShape(3.dp))
+                                .padding(horizontal = 5.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                "Autoplay",
+                                color = if (autoplayOn) Color.Black else Color.White,
+                                fontSize = 9.sp,
+                                lineHeight = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
                     Spacer(Modifier.weight(1f))
                     if (queueSize > 1) {
+
                         IconButton(onClick = onNext, modifier = Modifier.size(40.dp)) {
                             Icon(Icons.Filled.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(26.dp))
                         }

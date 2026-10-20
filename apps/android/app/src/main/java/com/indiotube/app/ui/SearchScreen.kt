@@ -247,7 +247,7 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                     }
                 }
             }
-            loading && entries == null -> SkeletonFeed(Modifier.fillMaxSize())
+            loading && entries == null -> SkeletonFeed(Modifier.fillMaxSize(), scrollable = true)
             entries == null -> {
                 // recent searches / idle state
                 if (ui.recentSearches.isEmpty()) {

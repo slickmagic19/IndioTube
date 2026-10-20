@@ -204,7 +204,7 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
         ) {
             when {
                 feed == null || (feed.loading && feed.videos.isEmpty()) ->
-                    SkeletonFeed(Modifier.fillMaxSize(), showHeader = true)
+                    SkeletonFeed(Modifier.fillMaxSize(), showHeader = true, scrollable = true)
                 feed.error && feed.videos.isEmpty() -> ErrorState(
                     "Couldn't load Explore right now",
                     onRetry = {

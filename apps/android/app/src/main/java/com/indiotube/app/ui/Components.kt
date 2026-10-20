@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -291,7 +292,30 @@ fun SkeletonFeed(
     rows: Int = 4,
     showChips: Boolean = false,
     showHeader: Boolean = false,
+    scrollable: Boolean = false,
 ) {
+    val bone = rememberSkeletonBone()
+    // Full-screen loading states use a LazyColumn: unlike a plain Column it
+    // measures every card with unbounded height and clips the list, so tall
+    // 16:9 placeholders can't collide with the next row or bleed under the
+    // bottom bar.
+    if (scrollable) {
+        LazyColumn(modifier.fillMaxSize()) {
+            if (showChips) item(key = "skeleton-chips") { SkeletonChips(bone) }
+            if (showHeader) item(key = "skeleton-header") { SkeletonHeader(bone) }
+            repeat(rows.coerceAtLeast(1)) { item(key = "skeleton-row-$it") { SkeletonCard(bone) } }
+        }
+    } else {
+        Column(modifier.fillMaxWidth()) {
+            if (showChips) SkeletonChips(bone)
+            if (showHeader) SkeletonHeader(bone)
+            repeat(rows.coerceAtLeast(1)) { SkeletonCard(bone) }
+        }
+    }
+}
+
+@Composable
+private fun rememberSkeletonBone(): Color {
     val transition = rememberInfiniteTransition(label = "skeleton")
     val shimmer by transition.animateFloat(
         initialValue = 0.30f,
@@ -302,78 +326,84 @@ fun SkeletonFeed(
         ),
         label = "skeletonAlpha",
     )
-    val bone = YtSurfaceHi.copy(alpha = shimmer)
-    Column(modifier.fillMaxWidth()) {
-        if (showChips) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                listOf(52.dp, 70.dp, 60.dp, 84.dp).forEach { width ->
-                    Box(
-                        Modifier
-                            .width(width)
-                            .height(32.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(bone),
-                    )
-                }
-            }
-        }
-        if (showHeader) {
+    return YtSurfaceHi.copy(alpha = shimmer)
+}
+
+@Composable
+private fun SkeletonChips(bone: Color) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        listOf(52.dp, 70.dp, 60.dp, 84.dp).forEach { width ->
             Box(
                 Modifier
-                    .padding(start = 12.dp, top = 12.dp, bottom = 6.dp)
-                    .width(118.dp)
-                    .height(20.dp)
-                    .clip(RoundedCornerShape(5.dp))
+                    .width(width)
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(bone),
             )
         }
-        repeat(rows.coerceAtLeast(1)) {
+    }
+}
+
+@Composable
+private fun SkeletonHeader(bone: Color) {
+    Box(
+        Modifier
+            .padding(start = 12.dp, top = 12.dp, bottom = 6.dp)
+            .width(118.dp)
+            .height(20.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .background(bone),
+    )
+}
+
+@Composable
+private fun SkeletonCard(bone: Color) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 14.dp)) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .padding(horizontal = 12.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(bone),
+        )
+        Row(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp)) {
             Box(
                 Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(12.dp))
+                    .size(36.dp)
+                    .clip(CircleShape)
                     .background(bone),
             )
-            Row(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 14.dp)) {
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
                 Box(
                     Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
+                        .fillMaxWidth(0.92f)
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(4.dp))
                         .background(bone),
                 )
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth(0.92f)
-                            .height(14.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(bone),
-                    )
-                    Spacer(Modifier.height(5.dp))
-                    Box(
-                        Modifier
-                            .fillMaxWidth(0.64f)
-                            .height(14.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(bone),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Box(
-                        Modifier
-                            .fillMaxWidth(0.45f)
-                            .height(12.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(bone),
-                    )
-                }
+                Spacer(Modifier.height(5.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth(0.64f)
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(bone),
+                )
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth(0.45f)
+                        .height(12.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(bone),
+                )
             }
         }
     }
