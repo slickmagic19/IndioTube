@@ -51,7 +51,13 @@ class LiveNetworkTest {
     fun searchChannelFilterParsesChannels() = runBlocking {
         val results = innerTube.search("lofi girl", SearchFilter.CHANNELS)
         assertTrue("channel search should return entries", results.entries.isNotEmpty())
-        assertTrue("expect at least one channel", results.entries.any { it is SearchEntry.Channel })
+        val channels = results.entries.filterIsInstance<SearchEntry.Channel>().map { it.channel }
+        assertTrue("expect at least one channel", channels.isNotEmpty())
+        // Avatars are protocol-relative in YouTube's payload; the parser must
+        // hand Coil a loadable, absolute URL or search shows letter fallbacks.
+        val avatars = channels.mapNotNull { it.avatar }
+        assertTrue("most channels should carry an avatar", avatars.size >= channels.size - 1)
+        assertTrue("avatars must be absolute https URLs", avatars.all { it.startsWith("https://") })
     }
 
     @Test

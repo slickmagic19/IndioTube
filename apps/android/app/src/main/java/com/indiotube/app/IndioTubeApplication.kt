@@ -6,6 +6,7 @@ import com.indiotube.app.data.AccountsStore
 import com.indiotube.app.data.CaptionPrefs
 import com.indiotube.app.data.DownloadPrefs
 import com.indiotube.app.data.Downloads
+import com.indiotube.app.data.HomeSnapshot
 import com.indiotube.app.data.InnerTube
 import com.indiotube.app.data.LibraryStore
 import com.indiotube.app.data.Net
@@ -90,4 +91,5 @@ class Container(context: Context) {
     // refresh reshuffle the local ranking a little, like YouTube's feed.
     @Volatile var lastHomeRefreshAt: Long = 0L
     @Volatile var homeRotation: Int = 0
+    @Volatile var homeSnapshot: HomeSnapshot? = null
 }

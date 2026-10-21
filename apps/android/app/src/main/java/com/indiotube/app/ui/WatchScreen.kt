@@ -129,6 +129,7 @@ import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
 import com.indiotube.app.data.forLanguage
 import com.indiotube.app.data.formatDuration
+import com.indiotube.app.data.recommendableVideos
 import com.indiotube.app.player.PlaybackController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -961,7 +962,7 @@ fun WatchScreen(
                 }
 
                 // ---- up next ---------------------------------------------------
-                val related = watch?.related.orEmpty()
+                val related = watch?.related.orEmpty().recommendableVideos()
                 val hasNext = queue.size > 1
                 if (hasNext || related.isNotEmpty()) {
                     item {

@@ -57,6 +57,15 @@ class FeedRankingTest {
     }
 
     @Test
+    fun membersOnlyVideosAreNeverRecommended() {
+        val pool = (1..20).map { video("v$it", "channel${it % 5}") } +
+            (21..28).map { video("m$it", "channel${it % 5}").copy(membersOnly = true) }
+        val out = rankAndSample(pool, emptySignals, rotation = 4)
+        assertTrue("page filled from playable candidates", out.isNotEmpty())
+        assertTrue("no members-only recommendation", out.none { it.membersOnly })
+    }
+
+    @Test
     fun sameRotationIsStable() {
         val pool = (1..30).map { video("v$it", "channel${it % 6}") }
         val a = rankAndSample(pool, emptySignals, rotation = 7)

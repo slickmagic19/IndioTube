@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.normalizeImageUrl
 
 // ---- thumbnails ---------------------------------------------------------------
 
@@ -76,6 +77,7 @@ fun Thumb(
     progress: Float? = null,
     membersOnly: Boolean = false,
 ) {
+    val image = if (model is String) normalizeImageUrl(model) else model
     Box(modifier) {
         Box(
             Modifier
@@ -83,9 +85,9 @@ fun Thumb(
                 .clip(RoundedCornerShape(corner))
                 .background(YtSurfaceHi),
         ) {
-            if (model != null) {
+            if (image != null) {
                 AsyncImage(
-                    model = model,
+                    model = image,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
@@ -111,7 +113,7 @@ fun Thumb(
         }
         if (membersOnly) {
             Text(
-                "MEMBERS",
+                "MEMBERS ONLY",
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                 color = Color.White,
                 modifier = Modifier
@@ -158,6 +160,7 @@ fun ChannelAvatar(
     modifier: Modifier = Modifier,
 ) {
     val initial = name?.trim()?.firstOrNull()?.uppercase() ?: "?"
+    val image = normalizeImageUrl(url)
     Box(
         modifier
             .size(size)
@@ -174,9 +177,9 @@ fun ChannelAvatar(
             fontSize = (size.value * 0.42f).sp,
             fontWeight = FontWeight.Medium,
         )
-        if (!url.isNullOrBlank()) {
+        if (image != null) {
             AsyncImage(
-                model = url,
+                model = image,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),

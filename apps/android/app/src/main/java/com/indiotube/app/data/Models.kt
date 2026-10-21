@@ -56,6 +56,33 @@ fun parseDuration(text: String?): Long {
     }
 }
 
+// YouTube returns many channel avatars as protocol-relative URLs
+// ("//yt3.ggpht.com/..."). Coil rejects those, which left search results
+// showing only the fallback letter.
+fun normalizeImageUrl(value: String?): String? {
+    val url = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return when {
+        url.startsWith("//") -> "https:$url"
+        url.startsWith("http://") -> "https://" + url.removePrefix("http://")
+        else -> url
+    }
+}
+
+// The app has no YouTube sign-in, so "recommendations" here are the Home
+// feed, Up next and the local mix. Members-only videos cannot play without a
+// membership, so they stay visible only in explicit search/channel lists.
+internal fun List<VideoItem>.recommendableVideos(): List<VideoItem> =
+    filterNot { it.membersOnly }
+
+// Last successful Home render. Kept in Container so returning to the tab can
+// paint immediately while a fresh mix is built.
+data class HomeSnapshot(
+    val accountId: String?,
+    val at: Long,
+    val feed: HomeFeed,
+    val local: List<VideoItem>,
+)
+
 @Serializable
 data class ChannelItem(
     val channelId: String,

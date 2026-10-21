@@ -104,7 +104,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
 
     val ch = page?.channel
     val dispName = ch?.name?.takeIf { it.isNotBlank() } ?: name ?: "Channel"
-    val dispAvatar = ch?.avatar ?: avatar
+    val dispAvatar = ch?.avatar?.takeIf { it.isNotBlank() } ?: avatar
     val subscribed = active?.subscriptions?.any { it.channelId == channelId } == true
 
     Column(Modifier.fillMaxSize()) {

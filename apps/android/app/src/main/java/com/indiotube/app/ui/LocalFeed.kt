@@ -4,6 +4,7 @@ import com.indiotube.app.Container
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.publishAgeMinutes
+import com.indiotube.app.data.recommendableVideos
 import kotlin.random.Random
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -11,6 +12,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 
 // YouTube serves no recommendations to signed-out sessions, so the home feed
 // is computed locally, mirroring the signals YouTube's own recommender uses:
@@ -66,7 +68,8 @@ internal fun rankAndSample(
 ): List<VideoItem> {
     if (pool.isEmpty()) return emptyList()
     val candidates = pool.filterNot { v ->
-        v.videoId in signals.hiddenIds ||
+        v.membersOnly ||
+            v.videoId in signals.hiddenIds ||
             (v.channelId != null && v.channelId in signals.blockedChannelIds)
     }
     if (candidates.isEmpty()) return emptyList()
@@ -136,10 +139,45 @@ internal fun rankAndSample(
     return out
 }
 
+// Instant placeholder mix shown while the network-backed feed is building.
+// Liked and saved videos are safe, always-local picks; users with only watch
+// history get a recency-ranked slice of that instead of a blank Home.
+fun Container.localSeedRecommendations(limit: Int = 30): List<VideoItem> {
+    val history = library.history.value.sortedByDescending { it.ts }
+    val liked = library.liked.value
+    val saved = (liked + library.watchLater.value).distinctBy { it.videoId }
+    val candidates = (if (saved.isNotEmpty()) saved else history.map { it.video })
+        .filterNot { it.membersOnly }
+    if (candidates.isEmpty()) return emptyList()
+    val signals = FeedSignals(
+        affinity = emptyMap(),
+        subIds = accounts.subscriptions.value.map { it.channelId }.toSet(),
+        likedChannelIds = liked.mapNotNull { it.channelId }.toSet(),
+        watchedIds = history.map { it.video.videoId }.toSet(),
+        seedIds = emptySet(),
+        searchTerms = emptySet(),
+        completedIds = library.completedIds(),
+        interestedChannelIds = library.interestedChannelIds.value,
+        hiddenIds = library.notInterestedIds.value,
+        blockedChannelIds = library.blockedChannelIds.value,
+    )
+    return rankAndSample(candidates, signals, homeRotation, limit = limit)
+}
+
 suspend fun Container.localRecommendations(force: Boolean = false): List<VideoItem> {
+    val now = System.currentTimeMillis()
+    val accountId = accounts.active.value?.id
+    val cached = homeSnapshot
+    // A local mix is CPU + network heavy; reuse the one that produced the
+    // currently visible Home feed unless the caller explicitly refreshes.
+    if (!force && cached != null && cached.accountId == accountId &&
+        cached.local.isNotEmpty() && now - cached.at <= 10 * 60_000L
+    ) {
+        return cached.local
+    }
+
     homeRotation += 1
     val rotation = homeRotation
-    val now = System.currentTimeMillis()
 
     val history = library.history.value.sortedByDescending { it.ts }
     val subs = accounts.subscriptions.value
@@ -169,34 +207,49 @@ suspend fun Container.localRecommendations(force: Boolean = false): List<VideoIt
 
     // Search history: topics the user asked for, and the videos those
     // searches surfaced (a local analogue of YouTube's search-based recs).
-    val recentQueries = searches.map { it.query }.distinct().take(4)
+    val recentQueries = searches.map { it.query }.distinct().take(2)
     val searchTerms = searches.take(8).flatMap { tokenizeQuery(it.query) }.toSet()
 
-    val related = coroutineScope {
-        history.take(5).map { e ->
-            async(Dispatchers.IO) {
-                runCatching { innerTube.watch(e.video.videoId).related }.getOrElse { emptyList() }
-            }
-        }.awaitAll()
-    }.flatten()
-    val seedIds = related.map { it.videoId }.toSet()
-
-    val searchVideos = coroutineScope {
-        recentQueries.map { q ->
-            async(Dispatchers.IO) {
-                runCatching {
-                    innerTube.search(q).entries
-                        .filterIsInstance<SearchEntry.Video>()
-                        .map { it.video }
-                        .take(12)
-                }.getOrElse { emptyList() }
-            }
-        }.awaitAll()
-    }.flatten()
-
+    // Related videos, search results and channel uploads are independent, so
+    // run all three groups at once. Every request is bounded so one hung
+    // endpoint cannot hold the first paint hostage.
     val channelIds = (subs.map { it.channelId } + topWatched + likedChannels +
-        library.interestedChannelIds.value).distinct()
-    val fromChannels = latestFromChannels(channelIds, perChannel = 20, force = force)
+        library.interestedChannelIds.value).distinct().take(32)
+    val (related, searchVideos, fromChannels) = coroutineScope {
+        val relatedRequest = async(Dispatchers.IO) {
+            coroutineScope {
+                history.take(3).map { e ->
+                    async(Dispatchers.IO) {
+                        withTimeoutOrNull(8_000L) {
+                            runCatching { innerTube.watch(e.video.videoId).related }
+                                .getOrElse { emptyList() }
+                        } ?: emptyList()
+                    }
+                }.awaitAll()
+            }.flatten().recommendableVideos()
+        }
+        val searchRequest = async(Dispatchers.IO) {
+            coroutineScope {
+                recentQueries.map { q ->
+                    async(Dispatchers.IO) {
+                        withTimeoutOrNull(10_000L) {
+                            runCatching {
+                                innerTube.search(q).entries
+                                    .filterIsInstance<SearchEntry.Video>()
+                                    .map { it.video }
+                                    .take(12)
+                            }.getOrElse { emptyList() }
+                        } ?: emptyList()
+                    }
+                }.awaitAll()
+            }.flatten().recommendableVideos()
+        }
+        val channelRequest = async {
+            latestFromChannels(channelIds, perChannel = 20, force = force).recommendableVideos()
+        }
+        Triple(relatedRequest.await(), searchRequest.await(), channelRequest.await())
+    }
+    val seedIds = related.map { it.videoId }.toSet()
 
     val pool = LinkedHashMap<String, VideoItem>()
     fromChannels.forEach { pool[it.videoId] = it }
@@ -246,14 +299,16 @@ private suspend fun Container.latestFromChannels(
     force: Boolean,
 ): List<VideoItem> {
     if (channelIds.isEmpty()) return emptyList()
-    val sem = Semaphore(5)
+    val sem = Semaphore(8)
     return coroutineScope {
-        channelIds.take(60).map { id ->
+        channelIds.take(32).map { id ->
             async(Dispatchers.IO) {
                 sem.withPermit {
-                    runCatching {
-                        innerTube.channelVideos(id, force = force).videos.take(perChannel)
-                    }.getOrElse { emptyList() }
+                    withTimeoutOrNull(8_000L) {
+                        runCatching {
+                            innerTube.channelVideos(id, force = force).videos.take(perChannel)
+                        }.getOrElse { emptyList() }
+                    } ?: emptyList()
                 }
             }
         }.awaitAll().flatten()

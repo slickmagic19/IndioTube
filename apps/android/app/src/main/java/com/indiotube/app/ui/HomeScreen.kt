@@ -48,10 +48,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indiotube.app.Container
 import com.indiotube.app.data.HomeFeed
+import com.indiotube.app.data.HomeSnapshot
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.SearchFilter
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.recommendableVideos
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,17 +66,27 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     val hiddenIds by container.library.notInterestedIds.collectAsState()
     val blockedChannels by container.library.blockedChannelIds.collectAsState()
 
-    var feed by remember { mutableStateOf<HomeFeed?>(null) }
-    var selectedChip by remember { mutableIntStateOf(0) }
-    var localChip by remember { mutableIntStateOf(0) }
-    var loading by remember { mutableStateOf(true) }
-    var refreshing by remember { mutableStateOf(false) }
-    var loadingMore by remember { mutableStateOf(false) }
-    var chipLoading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var localVideos by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
-    var localLoading by remember { mutableStateOf(false) }
-    val localFeeds = remember { mutableStateMapOf<String, LocalCategoryFeed>() }
+    // Paint the last successful Home render immediately on app start / tab
+    // return instead of showing a skeleton while the first request is in
+    // flight. The cached copy is account-scoped so switching accounts cannot
+    // flash another account's recommendations.
+    val accountId = account?.id
+    val cachedHome = remember(accountId) {
+        container.homeSnapshot?.takeIf { it.accountId == accountId }
+    }
+    var feed by remember(accountId) { mutableStateOf<HomeFeed?>(cachedHome?.feed) }
+    var selectedChip by remember(accountId) { mutableIntStateOf(0) }
+    var localChip by remember(accountId) { mutableIntStateOf(0) }
+    var loading by remember(accountId) { mutableStateOf(cachedHome == null) }
+    var refreshing by remember(accountId) { mutableStateOf(false) }
+    var loadingMore by remember(accountId) { mutableStateOf(false) }
+    var chipLoading by remember(accountId) { mutableStateOf(false) }
+    var error by remember(accountId) { mutableStateOf<String?>(null) }
+    var localVideos by remember(accountId) {
+        mutableStateOf(cachedHome?.local.orEmpty())
+    }
+    var localLoading by remember(accountId) { mutableStateOf(false) }
+    val localFeeds = remember(accountId) { mutableStateMapOf<String, LocalCategoryFeed>() }
 
     suspend fun load(force: Boolean = false, params: String? = null, token: String? = null) {
         // Returning to an old feed shouldn't show yesterday's picks — rebuild
@@ -80,8 +94,34 @@ fun HomeScreen(container: Container, ui: UiRefs) {
         val stale = container.lastHomeRefreshAt > 0 &&
             System.currentTimeMillis() - container.lastHomeRefreshAt > 30 * 60_000L
         val refresh = force || stale
+        val homeRequest = token == null && params == null
         val previousFeed = feed
         val previousLocal = localVideos
+
+        // A recent successful render is already on screen: don't spend a
+        // round-trip rediscovering that the signed-out Home is empty.
+        val currentSnapshot = container.homeSnapshot
+        if (homeRequest && !force && !stale && currentSnapshot != null &&
+            currentSnapshot.accountId == accountId &&
+            System.currentTimeMillis() - currentSnapshot.at < 30 * 60_000L
+        ) {
+            error = null
+            feed = currentSnapshot.feed
+            localVideos = currentSnapshot.local
+            return
+        }
+
+        // Seed the list with the user's own saved/history videos so the first
+        // frame after a cold start has real content rather than skeletons.
+        if (homeRequest && previousFeed == null && previousLocal.isEmpty()) {
+            val seed = withContext(Dispatchers.Default) { container.localSeedRecommendations() }
+            if (seed.isNotEmpty()) {
+                feed = HomeFeed(emptyList(), emptyList(), null)
+                localVideos = seed
+                localLoading = true
+            }
+        }
+
         try {
             val result = if (token != null) {
                 container.innerTube.homeContinuation(token)
@@ -95,13 +135,14 @@ fun HomeScreen(container: Container, ui: UiRefs) {
             } else if (result.videos.isNotEmpty()) {
                 feed = result
                 localVideos = emptyList()
+                localLoading = false
             } else {
                 // YouTube served no recommendations to signed-out sessions,
                 // so fall back to a feed built from this device's data:
                 // subscriptions, watch history and related videos.
                 localLoading = true
                 val freshLocal = try {
-                    container.localRecommendations(refresh)
+                    withContext(Dispatchers.Default) { container.localRecommendations(refresh) }
                 } catch (_: Exception) {
                     emptyList()
                 }
@@ -120,10 +161,17 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                     localVideos = emptyList()
                 }
             }
-            if (token == null && (result.videos.isNotEmpty() || localVideos.isNotEmpty())) {
+            if (homeRequest && (feed?.videos.orEmpty().isNotEmpty() || localVideos.isNotEmpty())) {
+                container.homeSnapshot = HomeSnapshot(
+                    accountId = accountId,
+                    at = System.currentTimeMillis(),
+                    feed = feed ?: result,
+                    local = localVideos,
+                )
                 container.lastHomeRefreshAt = System.currentTimeMillis()
             }
         } catch (e: Exception) {
+            localLoading = false
             if (feed == null) error = e.message ?: "Couldn't load your feed"
         }
     }
@@ -137,7 +185,8 @@ fun HomeScreen(container: Container, ui: UiRefs) {
         try {
             val r = container.innerTube.search(label.lowercase(), SearchFilter.VIDEOS)
             localFeeds[label] = LocalCategoryFeed(
-                videos = r.entries.filterIsInstance<SearchEntry.Video>().map { it.video },
+                videos = r.entries.filterIsInstance<SearchEntry.Video>().map { it.video }
+                    .recommendableVideos(),
                 continuation = r.continuation,
             )
         } catch (_: Exception) {
@@ -184,7 +233,8 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                         localFeeds[label]?.let { cur ->
                             localFeeds[label] = cur.copy(
                                 videos = (cur.videos + r.entries.filterIsInstance<SearchEntry.Video>()
-                                    .map { it.video }).distinctBy { it.videoId },
+                                    .map { it.video }
+                                    .recommendableVideos()).distinctBy { it.videoId },
                                 continuation = r.continuation,
                             )
                         }
@@ -301,7 +351,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                         categoryMode -> categoryFeed?.videos.orEmpty()
                         usingLocal -> localVideos
                         else -> videos
-                    }.filter { v ->
+                    }.recommendableVideos().filter { v ->
                         v.videoId !in hiddenIds &&
                             (v.channelId == null || v.channelId !in blockedChannels)
                     }

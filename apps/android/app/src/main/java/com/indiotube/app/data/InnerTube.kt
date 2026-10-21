@@ -140,7 +140,9 @@ class InnerTube(private val http: OkHttpClient) {
         if (force) cache.remove(key)
         val hit = cache[key] as? CacheEntry<T>
         if (hit != null && System.currentTimeMillis() - hit.at < ttlMs) return hit.data
-        val fresh = load()
+        // Parsing large InnerTube payloads is CPU work; keep it off the UI
+        // thread even when the caller is a LaunchedEffect or a click handler.
+        val fresh = withContext(Dispatchers.Default) { load() }
         cache[key] = CacheEntry(System.currentTimeMillis(), fresh)
         return fresh
     }
@@ -151,23 +153,36 @@ class InnerTube(private val http: OkHttpClient) {
 
     // ---- transport -----------------------------------------------------------
 
+    private fun defaultConfig() = Cfg(
+        key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+        version = "2.${SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())}.00.00",
+        visitor = null,
+    )
+
+    // Starting from the known-good defaults avoids a full YouTube HTML
+    // request before the first API call. If that call fails we fetch the
+    // current bootstrap once and retry.
     private suspend fun config(): Cfg {
         cfg?.let { return it }
         return withContext(Dispatchers.IO) {
-            cfgMutex.withLock {
-                cfg?.let { return@withLock it }
-                var key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-                var version = "2.${SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())}.00.00"
-                var visitor: String? = null
-                try {
-                    val html = execute("https://www.youtube.com/", null, null)
-                    Regex("\"INNERTUBE_API_KEY\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)?.let { key = it }
-                    Regex("\"INNERTUBE_CONTEXT_CLIENT_VERSION\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)?.let { version = it }
-                    visitor = Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)
-                } catch (_: Exception) { /* fall back to constants */ }
-                val c = Cfg(key, version, visitor)
-                cfg = c
-                c
+            cfgMutex.withLock { cfg ?: defaultConfig().also { cfg = it } }
+        }
+    }
+
+    private suspend fun refreshConfig(): Cfg? = withContext(Dispatchers.IO) {
+        cfgMutex.withLock {
+            val current = cfg ?: defaultConfig()
+            try {
+                var key = current.key
+                var version = current.version
+                var visitor: String? = current.visitor
+                val html = execute("https://www.youtube.com/", null, null)
+                Regex("\"INNERTUBE_API_KEY\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)?.let { key = it }
+                Regex("\"INNERTUBE_CONTEXT_CLIENT_VERSION\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)?.let { version = it }
+                visitor = Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(html)?.groupValues?.get(1)
+                Cfg(key, version, visitor).also { cfg = it }
+            } catch (_: Exception) {
+                null
             }
         }
     }
@@ -204,7 +219,7 @@ class InnerTube(private val http: OkHttpClient) {
     }
 
     private suspend fun post(endpoint: String, body: JsonObject): JsonElement = withContext(Dispatchers.IO) {
-        val c = config()
+        var c = config()
         var lastError: Exception? = null
         repeat(2) { attempt ->
             try {
@@ -212,7 +227,10 @@ class InnerTube(private val http: OkHttpClient) {
                 return@withContext SyncJson.parseToJsonElement(execute(url, body.toString(), c))
             } catch (e: Exception) {
                 lastError = e
-                if (attempt == 0) delay(1200)
+                if (attempt == 0) {
+                    refreshConfig()?.let { c = it }
+                    delay(1200)
+                }
             }
         }
         throw lastError ?: IOException("request failed")
@@ -244,12 +262,16 @@ class InnerTube(private val http: OkHttpClient) {
             // Signed-out sessions intentionally receive no recommendations
             // (the "Try searching to get started" nudge), so an empty feed is
             // a valid, expected response from YouTube here.
-            parseFeed(browse("FEwhat_to_watch", params))
+            val feed = parseFeed(browse("FEwhat_to_watch", params))
+            feed.copy(videos = feed.videos.recommendableVideos())
         }
 
     suspend fun homeContinuation(token: String): HomeFeed {
         val root = browse("FEwhat_to_watch", continuation = token)
-        return parseFeed(root)
+        return withContext(Dispatchers.Default) {
+            val feed = parseFeed(root)
+            feed.copy(videos = feed.videos.recommendableVideos())
+        }
     }
 
     // YouTube retired the signed-out FEtrending feed (it answers HTTP 400 on
@@ -262,7 +284,8 @@ class InnerTube(private val http: OkHttpClient) {
             val results = search("", TRENDING_PARAMS)
             HomeFeed(
                 emptyList(),
-                results.entries.filterIsInstance<SearchEntry.Video>().map { it.video },
+                results.entries.filterIsInstance<SearchEntry.Video>().map { it.video }
+                    .recommendableVideos(),
                 results.continuation,
             )
         }
@@ -274,7 +297,8 @@ class InnerTube(private val http: OkHttpClient) {
         val results = searchContinuation(token)
         HomeFeed(
             emptyList(),
-            results.entries.filterIsInstance<SearchEntry.Video>().map { it.video },
+            results.entries.filterIsInstance<SearchEntry.Video>().map { it.video }
+                .recommendableVideos(),
             results.continuation,
         )
     } catch (_: Exception) {
@@ -378,7 +402,7 @@ class InnerTube(private val http: OkHttpClient) {
             filter?.let { put("params", it) }
         }
         val root = post("search", body)
-        return parseSearch(root)
+        return withContext(Dispatchers.Default) { parseSearch(root) }
     }
 
     suspend fun searchContinuation(token: String): SearchResults {
@@ -388,7 +412,7 @@ class InnerTube(private val http: OkHttpClient) {
             put("continuation", token)
         }
         val root = post("search", body)
-        return parseSearch(root)
+        return withContext(Dispatchers.Default) { parseSearch(root) }
     }
 
     // Type-ahead suggestions from YouTube's own completion endpoint (the same
@@ -483,7 +507,7 @@ class InnerTube(private val http: OkHttpClient) {
 
     suspend fun channelContinuation(token: String): ChannelPage {
         val root = browse("", continuation = token)
-        return parseChannelPage(root, "")
+        return withContext(Dispatchers.Default) { parseChannelPage(root, "") }
     }
 
     suspend fun channelPlaylists(channelId: String, force: Boolean = false): List<PlaylistItem> = try {
@@ -624,13 +648,14 @@ class InnerTube(private val http: OkHttpClient) {
     private fun xthFirstUrl(container: JsonElement?): String? {
         val sources = container?.findAll("sources", maxDepth = 6, limit = 4)
             ?.filterIsInstance<JsonArray>()?.flatten() ?: return null
-        return sources.mapNotNull { it.pathStr("url") }.lastOrNull()
+        return normalizeImageUrl(sources.mapNotNull { it.pathStr("url") }.lastOrNull())
     }
 
-    private fun lastThumbUrl(container: JsonElement?): String? =
+    private fun lastThumbUrl(container: JsonElement?): String? = normalizeImageUrl(
         (container?.path("thumbnails") as? JsonArray)
             ?.mapNotNull { it.pathStr("url") }
-            ?.lastOrNull()
+            ?.lastOrNull(),
+    )
 
     // ---- watch page ---------------------------------------------------------------
 
@@ -641,7 +666,8 @@ class InnerTube(private val http: OkHttpClient) {
             put("videoId", videoId)
         }
         val root = post("next", body)
-        parseWatch(root, videoId)
+        val data = parseWatch(root, videoId)
+        data.copy(related = data.related.recommendableVideos())
     }
 
     internal fun parseWatch(root: JsonElement, videoId: String): WatchData {
@@ -780,6 +806,10 @@ class InnerTube(private val http: OkHttpClient) {
             put("continuation", token)
         }
         val root = post("next", body)
+        return withContext(Dispatchers.Default) { parseComments(root, token) }
+    }
+
+    private fun parseComments(root: JsonElement, token: String): CommentsPage {
         val entities = collectCommentEntities(root)
         val items = collectContinuationItems(root)
         val comments = ArrayList<CommentItem>()
@@ -853,7 +883,8 @@ class InnerTube(private val http: OkHttpClient) {
         val commentId = vm.pathStr("commentId") ?: vm.pathStr("commentKey") ?: return null
         val entity = entities[commentId]
         val author = entity?.pathStr("author", "displayName") ?: vm.pathStr("author", "displayName").orEmpty()
-        val avatar = entity?.pathStr("author", "avatarThumbnailUrl") ?: lastThumbUrl(vm.path("author", "avatar"))
+        val avatar = normalizeImageUrl(entity?.pathStr("author", "avatarThumbnailUrl"))
+            ?: lastThumbUrl(vm.path("author", "avatar"))
         val text = entity?.pathStr("properties", "content", "content")
             ?: vm.pathStr("content", "content")
             ?: vm.path("content").runsText()
@@ -907,12 +938,12 @@ class InnerTube(private val http: OkHttpClient) {
     suspend fun playlist(playlistId: String): PlaylistPage {
         val browseId = if (playlistId.startsWith("VL")) playlistId else "VL$playlistId"
         val root = browse(browseId)
-        return parsePlaylist(root)
+        return withContext(Dispatchers.Default) { parsePlaylist(root) }
     }
 
     suspend fun playlistContinuation(token: String): PlaylistPage {
         val root = browse("", continuation = token)
-        return parsePlaylist(root)
+        return withContext(Dispatchers.Default) { parsePlaylist(root) }
     }
 
     private fun parsePlaylist(root: JsonElement): PlaylistPage {
