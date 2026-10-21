@@ -1,11 +1,16 @@
 package com.indiotube.app.data
 
 import android.content.Context
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -151,12 +156,13 @@ class Downloads(
         val keep = LinkedHashMap<String, QueueEntry>()
         val restored = LinkedHashMap<String, DownloadTask>()
         for ((id, entry) in queue) {
-            val part = findPart(id)
-            if (!_items.value.containsKey(id) && part != null && part.length() > 0) {
+            val parts = findParts(id)
+            val bytes = parts.sumOf { it.length() }
+            if (!_items.value.containsKey(id) && bytes > 0) {
                 restored[id] = DownloadTask(
                     video = entry.video,
                     status = DlStatus.PAUSED,
-                    bytesDone = part.length(),
+                    bytesDone = bytes,
                     totalBytes = entry.totalBytes,
                     height = entry.height,
                 )
@@ -187,10 +193,13 @@ class Downloads(
         } catch (_: Exception) { }
     }
 
-    private fun findPart(id: String): File? = try {
-        dir.listFiles()?.firstOrNull { it.name.startsWith("$id.") && it.name.endsWith(".part") }
+    private fun findParts(id: String): List<File> = try {
+        dir.listFiles()
+            ?.filter { it.name.startsWith("$id.") && it.name.endsWith(".part") }
+            ?.sortedBy { it.name }
+            .orEmpty()
     } catch (_: Exception) {
-        null
+        emptyList()
     }
 
     // ---- public state ----------------------------------------------------
@@ -279,7 +288,7 @@ class Downloads(
             call?.cancel()
         } else {
             // paused/failed task with no worker — clean up right here
-            finishCancel(id, video, findPart(id))
+            finishCancel(id, video)
         }
     }
 
@@ -306,76 +315,57 @@ class Downloads(
 
     private fun intent(id: String): Intent = synchronized(this) { intents[id] ?: Intent.NONE }
 
+    private class PartComplete : Exception()
+
+    private data class DownloadPart(val stream: ResolvedStream, val file: File)
+
     private suspend fun runWorker(id: String, video: VideoItem, height: Int?) {
         var attempt = 0
-        var part: File? = null
         try {
             while (true) {
                 synchronized(this) { if (!_tasks.value.containsKey(id)) return }
                 when (intent(id)) {
-                    Intent.CANCEL -> { finishCancel(id, video, part ?: findPart(id)); return }
-                    Intent.PAUSE -> { finishPause(id, video, part ?: findPart(id)); return }
+                    Intent.CANCEL -> { finishCancel(id, video); return }
+                    Intent.PAUSE -> { finishPause(id, video); return }
                     Intent.NONE -> {}
                 }
                 try {
                     // after a failure a fresh URL helps: cached ones may have expired
-                    val rs = resolver.resolveBlocking(id, height, forceRefresh = attempt > 0)
-                    val existing = findPart(id)
-                    part = existing ?: File(dir, "$id.${rs.ext}.part")
-                    var copied = part.length()
-                    var total = queueTotal(id)
-                    val req = Request.Builder().url(rs.url)
-                    if (copied > 0) req.header("Range", "bytes=$copied-")
-                    val call = http.newCall(req.build())
-                    synchronized(this) { calls[id] = call }
-                    // a pause/cancel that arrived before the call was registered
-                    if (intent(id) != Intent.NONE) call.cancel()
-                    call.execute().use { r ->
-                        if (r.code == 416 && total > 0 && copied >= total) {
-                            // resume raced past the end — everything is on disk
-                            complete(id, video, part, height)
-                            return
+                    val sources = resolver.resolveDownloadBlocking(id, height, forceRefresh = attempt > 0)
+                    val parts = prepareParts(id, sources)
+                    val totals = HashMap<File, Long>()
+                    for (spec in parts) {
+                        try {
+                            downloadPart(id, video, spec, parts, totals, height)
+                        } catch (_: PartComplete) {
                         }
-                        if (!r.isSuccessful) throw IOException("Download failed (HTTP ${r.code})")
-                        val body = r.body ?: throw IOException("Download failed (empty response)")
-                        val contentRangeTotal = r.header("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()
-                        val contentLength = body.contentLength()
-                        if (r.code == 200) {
-                            // server ignored the range (or fresh start) — never append twice
-                            if (copied > 0) {
-                                part.delete()
-                                copied = 0
-                            }
-                            if (contentLength > 0) total = contentLength
-                        } else if (contentRangeTotal != null && contentRangeTotal > 0) {
-                            total = contentRangeTotal
-                        }
-                        persistTotal(id, video, total, height)
-                        updateTask(id) { it.copy(status = DlStatus.ACTIVE, totalBytes = total, bytesDone = copied, error = null) }
-                        FileOutputStream(part, true).use { out ->
-                            copyWithProgress(body.byteStream(), out, total, copied) { done ->
-                                updateTask(id) { it.copy(bytesDone = done) }
-                            }
-                        }
-                        val have = part.length()
-                        if (total <= 0 || have >= total) {
-                            // clean EOF: either the size matched or the server
-                            // never declared one (chunked) — nothing left to fetch
-                            complete(id, video, part, height)
-                            return
-                        }
-                        // short read with no error — try again from the current offset
-                        attempt++
-                        if (attempt > MAX_ATTEMPTS) throw IOException("Download stalled near the end")
                     }
+                    if (sources.audio != null) {
+                        val out = File(dir, "$id.mp4")
+                        muxParts(
+                            video = parts.first { it.stream.isVideo }.file,
+                            audio = parts.first { it.stream.isAudio }.file,
+                            target = out,
+                        )
+                        if (intent(id) == Intent.CANCEL) {
+                            out.delete()
+                            finishCancel(id, video)
+                            return
+                        }
+                        parts.forEach { it.file.delete() }
+                        finishSaved(id, video, out, sources.video.height)
+                    } else {
+                        complete(id, video, parts.first().file, sources.video.height)
+                    }
+                    return
                 } catch (e: CancellationException) {
-                    // the process is going away — keep the .part and queue entry
-                    // so this download comes back as a resumable paused task
+                    // the process is going away — keep the .part files and queue
+                    // entry so this download comes back as a resumable paused task
                     throw e
                 } catch (e: Exception) {
                     when (intent(id)) {
-                        Intent.CANCEL -> { finishCancel(id, video, part ?: findPart(id)); return }
-                        Intent.PAUSE -> { finishPause(id, video, part ?: findPart(id)); return }
+                        Intent.CANCEL -> { finishCancel(id, video); return }
+                        Intent.PAUSE -> { finishPause(id, video); return }
                         Intent.NONE -> {}
                     }
                     attempt++
@@ -400,7 +390,162 @@ class Downloads(
         }
     }
 
-    private fun queueTotal(id: String): Long = synchronized(this) { queue[id]?.totalBytes ?: 0L }
+    private fun prepareParts(id: String, sources: DownloadSources): List<DownloadPart> {
+        synchronized(this) {
+            val existing = findParts(id)
+            val adaptive = sources.audio != null
+            if (adaptive) {
+                val audioName = "$id.audio.${sources.audio!!.ext}.part"
+                val videoName = "$id.video.${sources.video.ext}.part"
+                existing.filterNot { it.name == audioName || it.name == videoName }
+                    .forEach { it.delete() }
+                return listOf(
+                    DownloadPart(sources.audio, existing.firstOrNull { it.name == audioName } ?: File(dir, audioName)),
+                    DownloadPart(sources.video, existing.firstOrNull { it.name == videoName } ?: File(dir, videoName)),
+                )
+            }
+            val singleName = "$id.${sources.video.ext}.part"
+            existing.filterNot { it.name == singleName }.forEach { it.delete() }
+            return listOf(
+                DownloadPart(sources.video, existing.firstOrNull { it.name == singleName } ?: File(dir, singleName)),
+            )
+        }
+    }
+
+    private fun downloadPart(
+        id: String,
+        video: VideoItem,
+        spec: DownloadPart,
+        allParts: List<DownloadPart>,
+        totals: MutableMap<File, Long>,
+        height: Int?,
+    ) {
+        var copied = spec.file.length()
+        var total = totals[spec.file] ?: 0L
+        val req = Request.Builder().url(spec.stream.url)
+        if (copied > 0) req.header("Range", "bytes=$copied-")
+        val call = http.newCall(req.build())
+        synchronized(this) { calls[id] = call }
+        if (intent(id) != Intent.NONE) call.cancel()
+        call.execute().use { r ->
+            if (r.code == 416 && copied > 0) {
+                val end = r.header("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()
+                if (end != null && end > 0 && copied >= end) {
+                    totals[spec.file] = end
+                    throw PartComplete()
+                }
+                throw IOException("Download failed (HTTP 416)")
+            }
+            if (!r.isSuccessful) throw IOException("Download failed (HTTP ${r.code})")
+            val body = r.body ?: throw IOException("Download failed (empty response)")
+            val contentRangeTotal = r.header("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()
+            val contentLength = body.contentLength()
+            if (r.code == 200) {
+                // server ignored the range (or fresh start) — never append twice
+                if (copied > 0) {
+                    spec.file.delete()
+                    copied = 0
+                }
+                if (contentLength > 0) total = contentLength
+            } else if (contentRangeTotal != null && contentRangeTotal > 0) {
+                total = contentRangeTotal
+            }
+            if (total > 0) totals[spec.file] = total
+            val allTotalsKnown = allParts.all { (totals[it.file] ?: 0) > 0 }
+            val combinedTotal = if (allTotalsKnown) allParts.sumOf { totals[it.file] ?: 0 } else 0L
+            val doneBefore = allParts.sumOf { it.file.length() } - copied
+            if (combinedTotal > 0) {
+                persistTotal(id, video, combinedTotal, height)
+                updateTask(id) {
+                    it.copy(
+                        status = DlStatus.ACTIVE,
+                        totalBytes = combinedTotal,
+                        bytesDone = doneBefore + copied,
+                        error = null,
+                    )
+                }
+            } else {
+                updateTask(id) {
+                    it.copy(
+                        status = DlStatus.ACTIVE,
+                        totalBytes = 0,
+                        bytesDone = doneBefore + copied,
+                        error = null,
+                    )
+                }
+            }
+            FileOutputStream(spec.file, true).use { out ->
+                copyWithProgress(body.byteStream(), out, combinedTotal, doneBefore) { done ->
+                    updateTask(id) { it.copy(bytesDone = done) }
+                }
+            }
+            val have = spec.file.length()
+            if (total > 0 && have < total) {
+                // short read with no error — retry from the current offset
+                throw IOException("Download stalled near the end")
+            }
+            if (total <= 0) totals[spec.file] = have
+        }
+    }
+
+    private fun muxParts(video: File, audio: File, target: File) {
+        if (target.exists()) target.delete()
+        val muxer = MediaMuxer(target.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val videoExtractor = MediaExtractor()
+        val audioExtractor = MediaExtractor()
+        try {
+            videoExtractor.setDataSource(video.absolutePath)
+            audioExtractor.setDataSource(audio.absolutePath)
+            val videoTrack = firstTrack(videoExtractor, "video/")
+                ?: throw IOException("Downloaded video has no video track")
+            val audioTrack = firstTrack(audioExtractor, "audio/")
+                ?: throw IOException("Downloaded audio has no audio track")
+            videoExtractor.selectTrack(videoTrack)
+            audioExtractor.selectTrack(audioTrack)
+            val videoOut = muxer.addTrack(videoExtractor.getTrackFormat(videoTrack))
+            val audioOut = muxer.addTrack(audioExtractor.getTrackFormat(audioTrack))
+            muxer.start()
+            val buffer = ByteBuffer.allocateDirect(4 * 1024 * 1024)
+            val info = MediaCodec.BufferInfo()
+            var videoDone = false
+            var audioDone = false
+            while (!videoDone || !audioDone) {
+                val videoTime = if (!videoDone) videoExtractor.sampleTime else -1L
+                val audioTime = if (!audioDone) audioExtractor.sampleTime else -1L
+                if (videoTime < 0) videoDone = true
+                if (audioTime < 0) audioDone = true
+                if (videoDone && audioDone) break
+                val useVideo = !videoDone && (audioDone || videoTime <= audioTime)
+                val extractor = if (useVideo) videoExtractor else audioExtractor
+                val outputTrack = if (useVideo) videoOut else audioOut
+                buffer.clear()
+                val size = extractor.readSampleData(buffer, 0)
+                if (size < 0) {
+                    if (useVideo) videoDone = true else audioDone = true
+                    continue
+                }
+                info.set(0, size, extractor.sampleTime, extractor.sampleFlags)
+                muxer.writeSampleData(outputTrack, buffer, info)
+                extractor.advance()
+            }
+            muxer.stop()
+        } catch (e: Exception) {
+            if (target.exists()) target.delete()
+            throw if (e is IOException) e else IOException(e.message ?: "Couldn't combine video and audio", e)
+        } finally {
+            try { videoExtractor.release() } catch (_: Exception) { }
+            try { audioExtractor.release() } catch (_: Exception) { }
+            try { muxer.release() } catch (_: Exception) { }
+        }
+    }
+
+    private fun firstTrack(extractor: MediaExtractor, mimePrefix: String): Int? {
+        for (i in 0 until extractor.trackCount) {
+            val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+            if (mime.startsWith(mimePrefix)) return i
+        }
+        return null
+    }
 
     private fun persistTotal(id: String, video: VideoItem, total: Long, height: Int?) {
         if (total <= 0) return
@@ -430,6 +575,10 @@ class Downloads(
             finishFailed(id, video, e.message ?: "Couldn't save the file")
             return
         }
+        finishSaved(id, video, target, height)
+    }
+
+    private fun finishSaved(id: String, video: VideoItem, target: File, height: Int?) {
         val thumbFile = saveThumbnail(id, video.thumbnail)
         val dl = SavedDownload(
             video = video,
@@ -468,8 +617,8 @@ class Downloads(
         }
     }
 
-    private fun finishPause(id: String, video: VideoItem, part: File?) {
-        val bytes = part?.takeIf { it.exists() }?.length() ?: findPart(id)?.length() ?: 0L
+    private fun finishPause(id: String, video: VideoItem) {
+        val bytes = findParts(id).sumOf { it.length() }
         synchronized(this) {
             val t = _tasks.value[id] ?: return
             _tasks.value = _tasks.value + (id to t.copy(status = DlStatus.PAUSED, bytesDone = bytes, error = null))
@@ -477,8 +626,10 @@ class Downloads(
         _events.tryEmit(DlEvent.Paused(video))
     }
 
-    private fun finishCancel(id: String, video: VideoItem, part: File?) {
-        try { part?.delete() } catch (_: Exception) { }
+    private fun finishCancel(id: String, video: VideoItem) {
+        findParts(id).forEach {
+            try { it.delete() } catch (_: Exception) { }
+        }
         synchronized(this) {
             _tasks.value = _tasks.value - id
             queue = queue - id

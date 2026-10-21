@@ -1797,14 +1797,14 @@ private fun DownloadQualitySheet(
                     }
                 }
                 else -> {
-                    val muxed = qualities.options.filter { it.muxed != null }
+                    val downloadable = qualities.downloadOptions()
                     val autoHeight = qualities.auto?.height
                     ChoiceRow(
                         label = "Auto",
                         subtitle = if (autoHeight != null) {
-                            "Best available (${autoHeight}p) • recommended"
+                            "Best single file (${autoHeight}p) • recommended"
                         } else {
-                            "Best available"
+                            "Best single file"
                         },
                         selected = true,
                         onClick = { onSelect(null) },
@@ -1816,21 +1816,26 @@ private fun DownloadQualitySheet(
                             .height(1.dp)
                             .background(Color(0x1FFFFFFF)),
                     )
-                    muxed.forEach { option ->
+                    downloadable.forEach { option ->
                         val badge = when {
                             option.height >= 2160 -> "4K"
                             option.height >= 1440 -> "2K"
                             option.height >= 720 -> "HD"
                             else -> null
                         }
+                        val merged = option.muxed == null
+                        val subtitle = listOfNotNull(
+                            badge,
+                            if (merged) "Video + audio" else null,
+                        ).joinToString(" • ").ifBlank { null }
                         ChoiceRow(
                             label = option.label,
-                            subtitle = badge,
+                            subtitle = subtitle,
                             selected = false,
                             onClick = { onSelect(option.height) },
                         )
                     }
-                    if (muxed.isEmpty()) {
+                    if (downloadable.isEmpty()) {
                         Text(
                             "No downloadable file was offered for this video.",
                             style = MaterialTheme.typography.bodySmall,
@@ -1839,7 +1844,7 @@ private fun DownloadQualitySheet(
                         )
                     }
                     Text(
-                        "Higher qualities use more data.",
+                        "Higher qualities use more data. Video and audio are combined into one file.",
                         style = MaterialTheme.typography.bodySmall,
                         color = YtMuted,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),

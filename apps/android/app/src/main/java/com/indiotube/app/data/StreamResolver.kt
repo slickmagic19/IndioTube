@@ -32,9 +32,15 @@ data class ResolvedStream(
     val ext: String,
     val mime: String?,
     val height: Int,
+    val codec: String? = null,
 ) {
     val isVideo: Boolean get() = mime?.startsWith("video/") == true
     val isAudio: Boolean get() = mime?.startsWith("audio/") == true
+
+    val videoDownloadMuxable: Boolean get() =
+        mime?.contains("mp4") == true && codec?.startsWith("avc") == true
+
+    val audioDownloadMuxable: Boolean get() = mime?.contains("mp4") == true
 }
 
 // One selectable caption track. YouTube's timedtext endpoint returns srv3
@@ -128,6 +134,50 @@ data class VideoQualities(
         options.filter { it.videoOnly != null && it.height <= height }
             .maxByOrNull { it.height }?.videoOnly
             ?: options.filter { it.videoOnly != null }.minByOrNull { it.height }?.videoOnly
+
+    fun downloadOptions(): List<QualityOption> = options.filter { option ->
+        option.muxed != null || (
+            audio?.audioDownloadMuxable == true &&
+                option.videoOnly?.videoDownloadMuxable == true
+            )
+    }
+}
+
+data class DownloadSources(
+    val video: ResolvedStream,
+    val audio: ResolvedStream?,
+)
+
+internal fun downloadSources(qualities: VideoQualities, height: Int?): DownloadSources {
+    if (height == null) {
+        qualities.auto?.let { return DownloadSources(it, null) }
+        val best = qualities.downloadOptions().firstOrNull()
+        best?.muxed?.let { return DownloadSources(it, null) }
+        val audio = qualities.audio
+        if (best?.videoOnly != null && audio?.audioDownloadMuxable == true) {
+            return DownloadSources(best.videoOnly, audio)
+        }
+        throw IOException("This video has no downloadable stream without ads")
+    }
+
+    val option = qualities.nearest(height)
+    if (option != null) {
+        option.muxed?.let { return DownloadSources(it, null) }
+        val video = option.videoOnly
+        val audio = qualities.audio
+        if (video?.videoDownloadMuxable == true && audio?.audioDownloadMuxable == true) {
+            return DownloadSources(video, audio)
+        }
+    }
+
+    val fallback = qualities.options
+        .filter { it.muxed != null && it.height <= height }
+        .maxByOrNull { it.height }?.muxed
+        ?: qualities.auto
+    return DownloadSources(
+        fallback ?: throw IOException("This quality isn't available for download"),
+        null,
+    )
 }
 
 // The player URIs a quality selection maps to. Pure strings on purpose so the
@@ -195,6 +245,12 @@ class StreamResolver(private val http: OkHttpClient) {
         }
         return qualities.auto ?: throw IOException("This video has no downloadable stream without ads")
     }
+
+    fun resolveDownloadBlocking(
+        videoId: String,
+        height: Int? = null,
+        forceRefresh: Boolean = false,
+    ): DownloadSources = downloadSources(qualities(videoId, forceRefresh), height)
 
     // Streams behind an explicit quality selection. "video" and "audio" are
     // the two halves the player merges; "muxed" is the one-file variant.
@@ -278,7 +334,7 @@ class StreamResolver(private val http: OkHttpClient) {
             // it with; otherwise prefer the muxed variant at this height.
             val v = if (audio != null) {
                 videoOnly.filter { streamHeight(it) == height }
-                    .maxWithOrNull(compareBy<VideoStream>({ codecRank(it) }, { it.fps }, { it.bitrate }))
+                    .minWithOrNull(compareBy<VideoStream>({ codecRank(it) }, { -it.fps }, { -it.bitrate }))
             } else {
                 null
             }
@@ -372,7 +428,12 @@ class StreamResolver(private val http: OkHttpClient) {
             mime?.startsWith("audio/") == true -> "m4a"
             else -> "mp4"
         }
-        return ResolvedStream(streamUrl, ext, mime, height)
+        val codec = when (this) {
+            is VideoStream -> codec
+            is AudioStream -> codec
+            else -> null
+        }
+        return ResolvedStream(streamUrl, ext, mime, height, codec)
     }
 }
 

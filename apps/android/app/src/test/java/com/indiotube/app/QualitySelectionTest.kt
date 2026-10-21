@@ -4,6 +4,7 @@ import com.indiotube.app.data.QualityOption
 import com.indiotube.app.data.QualityUris
 import com.indiotube.app.data.ResolvedStream
 import com.indiotube.app.data.VideoQualities
+import com.indiotube.app.data.downloadSources
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -13,8 +14,8 @@ import org.junit.Test
 // extractor actually returned. These tests pin that fallback behaviour.
 class QualitySelectionTest {
 
-    private fun stream(height: Int, mime: String = "video/mp4") =
-        ResolvedStream("https://example.com/$height", "mp4", mime, height)
+    private fun stream(height: Int, mime: String = "video/mp4", codec: String? = null) =
+        ResolvedStream("https://example.com/$height", "mp4", mime, height, codec)
 
     private fun option(height: Int, muxed: Boolean = false, video: Boolean = true) = QualityOption(
         height = height,
@@ -150,5 +151,62 @@ class QualitySelectionTest {
             audio = stream(0, "audio/mp4"),
         )
         assertNull(QualityUris.target("abc123", 600, broken))
+    }
+
+    private val downloadLadder = VideoQualities(
+        options = listOf(
+            QualityOption(
+                1440, "1440p", 30, muxed = null,
+                videoOnly = stream(1440, codec = "vp9"),
+            ),
+            QualityOption(
+                1080, "1080p", 30, muxed = null,
+                videoOnly = stream(1080, codec = "avc1.640028"),
+            ),
+            QualityOption(
+                360, "360p", 30,
+                muxed = stream(360, codec = "avc1.42001E"),
+                videoOnly = stream(360, codec = "avc1.42001E"),
+            ),
+        ),
+        auto = stream(360, codec = "avc1.42001E"),
+        audio = stream(0, "audio/mp4", "mp4a.40.2"),
+    )
+
+    @Test
+    fun downloadSheetListsHigherAdaptiveHeights() {
+        assertEquals(
+            listOf(1080, 360),
+            downloadLadder.downloadOptions().map { it.height },
+        )
+    }
+
+    @Test
+    fun explicitAdaptiveHeightDownloadsVideoAndAudio() {
+        val sources = downloadSources(downloadLadder, 1080)
+        assertEquals(1080, sources.video.height)
+        assertTrue(sources.video.videoDownloadMuxable)
+        assertEquals(0, sources.audio?.height)
+    }
+
+    @Test
+    fun explicitMuxedHeightStaysASingleFile() {
+        val sources = downloadSources(downloadLadder, 360)
+        assertEquals(360, sources.video.height)
+        assertNull(sources.audio)
+    }
+
+    @Test
+    fun autoStillDownloadsTheBestMuxedFile() {
+        val sources = downloadSources(downloadLadder, null)
+        assertEquals(360, sources.video.height)
+        assertNull(sources.audio)
+    }
+
+    @Test
+    fun unmuxableAdaptiveHeightFallsBackToMuxed() {
+        val sources = downloadSources(downloadLadder, 1440)
+        assertEquals(360, sources.video.height)
+        assertNull(sources.audio)
     }
 }

@@ -4,6 +4,7 @@ import com.indiotube.app.data.InnerTube
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.SearchFilter
 import com.indiotube.app.data.StreamResolver
+import com.indiotube.app.data.downloadSources
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -220,6 +221,13 @@ class LiveNetworkTest {
         // Auto must keep resolving to the single muxed file as before.
         val muxed = resolver.resolveTrackBlocking(videoId, "muxed", qualities.auto!!.height)
         assertTrue("muxed mime expected", muxed.isVideo)
+
+        val sources = downloadSources(qualities, option.height)
+        assertTrue("download video source expected", sources.video.isVideo)
+        if (option.videoOnly?.videoDownloadMuxable == true && qualities.audio?.audioDownloadMuxable == true) {
+            assertNotNull("adaptive rung should download with an audio track", sources.audio)
+            assertEquals(option.height, sources.video.height)
+        }
     }
 
     // Switching quality used to be able to serve another video's stream. The
