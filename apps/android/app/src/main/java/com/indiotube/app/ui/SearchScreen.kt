@@ -2,8 +2,10 @@ package com.indiotube.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -260,8 +262,8 @@ fun SearchScreen(container: Container, ui: UiRefs) {
         // type filters
         if (query.isNotEmpty() && !inSuggestMode) {
             LazyRow(
-                Modifier.padding(vertical = 2.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                Modifier.padding(top = 2.dp, bottom = 4.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp),
             ) {
                 val filters = listOf(
                     "All" to null,
@@ -282,7 +284,10 @@ fun SearchScreen(container: Container, ui: UiRefs) {
         when {
             inSuggestMode -> {
                 if (suggestions.isNotEmpty()) {
-                    LazyColumn(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(top = 4.dp, bottom = 8.dp),
+                    ) {
                         items(suggestions) { s ->
                             Row(
                                 Modifier
@@ -309,7 +314,10 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
-                    LazyColumn(Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(top = 4.dp, bottom = 8.dp),
+                    ) {
                         item { SectionHeader("Recent searches") }
                         items(ui.recentSearches.toList()) { q ->
                             Row(
@@ -336,7 +344,15 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        // One uniform gap for every entry type: video cards,
+                        // channel rows and playlist rows all sit on the same
+                        // 14dp rhythm instead of three different paddings.
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(top = 6.dp, bottom = 10.dp),
+                    ) {
                         items(list.size + if (loadingMore) 1 else 0) { idx ->
                             if (idx >= list.size) {
                                 LoadingBox(Modifier.height(70.dp))
@@ -351,12 +367,12 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                                     onChannelClick = { ui.openChannelOf(e.video) },
                                     onFeedback = { ui.feedback(e.video, it) },
                                     onDownload = { ui.download(e.video) },
+                                    bottomPadding = 0.dp,
                                 )
                                 is SearchEntry.Channel -> ChannelResultRow(e.channel, ui)
                                 is SearchEntry.Playlist -> PlaylistResultRow(e.playlist, ui)
                             }
                         }
-                        item { Spacer(Modifier.height(8.dp)) }
                     }
                 }
             }
@@ -370,7 +386,7 @@ private fun ChannelResultRow(channel: ChannelItem, ui: UiRefs) {
         Modifier
             .fillMaxWidth()
             .clickable { ui.openChannel(channel.channelId, channel.name, channel.avatar) }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ChannelAvatar(channel.name, channel.avatar, 56.dp)
@@ -398,7 +414,7 @@ private fun PlaylistResultRow(playlist: PlaylistItem, ui: UiRefs) {
         Modifier
             .fillMaxWidth()
             .clickable { ui.open(Screen.YtPlaylist(playlist.playlistId, playlist.title)) }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box {

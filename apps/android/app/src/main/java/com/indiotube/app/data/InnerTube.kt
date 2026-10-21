@@ -86,7 +86,25 @@ sealed interface SearchEntry {
     data class Playlist(val playlist: PlaylistItem) : SearchEntry
 }
 
-data class SearchResults(val entries: List<SearchEntry>, val continuation: String?)
+data class SearchResults(
+    val entries: List<SearchEntry>,
+    val continuation: String?,
+    // True when YouTube answered with an age-gate promo instead of results.
+    // The search screen can't tell the difference from an empty result list,
+    // but recovery logic can.
+    val restricted: Boolean = false,
+)
+
+// A completion entry that YouTube attaches entity metadata to. Searching a
+// channel name verbatim ("quickybaby") is age-gated for anonymous callers,
+// but the completion endpoint knows the exact channel behind the query.
+data class SuggestedChannel(
+    val query: String,
+    val channelId: String,
+    val name: String,
+    val handle: String? = null,
+    val avatar: String? = null,
+)
 
 data class ChannelPage(
     val channel: ChannelItem,
@@ -395,6 +413,14 @@ class InnerTube(private val http: OkHttpClient) {
     // ---- search ------------------------------------------------------------------
 
     suspend fun search(query: String, filter: String? = null): SearchResults {
+        // Empty queries are meaningful here: trending() is search with
+        // TRENDING_PARAMS and an empty term.
+        val results = rawSearch(query, filter)
+        if (results.entries.isNotEmpty()) return results
+        return recoverEmptySearch(query.trim(), filter, results) ?: results
+    }
+
+    private suspend fun rawSearch(query: String, filter: String?): SearchResults {
         val c = config()
         val body = buildJsonObject {
             put("context", contextOf(c))
@@ -403,6 +429,43 @@ class InnerTube(private val http: OkHttpClient) {
         }
         val root = post("search", body)
         return withContext(Dispatchers.Default) { parseSearch(root) }
+    }
+
+    // YouTube sometimes answers an anonymous search with an age-gate promo
+    // ("Confirm your age") and zero entries. A channel name then looks like a
+    // query with no matches, which is how "quickybaby" returned nothing.
+    // Recover with real data instead of showing an empty screen:
+    //  1. the completion endpoint often attaches the exact channel behind the
+    //     query (channelId/name/avatar) - return that channel plus its videos;
+    //  2. when there is no such entity, retry once with the top completion,
+    //     which is usually enough to get past the gate.
+    private suspend fun recoverEmptySearch(
+        query: String,
+        filter: String?,
+        empty: SearchResults,
+    ): SearchResults? {
+        if (query.isEmpty() || !empty.restricted) return null
+        suggestionChannel(query)?.let { suggested ->
+            val page = runCatching { channelVideos(suggested.channelId) }.getOrNull()
+            val resolved = (page?.channel ?: ChannelItem(suggested.channelId)).let { base ->
+                base.copy(
+                    name = base.name.takeIf { it.isNotBlank() } ?: suggested.name,
+                    avatar = base.avatar?.takeIf { it.isNotBlank() } ?: suggested.avatar,
+                )
+            }
+            val playlists = if (filter == SearchFilter.PLAYLISTS) {
+                runCatching { channelPlaylists(suggested.channelId) }.getOrDefault(emptyList())
+            } else {
+                emptyList()
+            }
+            val entries = fallbackSearchEntries(resolved, page?.videos.orEmpty(), playlists, filter)
+            if (entries.isNotEmpty()) return SearchResults(entries, null)
+        }
+        val retry = suggestions(query).firstOrNull {
+            it.isNotBlank() && !it.equals(query, ignoreCase = true)
+        } ?: return null
+        val retried = rawSearch(retry, filter)
+        return retried.takeIf { it.entries.isNotEmpty() }
     }
 
     suspend fun searchContinuation(token: String): SearchResults {
@@ -417,35 +480,97 @@ class InnerTube(private val http: OkHttpClient) {
 
     // Type-ahead suggestions from YouTube's own completion endpoint (the same
     // one the web client uses). No auth, no ads, plain query strings.
-    suspend fun suggestions(query: String, force: Boolean = false): List<String> {
+    suspend fun suggestions(query: String, force: Boolean = false): List<String> =
+        suggestionData(query, force).suggestions
+
+    // The entity completion entry for an exact query, when YouTube has one.
+    // Used to recover searches that come back age-gated and empty.
+    suspend fun suggestionChannel(query: String, force: Boolean = false): SuggestedChannel? {
         val q = query.trim()
-        if (q.isEmpty()) return emptyList()
+        if (q.isEmpty()) return null
+        return suggestionData(q, force).channels[q.lowercase()]
+    }
+
+    internal data class SuggestionData(
+        val suggestions: List<String>,
+        val channels: Map<String, SuggestedChannel>,
+    )
+
+    private suspend fun suggestionData(query: String, force: Boolean): SuggestionData {
+        val q = query.trim()
+        if (q.isEmpty()) return SuggestionData(emptyList(), emptyMap())
         return cached("suggest:$q", 5 * 60_000L, force) {
             try {
                 val url = "https://suggestqueries-clients6.youtube.com/complete/search" +
                     "?client=youtube&ds=yt&hl=$lang&gl=$country" +
                     "&q=${URLEncoder.encode(q, "UTF-8")}"
                 val text = withContext(Dispatchers.IO) { execute(url, null, null) }
-                // client=youtube answers with a JSONP-wrapped array: goog.ac.h([...])
-                val start = text.indexOf('[')
-                val end = text.lastIndexOf(']')
-                if (start < 0 || end <= start) return@cached emptyList()
-                val arr = SyncJson.parseToJsonElement(text.substring(start, end + 1)) as? JsonArray
-                    ?: return@cached emptyList()
-                val items = arr.getOrNull(1) as? JsonArray ?: return@cached emptyList()
-                items.mapNotNull { el ->
-                    val raw = when (el) {
-                        is JsonArray -> el.firstOrNull()
-                        else -> el
-                    }
-                    (raw as? JsonPrimitive)?.contentOrNull
-                }.map { it.trim() }.filter { it.isNotEmpty() }.distinct().take(12)
+                parseSuggestionData(text)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                emptyList()
+                SuggestionData(emptyList(), emptyMap())
             }
         }
+    }
+
+    internal fun parseSuggestionData(text: String): SuggestionData {
+        // client=youtube answers with a JSONP-wrapped array: goog.ac.h([...])
+        val start = text.indexOf('[')
+        val end = text.lastIndexOf(']')
+        if (start < 0 || end <= start) return SuggestionData(emptyList(), emptyMap())
+        val arr = SyncJson.parseToJsonElement(text.substring(start, end + 1)) as? JsonArray
+            ?: return SuggestionData(emptyList(), emptyMap())
+        val items = arr.getOrNull(1) as? JsonArray
+            ?: return SuggestionData(emptyList(), emptyMap())
+        val suggestions = ArrayList<String>()
+        val channels = LinkedHashMap<String, SuggestedChannel>()
+        for (el in items) {
+            val row = el as? JsonArray ?: continue
+            val label = (row.firstOrNull() as? JsonPrimitive)?.contentOrNull?.trim() ?: continue
+            if (label.isEmpty() || label in suggestions) continue
+            suggestions.add(label)
+            // Entity entries carry a trailing metadata object: zae (entity id),
+            // zaf (handle), zai (avatar), zao (channel name), zav (channel id).
+            val meta = row.filterIsInstance<JsonObject>().firstOrNull() ?: continue
+            val channelId = meta.pathStr("zav")?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            channels[label.lowercase()] = SuggestedChannel(
+                query = label,
+                channelId = channelId,
+                name = meta.pathStr("zao")?.trim()?.takeIf { it.isNotEmpty() } ?: label,
+                handle = meta.pathStr("zaf")?.trim()?.takeIf { it.isNotEmpty() },
+                avatar = normalizeImageUrl(meta.pathStr("zai")),
+            )
+        }
+        return SuggestionData(suggestions.take(12), channels)
+    }
+
+    // Entries shown when a search was recovered through a suggested channel.
+    // Filters are honored; an empty filtered list degrades to the channel
+    // itself so the screen never falls back to "no results".
+    internal fun fallbackSearchEntries(
+        channel: ChannelItem,
+        videos: List<VideoItem>,
+        playlists: List<PlaylistItem>,
+        filter: String?,
+    ): List<SearchEntry> {
+        val out = ArrayList<SearchEntry>()
+        when (filter) {
+            SearchFilter.CHANNELS -> out.add(SearchEntry.Channel(channel))
+            SearchFilter.VIDEOS -> {
+                videos.take(20).forEach { out.add(SearchEntry.Video(it)) }
+                if (out.isEmpty()) out.add(SearchEntry.Channel(channel))
+            }
+            SearchFilter.PLAYLISTS -> {
+                playlists.take(20).forEach { out.add(SearchEntry.Playlist(it)) }
+                if (out.isEmpty()) out.add(SearchEntry.Channel(channel))
+            }
+            else -> {
+                out.add(SearchEntry.Channel(channel))
+                videos.take(20).forEach { out.add(SearchEntry.Video(it)) }
+            }
+        }
+        return out
     }
 
     internal fun parseSearch(root: JsonElement): SearchResults {
@@ -494,7 +619,10 @@ class InnerTube(private val http: OkHttpClient) {
                 extractContinuation(cont)?.let { continuation = it; return@forEach }
             }
         }
-        return SearchResults(entries, continuation)
+        // Age-gated searches come back as a background promo ("Confirm your
+        // age") with no renderers at all; treat that as restricted, not empty.
+        val restricted = root.findAll("backgroundPromoRenderer", maxDepth = 12, limit = 4).isNotEmpty()
+        return SearchResults(entries, continuation, restricted)
     }
 
     // ---- channel -------------------------------------------------------------------

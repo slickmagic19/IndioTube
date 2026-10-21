@@ -60,6 +60,23 @@ class LiveNetworkTest {
         assertTrue("avatars must be absolute https URLs", avatars.all { it.startsWith("https://") })
     }
 
+    // "quickybaby" is age-gated for anonymous clients: the plain search comes
+    // back as a promo with zero renderers, which used to show "No results".
+    // Recovery must resolve the channel through the completion entity and
+    // return it with videos, whatever YouTube answers on a given day.
+    @Test
+    fun ageGatedChannelNameSearchStillFindsTheChannel() = runBlocking {
+        val results = innerTube.search("quickybaby")
+        val channel = results.entries.filterIsInstance<SearchEntry.Channel>()
+            .map { it.channel }
+            .firstOrNull { it.name.contains("QuickyBaby", ignoreCase = true) }
+        assertNotNull("the QuickyBaby channel should be in the results", channel)
+        assertTrue(
+            "videos expected for the recovered channel",
+            results.entries.any { it is SearchEntry.Video },
+        )
+    }
+
     @Test
     fun watchPageParses() = runBlocking {
         val watch = innerTube.watch(videoId)

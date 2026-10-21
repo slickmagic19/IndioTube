@@ -202,12 +202,15 @@ fun VideoCard(
     onChannelClick: (() -> Unit)? = null,
     onFeedback: ((FeedFeedback) -> Unit)? = null,
     onDownload: (() -> Unit)? = null,
+    // Search result lists supply their own uniform gap between entries, so
+    // they zero this out; every other list keeps the Home-card rhythm.
+    bottomPadding: Dp = 14.dp,
 ) {
     Column(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(bottom = 14.dp),
+            .padding(bottom = bottomPadding),
     ) {
         Thumb(
             model = video.thumbnail,
