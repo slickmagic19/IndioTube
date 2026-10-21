@@ -331,6 +331,10 @@ class PlaybackController(
         }
     }
 
+    fun pause() {
+        controller?.pause()
+    }
+
     fun setAutoplayNext(enabled: Boolean) {
         prefs.setAutoplayNext(enabled)
         controller?.let { sendAutoplay(it) }

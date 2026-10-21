@@ -73,6 +73,7 @@ fun Thumb(
     live: Boolean = false,
     corner: Dp = 12.dp,
     progress: Float? = null,
+    membersOnly: Boolean = false,
 ) {
     Box(modifier) {
         Box(
@@ -106,6 +107,19 @@ fun Thumb(
                         .background(YtRed),
                 )
             }
+        }
+        if (membersOnly) {
+            Text(
+                "MEMBERS",
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xCC272727))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            )
         }
         if (live) {
             Text(
@@ -194,6 +208,7 @@ fun VideoCard(
             model = video.thumbnail,
             badge = video.durationText,
             live = video.isLive,
+            membersOnly = video.membersOnly,
             progress = LocalWatchProgress.current(video),
             modifier = Modifier
                 .fillMaxWidth()
@@ -442,6 +457,7 @@ fun VideoRow(
             badge = video.durationText,
             live = video.isLive,
             corner = 8.dp,
+            membersOnly = video.membersOnly,
             progress = LocalWatchProgress.current(video),
             modifier = Modifier
                 .width(height * 16f / 9f)

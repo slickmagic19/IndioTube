@@ -182,8 +182,17 @@ class StreamResolver(private val http: OkHttpClient) {
 
     // forceRefresh bypasses both cache and negative-cache - used when a
     // download retry needs a fresh URL (expired or rejected by the CDN).
-    fun resolveBlocking(videoId: String, forceRefresh: Boolean = false): ResolvedStream {
+    // A non-null height pins the one-file download to that rung; downloads are
+    // always progressive muxed streams, never video-only halves.
+    fun resolveBlocking(
+        videoId: String,
+        height: Int? = null,
+        forceRefresh: Boolean = false,
+    ): ResolvedStream {
         val qualities = qualities(videoId, forceRefresh)
+        if (height != null) {
+            qualities.muxedAt(height)?.let { return it }
+        }
         return qualities.auto ?: throw IOException("This video has no downloadable stream without ads")
     }
 

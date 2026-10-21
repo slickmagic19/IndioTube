@@ -144,14 +144,23 @@ class UiRefs(
     var topProvider: () -> Screen? = { null }
 
     fun openWatch(video: VideoItem, context: List<VideoItem>? = null) {
-        // YouTube replaces the watch screen instead of stacking them
-        if (top() is Screen.Watch) onReplace(Screen.Watch(video, context)) else onOpen(Screen.Watch(video, context))
-        if (context == null) {
-            player.setQueue(listOf(video), 0, play = true)
-        } else {
-            val idx = context.indexOfFirst { it.videoId == video.videoId }.coerceAtLeast(0)
-            player.setQueue(context, idx, play = true)
+        if (video.membersOnly) {
+            toast("Members-only video — join the channel to watch")
+            return
         }
+        // Resolve the actual queue first: if the tapped video vanished from a
+        // refreshed feed, play just that video instead of whatever sits at 0.
+        // Members-only entries are dropped so Next/autoplay can't fall into a
+        // video that will only fail.
+        val requested = (context ?: listOf(video)).filterNot { it.membersOnly }
+        val found = requested.indexOfFirst { it.videoId == video.videoId }
+        val queue = if (found >= 0) requested else listOf(video)
+        val index = if (found >= 0) found else 0
+        // Queue before navigating: WatchScreen can then never compose with the
+        // previous video still current (the mini-player replay bug).
+        player.setQueue(queue, index, play = true)
+        // YouTube replaces the watch screen instead of stacking them
+        if (top() is Screen.Watch) onReplace(Screen.Watch(video, queue)) else onOpen(Screen.Watch(video, queue))
     }
 
     fun openChannel(channelId: String?, name: String?, avatar: String?) {
@@ -170,8 +179,14 @@ class UiRefs(
             return
         }
         val idx = start.coerceIn(0, videos.lastIndex)
-        if (openPlayer) onOpen(Screen.Watch(videos[idx], videos))
-        player.setQueue(videos, idx, play = true, shuffleOn = shuffle)
+        if (videos[idx].membersOnly) {
+            toast("Members-only video — join the channel to watch")
+            return
+        }
+        val queue = videos.filterNot { it.membersOnly }
+        val queueStart = queue.indexOfFirst { it.videoId == videos[idx].videoId }.coerceAtLeast(0)
+        if (openPlayer) onOpen(Screen.Watch(videos[idx], queue))
+        player.setQueue(queue, queueStart, play = true, shuffleOn = shuffle)
     }
 
     fun toggleSubscribe(channel: ChannelItem) {

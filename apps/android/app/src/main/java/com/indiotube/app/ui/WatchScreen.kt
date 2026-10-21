@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
@@ -145,8 +146,13 @@ fun WatchScreen(
     // The queue can move on its own (autoplay) or through Next while this
     // screen stays on the stack, so the playing item — not the one that opened
     // the screen — is the source of truth for everything below it: title,
-    // description, comments, qualities and captions all follow it.
-    val playingVideo by player.current.collectAsState()
+    // description, comments, qualities and captions all follow it. Read
+    // queue+index directly so a tap that just called setQueue is visible in
+    // this frame instead of waiting for the combined `current` flow.
+    val playingVideoFlow by player.current.collectAsState()
+    val queue by player.queue.collectAsState()
+    val queueIndex by player.index.collectAsState()
+    val playingVideo = queue.getOrNull(queueIndex) ?: playingVideoFlow
     val video = playingVideo ?: videoArg
     val playing by player.playing.collectAsState()
 
@@ -154,7 +160,6 @@ fun WatchScreen(
     val position by player.position.collectAsState()
     val duration by player.duration.collectAsState()
     val connected by player.connected.collectAsState()
-    val queue by player.queue.collectAsState()
     val active by container.accounts.active.collectAsState()
     val watchLater by container.library.watchLater.collectAsState()
     val playlists by container.library.playlists.collectAsState()
@@ -189,6 +194,7 @@ fun WatchScreen(
     var descExpanded by remember(video.videoId) { mutableStateOf(false) }
     var saveSheet by remember { mutableStateOf(false) }
     var qualitySheet by remember { mutableStateOf(false) }
+    var downloadSheet by remember(video.videoId) { mutableStateOf(false) }
     var captionsSheet by remember { mutableStateOf(false) }
     var captionStyleSheet by remember { mutableStateOf(false) }
     var qualities by remember(video.videoId) { mutableStateOf<VideoQualities?>(null) }
@@ -202,25 +208,38 @@ fun WatchScreen(
     var resumed by remember(video.videoId) { mutableStateOf(false) }
     val pageState = rememberLazyListState()
 
+    // The feed badge is usually enough, but the watch page is authoritative:
+    // a members-only video that arrived untagged still gets blocked here.
+    val membersOnly = video.membersOnly || watch?.membersOnly == true
+    LaunchedEffect(membersOnly) {
+        if (membersOnly) {
+            player.pause()
+            downloadSheet = false
+        }
+    }
+
     // A new video is a new page: start it at the top instead of leaving the
     // previous video's scroll position (often mid-description or comments).
     LaunchedEffect(video.videoId) { pageState.scrollToItem(0) }
 
-    // make sure the tapped video is the one actually playing
-
-    LaunchedEffect(video.videoId) {
-        if (player.current.value?.videoId != video.videoId) {
-            val idx = context.indexOfFirst { it.videoId == video.videoId }
+    // Make sure the video this page was opened for is actually playing. Keyed
+    // on videoArg, not the derived `video`: keying on `video` made the guard
+    // compare the playing item with itself and never switch (the mini-player
+    // replay bug).
+    LaunchedEffect(videoArg.videoId) {
+        val activeId = player.queue.value.getOrNull(player.index.value)?.videoId
+        if (activeId != videoArg.videoId) {
+            val idx = context.indexOfFirst { it.videoId == videoArg.videoId }
             // If the tapped video isn't in the list (stale "up next" payload),
             // play it alone instead of falling back to the list's first item,
             // which would start an unrelated video under this screen.
             if (idx >= 0) {
                 player.setQueue(context, idx, play = true)
             } else {
-                player.setQueue(listOf(video), 0, play = true)
+                player.setQueue(listOf(videoArg), 0, play = true)
             }
         }
-        container.library.noteOpen(video)
+        container.library.noteOpen(videoArg)
     }
 
     // watch metadata + first page of comments
@@ -241,6 +260,7 @@ fun WatchScreen(
                     channelAvatar = w.channelAvatar,
                     viewsText = w.viewsText,
                     publishedText = w.publishedText,
+                    membersOnly = w.membersOnly,
                 ),
             )
             val token = w.commentsToken
@@ -312,7 +332,12 @@ fun WatchScreen(
 
     // Available quality ladder (muxed + video-only heights). Loaded in the
     // background; the player keeps running on Auto until the user picks one.
-    LaunchedEffect(video.videoId) {
+    LaunchedEffect(video.videoId, membersOnly) {
+        if (membersOnly) {
+            qualities = null
+            qualityError = false
+            return@LaunchedEffect
+        }
         val loaded = runCatching {
             withContext(Dispatchers.IO) { container.resolver.qualities(video.videoId) }
         }.getOrNull()
@@ -333,7 +358,7 @@ fun WatchScreen(
     // pick up where the user left off — but a video watched to the end starts
     // over, the way YouTube replays finished videos from the beginning.
     LaunchedEffect(duration, video.videoId) {
-        if (!resumed && duration > 0 && player.current.value?.videoId == video.videoId) {
+        if (!resumed && duration > 0 && playingVideo?.videoId == video.videoId) {
             resumed = true
             val resume = container.library.resumePosition(video.videoId)
             val finished = (container.library.watchedFraction(video.videoId) ?: 0f) >= COMPLETED_FRACTION
@@ -443,6 +468,7 @@ fun WatchScreen(
         channelAvatar = channelAvatar,
         viewsText = viewsText,
         publishedText = publishedText,
+        membersOnly = membersOnly,
     )
 
     val downloaded = dlItems.containsKey(video.videoId)
@@ -551,7 +577,7 @@ fun WatchScreen(
 
             // big play button while paused (only with chrome hidden — the
             // chrome itself shows YouTube-style centre controls)
-            if (!playing && !buffering && !controlsVisible) {
+            if (!membersOnly && !playing && !buffering && !controlsVisible) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Icon(
                         Icons.Filled.PlayArrow,
@@ -565,7 +591,7 @@ fun WatchScreen(
                     )
                 }
             }
-            if (buffering) {
+            if (buffering && !membersOnly) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Color.White, strokeWidth = 3.dp, modifier = Modifier.size(44.dp))
                 }
@@ -595,36 +621,69 @@ fun WatchScreen(
                 }
             }
 
-            PlayerChrome(
-                visible = controlsVisible,
-                title = title,
-                fullscreen = effectiveFullscreen,
-                playing = playing,
-                buffering = buffering,
-                queueSize = queue.size,
-                sliderValue = sliderValue,
-                scrubbing = scrub != null,
-                positionText = formatDuration(posShown / 1000),
-                durationText = formatDuration(duration / 1000),
-                qualityLabel = qualityLabel,
-                captionsAvailable = captionsAvailable,
-                captionsOn = subtitle != null,
-                autoplayOn = autoplayNext,
-                onToggleAutoplay = { player.setAutoplayNext(!autoplayNext) },
-                onQuality = { qualitySheet = true },
-                onCaptions = { captionsSheet = true },
+            if (!membersOnly) {
+                PlayerChrome(
+                    visible = controlsVisible,
+                    title = title,
+                    fullscreen = effectiveFullscreen,
+                    playing = playing,
+                    buffering = buffering,
+                    queueSize = queue.size,
+                    sliderValue = sliderValue,
+                    scrubbing = scrub != null,
+                    positionText = formatDuration(posShown / 1000),
+                    durationText = formatDuration(duration / 1000),
+                    qualityLabel = qualityLabel,
+                    captionsAvailable = captionsAvailable,
+                    captionsOn = subtitle != null,
+                    autoplayOn = autoplayNext,
+                    onToggleAutoplay = { player.setAutoplayNext(!autoplayNext) },
+                    onQuality = { qualitySheet = true },
+                    onCaptions = { captionsSheet = true },
 
-                onBack = { ui.back() },
-                onTogglePlay = { player.togglePlayPause() },
-                onSeekBy = { player.seekBy(it) },
-                onNext = { player.next() },
-                onToggleFullscreen = { toggleFullscreen() },
-                onScrub = { scrub = it },
-                onScrubFinished = {
-                    scrub?.let { player.seekTo((it * duration).toLong()) }
-                    scrub = null
-                },
-            )
+                    onBack = { ui.back() },
+                    onTogglePlay = { player.togglePlayPause() },
+                    onSeekBy = { player.seekBy(it) },
+                    onNext = { player.next() },
+                    onToggleFullscreen = { toggleFullscreen() },
+                    onScrub = { scrub = it },
+                    onScrubFinished = {
+                        scrub?.let { player.seekTo((it * duration).toLong()) }
+                        scrub = null
+                    },
+                )
+            }
+
+            if (membersOnly) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color(0xF2000000))
+                        .pointerInput(Unit) { detectTapGestures { } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Filled.Lock,
+                            contentDescription = null,
+                            tint = Color(0xFFE6E6E6),
+                            modifier = Modifier.size(34.dp),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "Members-only video",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Join this channel on YouTube to watch it here.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFBDBDBD),
+                        )
+                    }
+                }
+            }
         }
 
         // ---- page below the player -------------------------------------------
@@ -705,6 +764,12 @@ fun WatchScreen(
                         ActionButton(
                             icon = {
                                 when {
+                                    membersOnly -> Icon(
+                                        Icons.Filled.Lock,
+                                        null,
+                                        tint = YtMuted,
+                                        modifier = Modifier.size(24.dp),
+                                    )
                                     downloaded -> Icon(
                                         Icons.Filled.DownloadDone,
                                         null,
@@ -731,6 +796,7 @@ fun WatchScreen(
                                 }
                             },
                             label = when {
+                                membersOnly -> "Members"
                                 downloaded -> "Downloaded"
                                 dlTask?.status == DlStatus.ACTIVE -> "Downloading"
                                 dlTask?.status == DlStatus.PAUSED -> "Resume"
@@ -739,14 +805,12 @@ fun WatchScreen(
                             },
                         ) {
                             when {
+                                membersOnly -> ui.toast("Members-only video — can't download")
                                 downloaded -> ui.toast("Saved in Downloads — watch it offline anytime")
                                 dlTask?.status == DlStatus.ACTIVE -> container.downloads.pause(video.videoId)
                                 dlTask?.status == DlStatus.PAUSED || dlTask?.status == DlStatus.FAILED ->
                                     container.downloads.resume(video.videoId)
-                                else -> {
-                                    container.downloads.start(merged)
-                                    ui.toast("Download started")
-                                }
+                                else -> downloadSheet = true
                             }
                         }
                         ActionButton(
@@ -969,6 +1033,20 @@ fun WatchScreen(
                 qualitySheet = false
             },
             onDismiss = { qualitySheet = false },
+        )
+    }
+
+    if (downloadSheet) {
+        DownloadQualitySheet(
+            qualities = qualities,
+            error = qualityError,
+            onSelect = { height ->
+                container.downloads.start(merged, height)
+                val label = if (height == null) "Auto" else "${height}p"
+                ui.toast("Download started ($label)")
+                downloadSheet = false
+            },
+            onDismiss = { downloadSheet = false },
         )
     }
 
@@ -1647,6 +1725,117 @@ private fun QualitySheet(
                             subtitle = badges.joinToString(" • ").ifBlank { null },
                             selected = selectedHeight == option.height,
                             onClick = { onSelect(option.height) },
+                        )
+                    }
+                    Text(
+                        "Higher qualities use more data.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = YtMuted,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DownloadQualitySheet(
+    qualities: VideoQualities?,
+    error: Boolean,
+    onSelect: (Int?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState()
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = YtSurface,
+        contentColor = YtText,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 20.dp),
+        ) {
+            Text(
+                "Download quality",
+                style = MaterialTheme.typography.titleMedium,
+                color = YtText,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp),
+            )
+            Text(
+                "Downloads save one file with video and audio for offline playback.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YtMuted,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 8.dp),
+            )
+            when {
+                qualities == null -> {
+                    if (error) {
+                        Text(
+                            "Couldn't load the quality options. Try again in a moment.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = YtMuted,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                        )
+                    } else {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(
+                                color = YtMuted,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text("Checking available qualities…", color = YtMuted)
+                        }
+                    }
+                }
+                else -> {
+                    val muxed = qualities.options.filter { it.muxed != null }
+                    val autoHeight = qualities.auto?.height
+                    ChoiceRow(
+                        label = "Auto",
+                        subtitle = if (autoHeight != null) {
+                            "Best available (${autoHeight}p) • recommended"
+                        } else {
+                            "Best available"
+                        },
+                        selected = true,
+                        onClick = { onSelect(null) },
+                    )
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                            .height(1.dp)
+                            .background(Color(0x1FFFFFFF)),
+                    )
+                    muxed.forEach { option ->
+                        val badge = when {
+                            option.height >= 2160 -> "4K"
+                            option.height >= 1440 -> "2K"
+                            option.height >= 720 -> "HD"
+                            else -> null
+                        }
+                        ChoiceRow(
+                            label = option.label,
+                            subtitle = badge,
+                            selected = false,
+                            onClick = { onSelect(option.height) },
+                        )
+                    }
+                    if (muxed.isEmpty()) {
+                        Text(
+                            "No downloadable file was offered for this video.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = YtMuted,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
                         )
                     }
                     Text(

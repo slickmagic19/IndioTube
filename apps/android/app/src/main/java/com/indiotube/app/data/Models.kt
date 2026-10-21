@@ -14,6 +14,9 @@ data class VideoItem(
     val viewsText: String? = null,
     val publishedText: String? = null,
     val isLive: Boolean = false,
+    // YouTube's "Members only" badge. These videos need a channel membership
+    // to play, so the UI tags them and doesn't offer playback/download.
+    val membersOnly: Boolean = false,
 ) {
     val durationText: String
         get() = when {
@@ -190,9 +193,15 @@ data class SavedDownload(
     val at: Long,
     val fileName: String = "",
     val thumbFile: String? = null,
+    val height: Int? = null,
 )
 
 // Persisted spine of an in-flight download; lets a download killed with the
 // process come back as a resumable paused task instead of vanishing.
 @Serializable
-data class QueueEntry(val video: VideoItem, val totalBytes: Long = 0, val at: Long = 0)
+data class QueueEntry(
+    val video: VideoItem,
+    val totalBytes: Long = 0,
+    val at: Long = 0,
+    val height: Int? = null,
+)

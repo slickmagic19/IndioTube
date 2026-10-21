@@ -39,6 +39,23 @@ private val VIEWS_RE = Regex("(views?|watching|likes?)", RegexOption.IGNORE_CASE
 private val AGO_RE = Regex("(ago|Premiered|Streamed|\\b\\d{4}\\b)", RegexOption.IGNORE_CASE)
 private val LIKES_ALONG_RE = Regex("along with ([\\d.,]+[KMB]?) other", RegexOption.IGNORE_CASE)
 private val COUNT_RE = Regex("^[\\d.,]+[KMB]?$")
+private val MEMBERS_RE = Regex("\\bmembers?[- ]only\\b|\\bchannel members?\\b", RegexOption.IGNORE_CASE)
+
+private fun JsonElement?.hasMembersBadge(maxDepth: Int = 12): Boolean {
+    if (this == null) return false
+    fun labels(key: String, vararg paths: Any): List<String?> =
+        findAll(key, maxDepth = maxDepth, limit = 24).map { it.pathStr(*paths) }
+    val texts = labels("metadataBadgeRenderer", "label") +
+        labels("thumbnailBadgeViewModel", "text") +
+        labels("badgeViewModel", "title", "content") +
+        labels("badgeViewModel", "badgeText", "content") +
+        labels("badgeViewModel", "text") +
+        labels("badgeViewModel", "label")
+    val styled = findAll("metadataBadgeRenderer", maxDepth = maxDepth, limit = 24).any {
+        it.pathStr("style") == "BADGE_STYLE_TYPE_MEMBERS_ONLY"
+    }
+    return styled || texts.filterNotNull().any { MEMBERS_RE.containsMatchIn(it) }
+}
 
 // search filter params (same values the web client uses)
 object SearchFilter {
@@ -92,6 +109,7 @@ data class WatchData(
     val related: List<VideoItem>,
     val commentsToken: String?,
     val commentsCountText: String?,
+    val membersOnly: Boolean = false,
 )
 
 data class CommentsPage(val comments: List<CommentItem>, val continuation: String?)
@@ -657,6 +675,15 @@ class InnerTube(private val http: OkHttpClient) {
 
         val likesText = extractLikes(primary ?: root)
 
+        // Members-only videos come back UNPLAYABLE from the logged-out API.
+        // Also check the title/player badge areas so a playable preview and
+        // any future layout are still tagged. Do not scan the whole response:
+        // the related rail can legitimately contain members-only videos.
+        val playability = root.path("playabilityStatus")
+        val membersOnly = playability.pathStr("reason")?.let { MEMBERS_RE.containsMatchIn(it) } == true ||
+            (primary ?: JsonObject(emptyMap())).hasMembersBadge(maxDepth = 8) ||
+            root.path("playerOverlays").hasMembersBadge(maxDepth = 10)
+
         // related videos from the secondary results
         val related = ArrayList<VideoItem>()
         val results = root.path(
@@ -725,6 +752,7 @@ class InnerTube(private val http: OkHttpClient) {
             related = related.distinctBy { it.videoId }.filter { it.videoId != videoId },
             commentsToken = commentsToken,
             commentsCountText = commentsCount,
+            membersOnly = membersOnly,
         )
     }
 
@@ -949,7 +977,9 @@ class InnerTube(private val http: OkHttpClient) {
         if (title.isEmpty()) return null
         if (v.field("upcomingEventData") != null) return null
         val badges = v.arr("badges") ?: JsonArray(emptyList())
-        if (badges.any { it.pathStr("metadataBadgeRenderer", "label")?.contains("Members", true) == true }) return null
+        val membersOnly = badges.any {
+            it.pathStr("metadataBadgeRenderer", "label")?.contains("Members", true) == true
+        } || v.hasMembersBadge(maxDepth = 6)
         if (isShortish(v)) return null
 
         val live = badges.any {
@@ -991,6 +1021,7 @@ class InnerTube(private val http: OkHttpClient) {
             viewsText = views,
             publishedText = published,
             isLive = live,
+            membersOnly = membersOnly,
         )
     }
 
@@ -1026,6 +1057,8 @@ class InnerTube(private val http: OkHttpClient) {
         var channelAvatar: String? = null
         var views: String? = null
         var published: String? = null
+        var membersOnly = lockup.hasMembersBadge(maxDepth = 10) ||
+            thumbContainer.hasMembersBadge(maxDepth = 6)
 
         // The owner block of a lockup carries the real avatar and channel
         // link outside the metadata rows (metadataParts only has text).
@@ -1044,7 +1077,11 @@ class InnerTube(private val http: OkHttpClient) {
             (row.arr("metadataParts") ?: return@forEach).forEach { part ->
                 val t = part.pathStr("text", "content")
                 val a11y = part.pathStr("accessibilityLabel")
+                val membersText = (t != null && MEMBERS_RE.containsMatchIn(t)) ||
+                    (a11y != null && MEMBERS_RE.containsMatchIn(a11y))
+                if (membersText) membersOnly = true
                 when {
+                    membersText -> {}
                     t != null && VIEWS_RE.containsMatchIn(t) -> views = views ?: t
                     // newer layouts show a bare count ("21M") with the word
                     // "views" only in the accessibility label
@@ -1074,6 +1111,7 @@ class InnerTube(private val http: OkHttpClient) {
             viewsText = views,
             publishedText = published,
             isLive = isLive,
+            membersOnly = membersOnly,
         )
     }
 

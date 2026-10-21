@@ -36,6 +36,7 @@ data class DownloadTask(
     val bytesDone: Long = 0,
     val totalBytes: Long = 0,
     val error: String? = null,
+    val height: Int? = null,
 ) {
     val progress: Float get() = if (totalBytes > 0) (bytesDone.toFloat() / totalBytes).coerceIn(0f, 1f) else -1f
     val indeterminate: Boolean get() = totalBytes <= 0
@@ -157,6 +158,7 @@ class Downloads(
                     status = DlStatus.PAUSED,
                     bytesDone = part.length(),
                     totalBytes = entry.totalBytes,
+                    height = entry.height,
                 )
                 keep[id] = entry
             }
@@ -211,8 +213,12 @@ class Downloads(
 
     // ---- controls ----------------------------------------------------------
 
-    fun start(video: VideoItem) {
+    fun start(video: VideoItem, height: Int? = null) {
         val id = video.videoId
+        if (video.membersOnly) {
+            _events.tryEmit(DlEvent.Failed(video, "Members-only videos can't be downloaded"))
+            return
+        }
         if (!online()) {
             _events.tryEmit(DlEvent.Failed(video, "You're offline"))
             return
@@ -220,12 +226,12 @@ class Downloads(
         synchronized(this) {
             if (_items.value.containsKey(id) || _tasks.value.containsKey(id)) return
             intents[id] = Intent.NONE
-            queue = queue + (id to QueueEntry(video, 0, System.currentTimeMillis()))
+            queue = queue + (id to QueueEntry(video, 0, System.currentTimeMillis(), height))
             saveQueue()
-            _tasks.value = _tasks.value + (id to DownloadTask(video, DlStatus.ACTIVE))
+            _tasks.value = _tasks.value + (id to DownloadTask(video, DlStatus.ACTIVE, height = height))
         }
         _events.tryEmit(DlEvent.Started(video))
-        launchWorker(id, video)
+        launchWorker(id, video, height)
     }
 
     fun pause(id: String) {
@@ -241,6 +247,7 @@ class Downloads(
 
     fun resume(id: String) {
         val video: VideoItem
+        val height: Int?
         synchronized(this) {
             val task = _tasks.value[id] ?: return
             if (task.status == DlStatus.ACTIVE || jobs.containsKey(id)) return
@@ -251,9 +258,10 @@ class Downloads(
             intents[id] = Intent.NONE
             _tasks.value = _tasks.value + (id to task.copy(status = DlStatus.ACTIVE, error = null))
             video = task.video
+            height = task.height
         }
         _events.tryEmit(DlEvent.Resumed(video))
-        launchWorker(id, video)
+        launchWorker(id, video, height)
     }
 
     fun cancel(id: String) {
@@ -287,18 +295,18 @@ class Downloads(
 
     // ---- worker --------------------------------------------------------------
 
-    private fun launchWorker(id: String, video: VideoItem) {
+    private fun launchWorker(id: String, video: VideoItem, height: Int?) {
         // LAZY so the job cannot complete (and remove itself) before it is
         // registered — otherwise a fast failure could leave a stale job entry
         // that would block resume/cancel forever
-        val job = scope.launch(start = CoroutineStart.LAZY) { runWorker(id, video) }
+        val job = scope.launch(start = CoroutineStart.LAZY) { runWorker(id, video, height) }
         synchronized(this) { jobs[id] = job }
         job.start()
     }
 
     private fun intent(id: String): Intent = synchronized(this) { intents[id] ?: Intent.NONE }
 
-    private suspend fun runWorker(id: String, video: VideoItem) {
+    private suspend fun runWorker(id: String, video: VideoItem, height: Int?) {
         var attempt = 0
         var part: File? = null
         try {
@@ -311,7 +319,7 @@ class Downloads(
                 }
                 try {
                     // after a failure a fresh URL helps: cached ones may have expired
-                    val rs = resolver.resolveBlocking(id, forceRefresh = attempt > 0)
+                    val rs = resolver.resolveBlocking(id, height, forceRefresh = attempt > 0)
                     val existing = findPart(id)
                     part = existing ?: File(dir, "$id.${rs.ext}.part")
                     var copied = part.length()
@@ -325,7 +333,7 @@ class Downloads(
                     call.execute().use { r ->
                         if (r.code == 416 && total > 0 && copied >= total) {
                             // resume raced past the end — everything is on disk
-                            complete(id, video, part)
+                            complete(id, video, part, height)
                             return
                         }
                         if (!r.isSuccessful) throw IOException("Download failed (HTTP ${r.code})")
@@ -342,7 +350,7 @@ class Downloads(
                         } else if (contentRangeTotal != null && contentRangeTotal > 0) {
                             total = contentRangeTotal
                         }
-                        persistTotal(id, video, total)
+                        persistTotal(id, video, total, height)
                         updateTask(id) { it.copy(status = DlStatus.ACTIVE, totalBytes = total, bytesDone = copied, error = null) }
                         FileOutputStream(part, true).use { out ->
                             copyWithProgress(body.byteStream(), out, total, copied) { done ->
@@ -353,7 +361,7 @@ class Downloads(
                         if (total <= 0 || have >= total) {
                             // clean EOF: either the size matched or the server
                             // never declared one (chunked) — nothing left to fetch
-                            complete(id, video, part)
+                            complete(id, video, part, height)
                             return
                         }
                         // short read with no error — try again from the current offset
@@ -394,10 +402,10 @@ class Downloads(
 
     private fun queueTotal(id: String): Long = synchronized(this) { queue[id]?.totalBytes ?: 0L }
 
-    private fun persistTotal(id: String, video: VideoItem, total: Long) {
+    private fun persistTotal(id: String, video: VideoItem, total: Long, height: Int?) {
         if (total <= 0) return
         synchronized(this) {
-            val e = queue[id] ?: QueueEntry(video, 0, System.currentTimeMillis())
+            val e = queue[id] ?: QueueEntry(video, 0, System.currentTimeMillis(), height)
             if (e.totalBytes == total && queue.containsKey(id)) return
             queue = queue + (id to e.copy(video = video, totalBytes = total))
             saveQueue()
@@ -411,7 +419,7 @@ class Downloads(
         }
     }
 
-    private fun complete(id: String, video: VideoItem, part: File) {
+    private fun complete(id: String, video: VideoItem, part: File, height: Int?) {
         val target = File(dir, part.name.removeSuffix(".part"))
         try {
             if (!part.renameTo(target)) {
@@ -429,6 +437,7 @@ class Downloads(
             at = System.currentTimeMillis(),
             fileName = target.name,
             thumbFile = thumbFile,
+            height = height,
         )
         synchronized(this) {
             _items.value = _items.value + (id to dl)

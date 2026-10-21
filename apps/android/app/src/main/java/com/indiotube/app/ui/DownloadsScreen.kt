@@ -90,11 +90,26 @@ fun DownloadsScreen(container: Container, ui: UiRefs, player: PlaybackController
                             onClick = { ui.openWatch(saved.video, doneVideos) },
                             thumbModel = container.downloads.thumb(saved.video.videoId) ?: saved.video.thumbnail,
                             trailing = {
-                                IconButton(onClick = {
-                                    container.downloads.delete(saved.video.videoId)
-                                    ui.toast("Download removed")
-                                }) {
-                                    Icon(Icons.Filled.Delete, "Delete download", tint = YtMuted, modifier = Modifier.size(20.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    saved.height?.let {
+                                        Text(
+                                            "${it}p",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = YtMuted,
+                                            modifier = Modifier.padding(end = 2.dp),
+                                        )
+                                    }
+                                    IconButton(onClick = {
+                                        container.downloads.delete(saved.video.videoId)
+                                        ui.toast("Download removed")
+                                    }) {
+                                        Icon(
+                                            Icons.Filled.Delete,
+                                            "Delete download",
+                                            tint = YtMuted,
+                                            modifier = Modifier.size(20.dp),
+                                        )
+                                    }
                                 }
                             },
                         )
@@ -116,6 +131,7 @@ private fun ActiveDownloadRow(container: Container, ui: UiRefs, task: DownloadTa
     ) {
         Thumb(
             model = task.video.thumbnail,
+            badge = task.height?.let { "${it}p" },
             corner = 8.dp,
             modifier = Modifier.width(120.dp).height(68.dp),
         )
