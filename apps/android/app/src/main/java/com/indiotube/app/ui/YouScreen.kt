@@ -50,6 +50,7 @@ fun YouScreen(container: Container, ui: UiRefs) {
     val playlists by container.library.playlists.collectAsState()
     val liked by container.library.liked.collectAsState()
     val downloads by container.downloads.items.collectAsState()
+    val downloadTasks by container.downloads.tasks.collectAsState()
 
     var newPlaylistOpen by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
@@ -120,7 +121,13 @@ fun YouScreen(container: Container, ui: UiRefs) {
                 }
             }
             item {
-                YouRow(Icons.Outlined.Download, "Downloads", "${downloads.size} videos") {
+                val subtitle = when {
+                    downloadTasks.isNotEmpty() && downloads.isNotEmpty() ->
+                        "${downloads.size} saved - ${downloadTasks.size} downloading"
+                    downloadTasks.isNotEmpty() -> "${downloadTasks.size} downloading"
+                    else -> "${downloads.size} videos"
+                }
+                YouRow(Icons.Outlined.Download, "Downloads", subtitle) {
                     ui.open(Screen.Downloads)
                 }
             }

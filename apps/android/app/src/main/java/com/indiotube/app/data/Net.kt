@@ -13,35 +13,40 @@ import kotlinx.coroutines.flow.asStateFlow
 // captive portals do not count.
 class Net(context: Context) {
     private val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    private val _online = MutableStateFlow(check())
+    private val _online = MutableStateFlow(false)
     val online: StateFlow<Boolean> = _online.asStateFlow()
+
+    private val _unmetered = MutableStateFlow(false)
+    val unmetered: StateFlow<Boolean> = _unmetered.asStateFlow()
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            _online.value = check()
+            refresh()
         }
 
         override fun onLost(network: Network) {
-            _online.value = check()
+            refresh()
         }
 
         override fun onUnavailable() {
-            _online.value = check()
+            refresh()
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            _online.value = check()
+            refresh()
         }
     }
 
     init {
+        refresh()
         runCatching { cm.registerDefaultNetworkCallback(callback) }
     }
 
-    private fun check(): Boolean {
-        val n = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(n) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+    private fun refresh() {
+        val n = cm.activeNetwork
+        val caps = n?.let { cm.getNetworkCapabilities(it) }
+        _online.value = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        _unmetered.value = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
     }
 }

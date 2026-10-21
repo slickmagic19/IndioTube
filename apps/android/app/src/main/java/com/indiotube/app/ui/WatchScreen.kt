@@ -202,6 +202,7 @@ fun WatchScreen(
     val qualityHeight by player.qualityHeight.collectAsState()
     val captionLanguage by container.captions.language.collectAsState()
     val captionStyle by container.captions.style.collectAsState()
+    val downloadSettings by container.downloadPrefs.settings.collectAsState()
     val subtitle by player.subtitle.collectAsState()
     val autoplayNext by player.autoplayNext.collectAsState()
     val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
@@ -1040,6 +1041,7 @@ fun WatchScreen(
         DownloadQualitySheet(
             qualities = qualities,
             error = qualityError,
+            defaultHeight = downloadSettings.defaultHeight,
             onSelect = { height ->
                 container.downloads.start(merged, height)
                 val label = if (height == null) "Auto" else "${height}p"
@@ -1744,6 +1746,7 @@ private fun QualitySheet(
 private fun DownloadQualitySheet(
     qualities: VideoQualities?,
     error: Boolean,
+    defaultHeight: Int?,
     onSelect: (Int?) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1799,14 +1802,15 @@ private fun DownloadQualitySheet(
                 else -> {
                     val downloadable = qualities.downloadOptions()
                     val autoHeight = qualities.auto?.height
+                    val preferred = defaultHeight?.takeIf { height -> downloadable.any { it.height == height } }
                     ChoiceRow(
                         label = "Auto",
                         subtitle = if (autoHeight != null) {
-                            "Best single file (${autoHeight}p) • recommended"
+                            "Best single file (${autoHeight}p) \u2022 recommended"
                         } else {
                             "Best single file"
                         },
-                        selected = true,
+                        selected = preferred == null,
                         onClick = { onSelect(null) },
                     )
                     Box(
@@ -1831,7 +1835,7 @@ private fun DownloadQualitySheet(
                         ChoiceRow(
                             label = option.label,
                             subtitle = subtitle,
-                            selected = false,
+                            selected = preferred == option.height,
                             onClick = { onSelect(option.height) },
                         )
                     }

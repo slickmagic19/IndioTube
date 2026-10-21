@@ -5,6 +5,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.os.StatFs
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -59,6 +60,12 @@ sealed interface DlEvent {
 
 private enum class Intent { NONE, PAUSE, CANCEL }
 
+internal fun downloadBlockReason(online: Boolean, wifiOnly: Boolean, unmetered: Boolean): String? = when {
+    !online -> "You're offline"
+    wifiOnly && !unmetered -> "Connect to Wi-Fi or turn off Wi-Fi only"
+    else -> null
+}
+
 // Offline downloads: one progressive muxed video file (+ thumbnail) per video.
 // The writer streams into a .part file and resumes with HTTP Range requests,
 // so pausing, network hiccups mid-transfer and app restarts all continue from
@@ -68,6 +75,8 @@ class Downloads(
     private val resolver: StreamResolver,
     private val http: OkHttpClient,
     private val online: () -> Boolean = { true },
+    private val unmetered: () -> Boolean = { true },
+    private val wifiOnly: () -> Boolean = { false },
 ) {
     private val dir = File(context.filesDir, "downloads").apply { mkdirs() }
     private val indexFile = File(context.filesDir, "downloads.json")
@@ -220,6 +229,12 @@ class Downloads(
 
     val downloadedIds: Set<String> get() = _items.value.keys
 
+    fun storageFreeBytes(): Long = try {
+        StatFs(dir.absolutePath).availableBytes
+    } catch (_: Exception) {
+        0L
+    }
+
     // ---- controls ----------------------------------------------------------
 
     fun start(video: VideoItem, height: Int? = null) {
@@ -228,8 +243,8 @@ class Downloads(
             _events.tryEmit(DlEvent.Failed(video, "Members-only videos can't be downloaded"))
             return
         }
-        if (!online()) {
-            _events.tryEmit(DlEvent.Failed(video, "You're offline"))
+        downloadBlockReason(online(), wifiOnly(), unmetered())?.let { reason ->
+            _events.tryEmit(DlEvent.Failed(video, reason))
             return
         }
         synchronized(this) {
@@ -260,8 +275,9 @@ class Downloads(
         synchronized(this) {
             val task = _tasks.value[id] ?: return
             if (task.status == DlStatus.ACTIVE || jobs.containsKey(id)) return
-            if (!online()) {
-                _events.tryEmit(DlEvent.Failed(task.video, "You're offline"))
+            downloadBlockReason(online(), wifiOnly(), unmetered())?.let { reason ->
+                _tasks.value = _tasks.value + (id to task.copy(status = DlStatus.FAILED, error = reason))
+                _events.tryEmit(DlEvent.Failed(task.video, reason))
                 return
             }
             intents[id] = Intent.NONE
@@ -302,6 +318,25 @@ class Downloads(
         }
     }
 
+    fun pauseAll() {
+        _tasks.value.values
+            .filter { it.status == DlStatus.ACTIVE }
+            .map { it.video.videoId }
+            .forEach(::pause)
+    }
+
+    fun resumeAll() {
+        _tasks.value.values
+            .filter { it.status != DlStatus.ACTIVE }
+            .map { it.video.videoId }
+            .forEach(::resume)
+    }
+
+    fun clearAll() {
+        _tasks.value.keys.toList().forEach(::cancel)
+        _items.value.keys.toList().forEach(::delete)
+    }
+
     // ---- worker --------------------------------------------------------------
 
     private fun launchWorker(id: String, video: VideoItem, height: Int?) {
@@ -328,6 +363,10 @@ class Downloads(
                     Intent.CANCEL -> { finishCancel(id, video); return }
                     Intent.PAUSE -> { finishPause(id, video); return }
                     Intent.NONE -> {}
+                }
+                if (wifiOnly() && !unmetered()) {
+                    finishPause(id, video)
+                    return
                 }
                 try {
                     // after a failure a fresh URL helps: cached ones may have expired

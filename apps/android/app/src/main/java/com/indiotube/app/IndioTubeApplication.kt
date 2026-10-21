@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import com.indiotube.app.data.AccountsStore
 import com.indiotube.app.data.CaptionPrefs
+import com.indiotube.app.data.DownloadPrefs
 import com.indiotube.app.data.Downloads
 import com.indiotube.app.data.InnerTube
 import com.indiotube.app.data.LibraryStore
@@ -53,7 +54,15 @@ class Container(context: Context) {
     val resolver = StreamResolver(http).also { StreamResolver.init(http) }
     val captions = CaptionPrefs(context)
     val playbackPrefs = PlaybackPrefs(context)
-    val downloads = Downloads(context, resolver, http) { net.online.value }
+    val downloadPrefs = DownloadPrefs(context)
+    val downloads = Downloads(
+        context,
+        resolver,
+        http,
+        online = { net.online.value },
+        unmetered = { net.unmetered.value },
+        wifiOnly = { downloadPrefs.settings.value.wifiOnly },
+    )
 
     // Home "For you" feed bookkeeping: when it was last built (so a return to
     // Home can auto-refresh stale data) and a rotation counter that lets each
