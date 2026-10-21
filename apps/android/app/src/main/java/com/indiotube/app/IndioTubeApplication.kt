@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 
 class IndioTubeApplication : Application() {
@@ -40,6 +41,13 @@ class Container(context: Context) {
         .writeTimeout(45, TimeUnit.SECONDS)
         .build()
 
+    val downloadHttp: OkHttpClient = http.newBuilder()
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 32
+            maxRequestsPerHost = 8
+        })
+        .build()
+
     val net = Net(context)
 
     val library = LibraryStore(context.filesDir, appScope)
@@ -58,7 +66,7 @@ class Container(context: Context) {
     val downloads = Downloads(
         context,
         resolver,
-        http,
+        downloadHttp,
         online = { net.online.value },
         unmetered = { net.unmetered.value },
         wifiOnly = { downloadPrefs.settings.value.wifiOnly },

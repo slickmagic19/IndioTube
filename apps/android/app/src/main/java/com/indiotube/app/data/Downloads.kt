@@ -9,15 +9,17 @@ import android.os.StatFs
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -96,7 +98,7 @@ class Downloads(
     val events: SharedFlow<DlEvent> = _events.asSharedFlow()
 
     private val jobs = HashMap<String, Job>()
-    private val calls = HashMap<String, Call>()
+    private val calls = HashMap<String, MutableSet<Call>>()
     private val intents = HashMap<String, Intent>()
     private var queue: Map<String, QueueEntry> = emptyMap()
 
@@ -211,6 +213,25 @@ class Downloads(
         emptyList()
     }
 
+    private fun segmentPrefix(baseName: String): String =
+        baseName.removeSuffix(".part") + ".seg"
+
+    private fun segmentName(baseName: String, range: ByteRange): String =
+        segmentNameFor(baseName, range)
+
+    private fun segmentFiles(base: File): List<File> = try {
+        val prefix = segmentPrefix(base.name)
+        dir.listFiles()
+            ?.filter { it.name.startsWith(prefix) && it.name.endsWith(".part") }
+            ?.sortedBy { it.name }
+            .orEmpty()
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    private fun belongsToPart(fileName: String, baseName: String): Boolean =
+        fileName == baseName || fileName.startsWith(segmentPrefix(baseName))
+
     // ---- public state ----------------------------------------------------
 
     fun entry(videoId: String): SavedDownload? = _items.value[videoId]
@@ -259,14 +280,14 @@ class Downloads(
     }
 
     fun pause(id: String) {
-        val call: Call?
+        val activeCalls: List<Call>
         synchronized(this) {
             val task = _tasks.value[id] ?: return
             if (task.status != DlStatus.ACTIVE) return
             intents[id] = Intent.PAUSE
-            call = calls[id]
+            activeCalls = calls[id]?.toList().orEmpty()
         }
-        call?.cancel()
+        activeCalls.forEach { it.cancel() }
     }
 
     fun resume(id: String) {
@@ -291,17 +312,17 @@ class Downloads(
 
     fun cancel(id: String) {
         val video: VideoItem
-        val call: Call?
+        val activeCalls: List<Call>
         val workerAlive: Boolean
         synchronized(this) {
             val task = _tasks.value[id] ?: return
             video = task.video
-            call = calls[id]
+            activeCalls = calls[id]?.toList().orEmpty()
             workerAlive = jobs.containsKey(id)
             if (workerAlive) intents[id] = Intent.CANCEL
         }
         if (workerAlive) {
-            call?.cancel()
+            activeCalls.forEach { it.cancel() }
         } else {
             // paused/failed task with no worker — clean up right here
             finishCancel(id, video)
@@ -350,9 +371,55 @@ class Downloads(
 
     private fun intent(id: String): Intent = synchronized(this) { intents[id] ?: Intent.NONE }
 
-    private class PartComplete : Exception()
-
     private data class DownloadPart(val stream: ResolvedStream, val file: File)
+
+    private enum class PartMode { COMPLETE, SEGMENTED, SEQUENTIAL }
+
+    private data class PartPlan(
+        val spec: DownloadPart,
+        val totalBytes: Long,
+        val mode: PartMode,
+        val ranges: List<ByteRange> = emptyList(),
+        val initialBytes: Long = 0,
+    ) {
+        fun segmentFile(index: Int): File =
+            File(spec.file.parentFile, segmentNameFor(spec.file.name, ranges[index]))
+    }
+
+    private data class StreamProbe(val totalBytes: Long, val rangeSupported: Boolean)
+
+    private class ProgressReporter(
+        private val totalBytes: Long,
+        initialBytes: Long,
+        private val onProgress: (Long) -> Unit,
+    ) {
+        private val done = AtomicLong(initialBytes.coerceAtLeast(0))
+        private var lastUpdateAt = 0L
+        private var lastPercent = -1
+
+        fun add(delta: Int) = add(delta.toLong())
+
+        fun add(delta: Long) {
+            if (delta == 0L) return
+            val current = done.addAndGet(delta).coerceAtLeast(0)
+            publish(current, force = false)
+        }
+
+        fun flush() {
+            publish(done.get(), force = true)
+        }
+
+        private fun publish(current: Long, force: Boolean) {
+            synchronized(this) {
+                val percent = if (totalBytes > 0) ((current * 100) / totalBytes).toInt() else -1
+                val now = System.nanoTime()
+                if (!force && percent == lastPercent && now - lastUpdateAt < 250_000_000L) return
+                lastUpdateAt = now
+                lastPercent = percent
+                onProgress(if (totalBytes > 0) current.coerceAtMost(totalBytes) else current)
+            }
+        }
+    }
 
     private suspend fun runWorker(id: String, video: VideoItem, height: Int?) {
         var attempt = 0
@@ -372,18 +439,44 @@ class Downloads(
                     // after a failure a fresh URL helps: cached ones may have expired
                     val sources = resolver.resolveDownloadBlocking(id, height, forceRefresh = attempt > 0)
                     val parts = prepareParts(id, sources)
-                    val totals = HashMap<File, Long>()
-                    for (spec in parts) {
-                        try {
-                            downloadPart(id, video, spec, parts, totals, height)
-                        } catch (_: PartComplete) {
-                        }
+                    val plans = coroutineScope {
+                        parts.map { spec ->
+                            async(Dispatchers.IO) {
+                                planPart(id, spec, if (spec.stream.isAudio) 2 else 4)
+                            }
+                        }.awaitAll()
                     }
+                    if (intent(id) != Intent.NONE) throw IOException("Download paused")
+                    val combinedTotal = plans.map { it.totalBytes }
+                        .takeIf { totals -> totals.all { it > 0 } }
+                        ?.sum()
+                        ?: 0L
+                    if (combinedTotal > 0) persistTotal(id, video, combinedTotal, height)
+                    val initialBytes = plans.sumOf { it.initialBytes }
+                        .let { if (combinedTotal > 0) it.coerceAtMost(combinedTotal) else it }
+                    val reporter = ProgressReporter(combinedTotal, initialBytes) { done ->
+                        updateTask(id) { it.copy(bytesDone = done) }
+                    }
+                    updateTask(id) {
+                        it.copy(
+                            status = DlStatus.ACTIVE,
+                            totalBytes = combinedTotal,
+                            bytesDone = initialBytes,
+                            error = null,
+                        )
+                    }
+                    coroutineScope {
+                        plans.map { plan ->
+                            async(Dispatchers.IO) { executePart(id, plan, reporter) }
+                        }.awaitAll()
+                    }
+                    reporter.flush()
+                    if (intent(id) != Intent.NONE) throw IOException("Download paused")
                     if (sources.audio != null) {
                         val out = File(dir, "$id.mp4")
                         muxParts(
-                            video = parts.first { it.stream.isVideo }.file,
-                            audio = parts.first { it.stream.isAudio }.file,
+                            video = plans.first { it.spec.stream.isVideo }.spec.file,
+                            audio = plans.first { it.spec.stream.isAudio }.spec.file,
                             target = out,
                         )
                         if (intent(id) == Intent.CANCEL) {
@@ -391,10 +484,10 @@ class Downloads(
                             finishCancel(id, video)
                             return
                         }
-                        parts.forEach { it.file.delete() }
+                        plans.forEach { it.spec.file.delete() }
                         finishSaved(id, video, out, sources.video.height)
                     } else {
-                        complete(id, video, parts.first().file, sources.video.height)
+                        complete(id, video, plans.first().spec.file, sources.video.height)
                     }
                     return
                 } catch (e: CancellationException) {
@@ -436,94 +529,251 @@ class Downloads(
             if (adaptive) {
                 val audioName = "$id.audio.${sources.audio!!.ext}.part"
                 val videoName = "$id.video.${sources.video.ext}.part"
-                existing.filterNot { it.name == audioName || it.name == videoName }
-                    .forEach { it.delete() }
+                existing.filterNot {
+                    belongsToPart(it.name, audioName) || belongsToPart(it.name, videoName)
+                }.forEach { it.delete() }
                 return listOf(
                     DownloadPart(sources.audio, existing.firstOrNull { it.name == audioName } ?: File(dir, audioName)),
                     DownloadPart(sources.video, existing.firstOrNull { it.name == videoName } ?: File(dir, videoName)),
                 )
             }
             val singleName = "$id.${sources.video.ext}.part"
-            existing.filterNot { it.name == singleName }.forEach { it.delete() }
+            existing.filterNot { belongsToPart(it.name, singleName) }.forEach { it.delete() }
             return listOf(
                 DownloadPart(sources.video, existing.firstOrNull { it.name == singleName } ?: File(dir, singleName)),
             )
         }
     }
 
-    private fun downloadPart(
-        id: String,
-        video: VideoItem,
+    private fun planPart(id: String, spec: DownloadPart, maxSegments: Int): PartPlan {
+        val base = spec.file
+        val segments = segmentFiles(base)
+        val baseBytes = base.length()
+        val probe = probeSource(id, spec.stream.url)
+        val total = probe.totalBytes
+        if (segments.isNotEmpty()) {
+            if (total > 0 && baseBytes == total) {
+                segments.forEach { it.delete() }
+                return PartPlan(spec, total, PartMode.COMPLETE, initialBytes = total)
+            }
+            if (probe.rangeSupported && total > 0) {
+                val ranges = planByteRanges(total, maxSegments)
+                val expected = ranges.map { segmentName(base.name, it) }
+                val byName = segments.associateBy { it.name }
+                val valid = ranges.size > 1 &&
+                    segments.size == expected.size &&
+                    ranges.indices.all { index ->
+                        val file = byName[expected[index]]
+                        file != null && file.length() <= ranges[index].length
+                    }
+                if (valid) {
+                    if (baseBytes > 0) base.delete()
+                    return PartPlan(
+                        spec,
+                        total,
+                        PartMode.SEGMENTED,
+                        ranges,
+                        segments.sumOf { it.length() },
+                    )
+                }
+            }
+            segments.forEach { it.delete() }
+            base.delete()
+            return freshPlan(spec, probe, maxSegments)
+        }
+        if (baseBytes > 0) {
+            if (total > 0 && baseBytes == total) {
+                return PartPlan(spec, total, PartMode.COMPLETE, initialBytes = total)
+            }
+            if (total > 0 && baseBytes > total) {
+                base.delete()
+                return freshPlan(spec, probe, maxSegments)
+            }
+            if (probe.rangeSupported && total > baseBytes && maxSegments > 1) {
+                return seedLegacyPlan(spec, total, baseBytes, maxSegments)
+            }
+            return PartPlan(spec, total, PartMode.SEQUENTIAL, initialBytes = baseBytes)
+        }
+        return freshPlan(spec, probe, maxSegments)
+    }
+
+    private fun seedLegacyPlan(
         spec: DownloadPart,
-        allParts: List<DownloadPart>,
-        totals: MutableMap<File, Long>,
-        height: Int?,
-    ) {
-        var copied = spec.file.length()
-        var total = totals[spec.file] ?: 0L
-        val req = Request.Builder().url(spec.stream.url)
-        if (copied > 0) req.header("Range", "bytes=$copied-")
-        val call = http.newCall(req.build())
-        synchronized(this) { calls[id] = call }
+        totalBytes: Long,
+        baseBytes: Long,
+        maxSegments: Int,
+    ): PartPlan {
+        val ranges = planSeededByteRanges(totalBytes, baseBytes, maxSegments)
+        if (ranges.isEmpty()) {
+            return PartPlan(spec, totalBytes, PartMode.SEQUENTIAL, initialBytes = baseBytes)
+        }
+        val seeded = File(dir, segmentName(spec.file.name, ranges.first()))
+        seeded.delete()
+        if (!spec.file.renameTo(seeded)) {
+            spec.file.copyTo(seeded, overwrite = true)
+            spec.file.delete()
+        }
+        return PartPlan(spec, totalBytes, PartMode.SEGMENTED, ranges, initialBytes = baseBytes)
+    }
+
+    private fun freshPlan(spec: DownloadPart, probe: StreamProbe, maxSegments: Int): PartPlan {
+        spec.file.delete()
+        segmentFiles(spec.file).forEach { it.delete() }
+        val total = probe.totalBytes
+        if (probe.rangeSupported && total > 0) {
+            val ranges = planByteRanges(total, maxSegments)
+            if (ranges.size > 1) {
+                return PartPlan(spec, total, PartMode.SEGMENTED, ranges)
+            }
+        }
+        return PartPlan(spec, total, PartMode.SEQUENTIAL)
+    }
+
+    private fun probeSource(id: String, url: String): StreamProbe {
+        val request = Request.Builder()
+            .url(url)
+            .header("Range", "bytes=0-0")
+            .header("Accept-Encoding", "identity")
+            .build()
+        val call = http.newCall(request)
+        trackCall(id, call)
+        try {
+            if (intent(id) != Intent.NONE) {
+                call.cancel()
+                throw IOException("Download paused")
+            }
+            call.execute().use { response ->
+                if (response.code == 206) {
+                    val range = parseContentRange(response.header("Content-Range"))
+                    val total = range?.total ?: 0L
+                    return StreamProbe(total, total > 0)
+                }
+                if (response.code == 200) {
+                    val total = response.body?.contentLength()?.takeIf { it > 0 }
+                        ?: response.header("Content-Length")?.toLongOrNull()?.takeIf { it > 0 }
+                        ?: 0L
+                    return StreamProbe(total, false)
+                }
+                if (response.code == 416) return StreamProbe(0, false)
+                throw IOException("Download failed (HTTP ${response.code})")
+            }
+        } finally {
+            untrackCall(id, call)
+        }
+    }
+
+    private suspend fun executePart(id: String, plan: PartPlan, reporter: ProgressReporter) {
+        when (plan.mode) {
+            PartMode.COMPLETE -> Unit
+            PartMode.SEQUENTIAL -> downloadSequential(id, plan, reporter)
+            PartMode.SEGMENTED -> {
+                try {
+                    downloadByteRanges(
+                        client = http,
+                        url = plan.spec.stream.url,
+                        ranges = plan.ranges,
+                        segmentFile = plan::segmentFile,
+                        isCancelled = { intent(id) != Intent.NONE },
+                        onCall = { call -> trackCall(id, call) },
+                        onCallDone = { call -> untrackCall(id, call) },
+                        onBytes = reporter::add,
+                    )
+                } catch (e: RangeUnsupportedException) {
+                    plan.ranges.indices.forEach { plan.segmentFile(it).delete() }
+                    plan.spec.file.delete()
+                    throw e
+                }
+                mergeSegments(plan)
+            }
+        }
+    }
+
+    private fun mergeSegments(plan: PartPlan) {
+        val base = plan.spec.file
+        base.delete()
+        FileOutputStream(base, false).use { output ->
+            plan.ranges.indices.forEach { index ->
+                val segment = plan.segmentFile(index)
+                if (segment.length() != plan.ranges[index].length) {
+                    throw IOException("Download segment is incomplete")
+                }
+                segment.inputStream().use { input ->
+                    input.copyTo(output, DOWNLOAD_COPY_BUFFER)
+                }
+            }
+        }
+        if (base.length() != plan.totalBytes) {
+            throw IOException("Download assembly is incomplete")
+        }
+        plan.ranges.indices.forEach { plan.segmentFile(it).delete() }
+    }
+
+    private fun downloadSequential(id: String, plan: PartPlan, reporter: ProgressReporter) {
+        val file = plan.spec.file
+        var copied = file.length()
+        if (plan.totalBytes > 0 && copied >= plan.totalBytes) return
+        val builder = Request.Builder()
+            .url(plan.spec.stream.url)
+            .header("Accept-Encoding", "identity")
+        if (copied > 0) builder.header("Range", "bytes=$copied-")
+        val call = http.newCall(builder.build())
+        trackCall(id, call)
         if (intent(id) != Intent.NONE) call.cancel()
-        call.execute().use { r ->
-            if (r.code == 416 && copied > 0) {
-                val end = r.header("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()
-                if (end != null && end > 0 && copied >= end) {
-                    totals[spec.file] = end
-                    throw PartComplete()
+        try {
+            call.execute().use { response ->
+                if (response.code == 416 && copied > 0) {
+                    val total = parseContentRange(response.header("Content-Range"))?.total
+                    if (total != null && copied >= total) return
+                    throw IOException("Download failed (HTTP 416)")
                 }
-                throw IOException("Download failed (HTTP 416)")
-            }
-            if (!r.isSuccessful) throw IOException("Download failed (HTTP ${r.code})")
-            val body = r.body ?: throw IOException("Download failed (empty response)")
-            val contentRangeTotal = r.header("Content-Range")?.substringAfterLast('/')?.trim()?.toLongOrNull()
-            val contentLength = body.contentLength()
-            if (r.code == 200) {
-                // server ignored the range (or fresh start) — never append twice
-                if (copied > 0) {
-                    spec.file.delete()
-                    copied = 0
+                if (!response.isSuccessful) {
+                    throw IOException("Download failed (HTTP ${response.code})")
                 }
-                if (contentLength > 0) total = contentLength
-            } else if (contentRangeTotal != null && contentRangeTotal > 0) {
-                total = contentRangeTotal
-            }
-            if (total > 0) totals[spec.file] = total
-            val allTotalsKnown = allParts.all { (totals[it.file] ?: 0) > 0 }
-            val combinedTotal = if (allTotalsKnown) allParts.sumOf { totals[it.file] ?: 0 } else 0L
-            val doneBefore = allParts.sumOf { it.file.length() } - copied
-            if (combinedTotal > 0) {
-                persistTotal(id, video, combinedTotal, height)
-                updateTask(id) {
-                    it.copy(
-                        status = DlStatus.ACTIVE,
-                        totalBytes = combinedTotal,
-                        bytesDone = doneBefore + copied,
-                        error = null,
-                    )
+                val body = response.body ?: throw IOException("Download failed (empty response)")
+                if (response.code == 200) {
+                    if (copied > 0) {
+                        file.delete()
+                        reporter.add(-copied)
+                        copied = 0
+                    }
+                } else if (response.code == 206) {
+                    val range = parseContentRange(response.header("Content-Range"))
+                        ?: throw IOException("Download failed (missing Content-Range)")
+                    if (range.start != copied) throw IOException("Download range mismatch")
+                } else {
+                    throw IOException("Download failed (HTTP ${response.code})")
                 }
-            } else {
-                updateTask(id) {
-                    it.copy(
-                        status = DlStatus.ACTIVE,
-                        totalBytes = 0,
-                        bytesDone = doneBefore + copied,
-                        error = null,
-                    )
+                FileOutputStream(file, true).use { output ->
+                    val input = body.byteStream()
+                    val buffer = ByteArray(DOWNLOAD_COPY_BUFFER)
+                    while (true) {
+                        if (intent(id) != Intent.NONE) throw IOException("Download paused")
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        reporter.add(read)
+                    }
                 }
             }
-            FileOutputStream(spec.file, true).use { out ->
-                copyWithProgress(body.byteStream(), out, combinedTotal, doneBefore) { done ->
-                    updateTask(id) { it.copy(bytesDone = done) }
-                }
-            }
-            val have = spec.file.length()
-            if (total > 0 && have < total) {
-                // short read with no error — retry from the current offset
+            if (plan.totalBytes > 0 && file.length() < plan.totalBytes) {
                 throw IOException("Download stalled near the end")
             }
-            if (total <= 0) totals[spec.file] = have
+        } finally {
+            untrackCall(id, call)
+        }
+    }
+
+    private fun trackCall(id: String, call: Call) {
+        synchronized(this) {
+            calls.getOrPut(id) { mutableSetOf() }.add(call)
+        }
+    }
+
+    private fun untrackCall(id: String, call: Call) {
+        synchronized(this) {
+            val active = calls[id] ?: return
+            active.remove(call)
+            if (active.isEmpty()) calls.remove(id)
         }
     }
 
@@ -686,34 +936,5 @@ class Downloads(
     }
 }
 
-// Streams input to output, reporting the ABSOLUTE number of bytes done at most
-// once per whole percent (plus one final call). startOffset is the number of
-// bytes already on disk when resuming from a Range request. When totalBytes is
-// unknown (<= 0) no progress is reported and the UI stays indeterminate.
-internal fun copyWithProgress(
-    input: InputStream,
-    output: OutputStream,
-    totalBytes: Long,
-    startOffset: Long = 0,
-    onProgress: (Long) -> Unit,
-): Long {
-    val buf = ByteArray(64 * 1024)
-    var copied = 0L
-    var lastPct = -1
-    while (true) {
-        val n = input.read(buf)
-        if (n < 0) break
-        output.write(buf, 0, n)
-        copied += n
-        if (totalBytes > 0) {
-            val done = startOffset + copied
-            val pct = ((done * 100) / totalBytes).toInt()
-            if (pct > lastPct) {
-                lastPct = pct
-                onProgress(done)
-            }
-        }
-    }
-    if (totalBytes > 0) onProgress(startOffset + copied)
-    return copied
-}
+private fun segmentNameFor(baseName: String, range: ByteRange): String =
+    "${baseName.removeSuffix(".part")}.seg${range.start}-${range.end}.part"

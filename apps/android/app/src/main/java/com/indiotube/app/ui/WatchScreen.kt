@@ -8,8 +8,11 @@ import android.graphics.Typeface
 import android.util.TypedValue
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,7 +40,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -71,8 +74,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -94,12 +95,17 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -1078,18 +1084,56 @@ fun WatchScreen(
 
 @Composable
 private fun AutoplaySwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Switch(
-        checked = checked,
-        onCheckedChange = onCheckedChange,
-        colors = SwitchDefaults.colors(
-            checkedThumbColor = Color.White,
-            checkedTrackColor = YtRed,
-            checkedBorderColor = Color.Transparent,
-            uncheckedThumbColor = Color(0xFF909090),
-            uncheckedTrackColor = YtSurfaceHi,
-            uncheckedBorderColor = Color.Transparent,
-        ),
+    val fraction by animateFloatAsState(
+        targetValue = if (checked) 1f else 0f,
+        animationSpec = tween(durationMillis = 160),
+        label = "autoplay",
     )
+    val trackColor = lerp(YtSurfaceHi, YtRed, fraction)
+    val thumbColor = lerp(Color(0xFFBDBDBD), Color.White, fraction)
+    Box(
+        modifier = Modifier
+            .size(width = 48.dp, height = 32.dp)
+            .clip(RoundedCornerShape(50))
+            .toggleable(
+                value = checked,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
+            .semantics {
+                contentDescription = "Autoplay"
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(width = 36.dp, height = 20.dp)) {
+            val trackHeight = size.height
+            val trackWidth = size.width
+            val radius = trackHeight / 2f
+            drawRoundRect(color = trackColor, cornerRadius = CornerRadius(radius))
+            if (fraction < 1f) {
+                drawRoundRect(
+                    color = Color.White.copy(alpha = 0.4f * (1f - fraction)),
+                    cornerRadius = CornerRadius(radius),
+                    style = Stroke(width = 1.dp.toPx()),
+                )
+            }
+            val inset = 3.dp.toPx()
+            val thumbRadius = (trackHeight - inset * 2f) / 2f
+            val travel = trackWidth - inset * 2f - thumbRadius * 2f
+            val centerX = inset + thumbRadius + travel * fraction
+            val centerY = trackHeight / 2f
+            drawCircle(
+                color = Color.Black.copy(alpha = 0.22f),
+                radius = thumbRadius,
+                center = Offset(centerX, centerY + 0.5.dp.toPx()),
+            )
+            drawCircle(
+                color = thumbColor,
+                radius = thumbRadius,
+                center = Offset(centerX, centerY),
+            )
+        }
+    }
 }
 
 @Composable
@@ -1224,7 +1268,7 @@ private fun PlayerChrome(
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Medium,
                     )
-                    Spacer(Modifier.width(2.dp))
+                    Spacer(Modifier.width(4.dp))
                     AutoplaySwitch(
                         checked = autoplayOn,
                         onCheckedChange = onToggleAutoplay,
