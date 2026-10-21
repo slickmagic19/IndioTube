@@ -136,6 +136,13 @@ fun HistoryEntry.watchedFraction(): Float? {
 // recommender sinks finished videos and a re-watch starts from the top again.
 const val COMPLETED_FRACTION = 0.92f
 
+fun resumeStartPosition(resumeMs: Long, watchedFraction: Float?, durationMs: Long = 0): Long {
+    if (resumeMs <= 20_000) return 0
+    if ((watchedFraction ?: 0f) >= COMPLETED_FRACTION) return 0
+    if (durationMs > 0 && resumeMs >= durationMs - 10_000) return 0
+    return resumeMs
+}
+
 @Serializable
 data class LocalPlaylist(
     val id: String,

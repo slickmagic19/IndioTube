@@ -219,6 +219,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                                 video,
                                 onClick = { ui.openWatch(video, videos) },
                                 onChannelClick = { ui.openChannel(channelId, dispName, dispAvatar) },
+                                onDownload = { ui.download(video) },
                             )
                         }
                         if (loadingMore) {

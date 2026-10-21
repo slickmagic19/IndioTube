@@ -115,7 +115,6 @@ import coil.compose.AsyncImage
 import com.indiotube.app.Container
 import com.indiotube.app.data.CaptionPrefs
 import com.indiotube.app.data.CaptionStyleSettings
-import com.indiotube.app.data.COMPLETED_FRACTION
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
@@ -206,7 +205,6 @@ fun WatchScreen(
     val subtitle by player.subtitle.collectAsState()
     val autoplayNext by player.autoplayNext.collectAsState()
     val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
-    var resumed by remember(video.videoId) { mutableStateOf(false) }
     val pageState = rememberLazyListState()
 
     // The feed badge is usually enough, but the watch page is authoritative:
@@ -358,15 +356,6 @@ fun WatchScreen(
 
     // pick up where the user left off — but a video watched to the end starts
     // over, the way YouTube replays finished videos from the beginning.
-    LaunchedEffect(duration, video.videoId) {
-        if (!resumed && duration > 0 && playingVideo?.videoId == video.videoId) {
-            resumed = true
-            val resume = container.library.resumePosition(video.videoId)
-            val finished = (container.library.watchedFraction(video.videoId) ?: 0f) >= COMPLETED_FRACTION
-            if (!finished && resume > 20_000 && resume < duration - 10_000) player.seekTo(resume)
-        }
-    }
-
     LaunchedEffect(controlsVisible, playing, buffering, scrub) {
         if (controlsVisible && playing && !buffering && scrub == null) {
             delay(3500)
@@ -638,7 +627,7 @@ fun WatchScreen(
                     captionsAvailable = captionsAvailable,
                     captionsOn = subtitle != null,
                     autoplayOn = autoplayNext,
-                    onToggleAutoplay = { player.setAutoplayNext(!autoplayNext) },
+                    onToggleAutoplay = { player.setAutoplayNext(it) },
                     onQuality = { qualitySheet = true },
                     onCaptions = { captionsSheet = true },
 
@@ -799,7 +788,14 @@ fun WatchScreen(
                             label = when {
                                 membersOnly -> "Members"
                                 downloaded -> "Downloaded"
-                                dlTask?.status == DlStatus.ACTIVE -> "Downloading"
+                                dlTask?.status == DlStatus.ACTIVE -> {
+                                    val task = dlTask
+                                    if (!task.indeterminate) {
+                                        "${(task.progress * 100).toInt()}%"
+                                    } else {
+                                        "Downloading"
+                                    }
+                                }
                                 dlTask?.status == DlStatus.PAUSED -> "Resume"
                                 dlTask?.status == DlStatus.FAILED -> "Retry"
                                 else -> "Download"
@@ -975,17 +971,9 @@ fun WatchScreen(
                                 color = YtMuted,
                             )
                             Spacer(Modifier.width(4.dp))
-                            Switch(
+                            AutoplaySwitch(
                                 checked = autoplayNext,
                                 onCheckedChange = { player.setAutoplayNext(it) },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = YtRed,
-                                    checkedBorderColor = Color.Transparent,
-                                    uncheckedThumbColor = Color(0xFF909090),
-                                    uncheckedTrackColor = YtSurfaceHi,
-                                    uncheckedBorderColor = Color.Transparent,
-                                ),
                             )
                         }
                         HorizontalDivider(color = YtDivider)
@@ -1089,6 +1077,22 @@ fun WatchScreen(
 }
 
 @Composable
+private fun AutoplaySwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Switch(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        colors = SwitchDefaults.colors(
+            checkedThumbColor = Color.White,
+            checkedTrackColor = YtRed,
+            checkedBorderColor = Color.Transparent,
+            uncheckedThumbColor = Color(0xFF909090),
+            uncheckedTrackColor = YtSurfaceHi,
+            uncheckedBorderColor = Color.Transparent,
+        ),
+    )
+}
+
+@Composable
 private fun PlayerChrome(
     visible: Boolean,
     title: String,
@@ -1104,7 +1108,7 @@ private fun PlayerChrome(
     captionsAvailable: Boolean,
     captionsOn: Boolean,
     autoplayOn: Boolean,
-    onToggleAutoplay: () -> Unit,
+    onToggleAutoplay: (Boolean) -> Unit,
     onQuality: () -> Unit,
     onCaptions: () -> Unit,
 
@@ -1214,32 +1218,17 @@ private fun PlayerChrome(
                     Modifier.fillMaxWidth().padding(top = 1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // Autoplay pill, styled like the CC button: filled when
-                    // on, outlined when off. It sits on the left so the row
-                    // still ends with the regular quality/fullscreen controls.
-                    Box(
-                        Modifier
-                            .height(40.dp)
-                            .clickable(onClick = onToggleAutoplay)
-                            .padding(horizontal = 4.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Box(
-                            Modifier
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(if (autoplayOn) Color.White else Color.Transparent)
-                                .border(1.2.dp, Color.White, RoundedCornerShape(3.dp))
-                                .padding(horizontal = 5.dp, vertical = 2.dp),
-                        ) {
-                            Text(
-                                "Autoplay",
-                                color = if (autoplayOn) Color.Black else Color.White,
-                                fontSize = 9.sp,
-                                lineHeight = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                    }
+                    Text(
+                        "Autoplay",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    AutoplaySwitch(
+                        checked = autoplayOn,
+                        onCheckedChange = onToggleAutoplay,
+                    )
                     Spacer(Modifier.weight(1f))
                     if (queueSize > 1) {
 

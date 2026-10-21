@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -257,6 +258,14 @@ fun HomeScreen(container: Container, ui: UiRefs) {
             )
         }
 
+        if (loading && feed != null && !refreshing) {
+            LinearProgressIndicator(
+                color = YtRed,
+                trackColor = Color.Transparent,
+                modifier = Modifier.fillMaxWidth().height(2.dp),
+            )
+        }
+
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {
@@ -361,6 +370,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                         onClick = { ui.openWatch(video, shown) },
                                         onChannelClick = { ui.openChannelOf(video) },
                                         onFeedback = { ui.feedback(video, it) },
+                                        onDownload = { ui.download(video) },
                                     )
                                 }
                                 if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
@@ -467,6 +477,7 @@ fun VideoFeedList(
                 video,
                 onClick = { ui.openWatch(video, videos) },
                 onChannelClick = { ui.openChannelOf(video) },
+                onDownload = { ui.download(video) },
             )
         }
         if (footer != null) {

@@ -23,6 +23,7 @@ import com.indiotube.app.data.ResolvedStream
 import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
+import com.indiotube.app.data.resumeStartPosition
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -96,6 +97,7 @@ class PlaybackController(
     private var lastErrorShownAt = 0L
     private var pendingPlay = false
     private var pendingShuffle = false
+    private var pendingStartPosition = 0L
     private var lastPositionSave = 0L
     private var lastMediaId: String? = null
     private var replacingItem = false
@@ -256,13 +258,14 @@ class PlaybackController(
         // queue set before the controller finished connecting (cold start tap)
         if (_queue.value.isNotEmpty() && c.mediaItemCount == 0) {
             val items = _queue.value.map { toMediaItem(it) }
-            c.setMediaItems(items, _index.value.coerceAtLeast(0), 0)
+            c.setMediaItems(items, _index.value.coerceAtLeast(0), pendingStartPosition)
             if (pendingShuffle) c.shuffleModeEnabled = true
             c.prepare()
             if (pendingPlay) c.play()
         }
         pendingPlay = false
         pendingShuffle = false
+        pendingStartPosition = 0
     }
 
     fun clearError() {
@@ -305,12 +308,23 @@ class PlaybackController(
         attachedSubtitleVideoId = null
         attachedSubtitleUrl = null
         currentStreamUrl = null
+        val first = videos[start]
+        val resume = if (play) {
+            resumeStartPosition(
+                resumeMs = store.resumePosition(first.videoId),
+                watchedFraction = store.watchedFraction(first.videoId),
+                durationMs = first.durationSec * 1000L,
+            )
+        } else {
+            0L
+        }
         val c = controller ?: run {
             pendingPlay = play
             pendingShuffle = shuffleOn
+            pendingStartPosition = resume
             return
         }
-        c.setMediaItems(videos.map { toMediaItem(it) }, start, 0)
+        c.setMediaItems(videos.map { toMediaItem(it) }, start, resume)
         c.shuffleModeEnabled = shuffleOn
         c.prepare()
         if (play) c.play()

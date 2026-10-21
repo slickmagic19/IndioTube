@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ThumbUp
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -197,6 +198,7 @@ fun VideoCard(
     onClick: () -> Unit,
     onChannelClick: (() -> Unit)? = null,
     onFeedback: ((FeedFeedback) -> Unit)? = null,
+    onDownload: (() -> Unit)? = null,
 ) {
     Column(
         Modifier
@@ -242,15 +244,19 @@ fun VideoCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (onFeedback != null) {
-                CardFeedbackMenu(video, onFeedback)
+            if (onFeedback != null || onDownload != null) {
+                CardFeedbackMenu(video, onFeedback, onDownload)
             }
         }
     }
 }
 
 @Composable
-private fun CardFeedbackMenu(video: VideoItem, onFeedback: (FeedFeedback) -> Unit) {
+private fun CardFeedbackMenu(
+    video: VideoItem,
+    onFeedback: ((FeedFeedback) -> Unit)?,
+    onDownload: (() -> Unit)?,
+) {
     var open by remember { mutableStateOf(false) }
     Box {
         IconButton(
@@ -265,31 +271,43 @@ private fun CardFeedbackMenu(video: VideoItem, onFeedback: (FeedFeedback) -> Uni
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(
-                text = { Text("Interested") },
-                leadingIcon = { Icon(Icons.Outlined.ThumbUp, null, tint = YtText) },
-                onClick = {
-                    open = false
-                    onFeedback(FeedFeedback.INTERESTED)
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Not interested") },
-                leadingIcon = { Icon(Icons.Outlined.Block, null, tint = YtText) },
-                onClick = {
-                    open = false
-                    onFeedback(FeedFeedback.NOT_INTERESTED)
-                },
-            )
-            if (video.channelId != null) {
+            if (onDownload != null) {
                 DropdownMenuItem(
-                    text = { Text("Don't recommend channel") },
-                    leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null, tint = YtText) },
+                    text = { Text("Download") },
+                    leadingIcon = { Icon(Icons.Outlined.Download, null, tint = YtText) },
                     onClick = {
                         open = false
-                        onFeedback(FeedFeedback.DONT_RECOMMEND_CHANNEL)
+                        onDownload()
                     },
                 )
+            }
+            if (onFeedback != null) {
+                DropdownMenuItem(
+                    text = { Text("Interested") },
+                    leadingIcon = { Icon(Icons.Outlined.ThumbUp, null, tint = YtText) },
+                    onClick = {
+                        open = false
+                        onFeedback(FeedFeedback.INTERESTED)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Not interested") },
+                    leadingIcon = { Icon(Icons.Outlined.Block, null, tint = YtText) },
+                    onClick = {
+                        open = false
+                        onFeedback(FeedFeedback.NOT_INTERESTED)
+                    },
+                )
+                if (video.channelId != null) {
+                    DropdownMenuItem(
+                        text = { Text("Don't recommend channel") },
+                        leadingIcon = { Icon(Icons.Outlined.VisibilityOff, null, tint = YtText) },
+                        onClick = {
+                            open = false
+                            onFeedback(FeedFeedback.DONT_RECOMMEND_CHANNEL)
+                        },
+                    )
+                }
             }
         }
     }

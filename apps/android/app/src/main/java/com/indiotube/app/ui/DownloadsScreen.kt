@@ -569,18 +569,34 @@ private fun SettingsChoiceRow(
 
 @Composable
 private fun ActiveDownloadRow(container: Container, ui: UiRefs, task: DownloadTask) {
+    val percent = if (!task.indeterminate && task.totalBytes > 0) (task.progress * 100).toInt() else null
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Thumb(
-            model = task.video.thumbnail,
-            badge = task.height?.let { "${it}p" },
-            corner = 8.dp,
-            modifier = Modifier.width(120.dp).height(68.dp),
-        )
+        Box(
+            Modifier
+                .width(120.dp)
+                .height(68.dp)
+                .clip(RoundedCornerShape(8.dp)),
+        ) {
+            Thumb(
+                model = task.video.thumbnail,
+                badge = percent?.let { "$it%" } ?: task.height?.let { "${it}p" },
+                corner = 8.dp,
+                modifier = Modifier.fillMaxSize(),
+            )
+            if (percent != null) {
+                LinearProgressIndicator(
+                    progress = { task.progress },
+                    color = YtRed,
+                    trackColor = Color(0x66000000),
+                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(3.dp),
+                )
+            }
+        }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -609,9 +625,11 @@ private fun ActiveDownloadRow(container: Container, ui: UiRefs, task: DownloadTa
                     }
                     Spacer(Modifier.height(5.dp))
                     Text(
-                        if (task.indeterminate) "Downloading..." else {
-                            val pct = (task.progress * 100).toInt()
-                            if (task.totalBytes > 0) "$pct% of ${formatBytes(task.totalBytes)}" else "$pct%"
+                        when {
+                            task.totalBytes > 0 ->
+                                "${percent ?: 0}% - ${formatBytes(task.bytesDone)} of ${formatBytes(task.totalBytes)}"
+                            task.bytesDone > 0 -> "Downloading... ${formatBytes(task.bytesDone)}"
+                            else -> "Starting..."
                         },
                         fontSize = 12.sp,
                         color = YtMuted,
@@ -619,14 +637,15 @@ private fun ActiveDownloadRow(container: Container, ui: UiRefs, task: DownloadTa
                 }
                 DlStatus.PAUSED -> {
                     Text(
-                        "Paused${if (task.bytesDone > 0) " - ${formatBytes(task.bytesDone)} saved" else ""}",
+                        "Paused${percent?.let { " at $it%" } ?: ""}" +
+                            if (task.bytesDone > 0) " - ${formatBytes(task.bytesDone)} saved" else "",
                         fontSize = 12.sp,
                         color = YtMuted,
                     )
                 }
                 DlStatus.FAILED -> {
                     Text(
-                        task.error ?: "Download failed",
+                        (task.error ?: "Download failed") + (percent?.let { " ($it%)" } ?: ""),
                         fontSize = 12.sp,
                         color = Color(0xFFFF8A8A),
                         maxLines = 2,

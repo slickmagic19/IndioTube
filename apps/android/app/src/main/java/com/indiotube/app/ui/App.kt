@@ -1,8 +1,13 @@
 package com.indiotube.app.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -40,6 +46,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -51,8 +58,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -61,11 +70,13 @@ import androidx.media3.ui.PlayerView
 import com.indiotube.app.Container
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.DlEvent
+import com.indiotube.app.data.DlStatus
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.watchedFraction
 import com.indiotube.app.player.PlaybackController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 sealed interface Screen {
     data class Channel(val channelId: String, val name: String?, val avatar: String?) : Screen
@@ -90,6 +101,7 @@ class UiRefs(
     private val onBack: () -> Unit,
     private val onGoTab: (Int) -> Unit,
     private val onOpenAccounts: () -> Unit,
+    val search: SearchState,
 ) {
     val recentSearches = mutableStateListOf<String>()
 
@@ -136,6 +148,33 @@ class UiRefs(
                     container.library.unblockChannel(channelId)
                 }
             }
+        }
+    }
+
+    fun download(video: VideoItem) {
+        if (video.membersOnly) {
+            toast("Members-only videos can't be downloaded")
+            return
+        }
+        val id = video.videoId
+        if (container.downloads.isDownloaded(id)) {
+            toast("Already downloaded")
+            return
+        }
+        val existing = container.downloads.tasks.value[id]
+        if (existing != null) {
+            if (existing.status == DlStatus.PAUSED || existing.status == DlStatus.FAILED) {
+                container.downloads.resume(id)
+                toast("Download resumed")
+            } else {
+                toast("Already downloading")
+            }
+            return
+        }
+        val height = container.downloadPrefs.settings.value.defaultHeight
+        container.downloads.start(video, height)
+        if (container.downloads.isActive(id)) {
+            toast(if (height == null) "Download started (Auto)" else "Download started (${height}p)")
         }
     }
 
@@ -201,6 +240,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
     val stack = remember { mutableStateListOf<Screen>() }
     val scope = rememberCoroutineScope()
     val toasts = remember { ToastState() }
+    val searchState = remember { SearchState() }
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var accountSheetOpen by remember { mutableStateOf(false) }
 
@@ -212,9 +252,15 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
             toasts = toasts,
             onOpen = { stack.add(it) },
             onReplace = { if (stack.isNotEmpty()) stack[stack.lastIndex] = it else stack.add(it) },
-            onBack = { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) },
+            onBack = {
+                if (stack.isNotEmpty()) {
+                    val removed = stack.removeAt(stack.lastIndex)
+                    if (removed is Screen.Search) searchState.reset()
+                }
+            },
             onGoTab = { tab = it },
             onOpenAccounts = { accountSheetOpen = true },
+            search = searchState,
         ).also { refs -> refs.topProvider = { stack.lastOrNull() } }
     }
 
@@ -271,6 +317,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                             if (i == 0) ui.refreshHome()
                             tab = i
                             stack.clear()
+                            searchState.reset()
                         }
                     }
                 }
@@ -361,11 +408,34 @@ private fun MiniPlayer(container: Container, ui: UiRefs, player: PlaybackControl
     val duration by player.duration.collectAsState()
     val video = current ?: return
     val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val density = LocalDensity.current
+    val dismissThreshold = with(density) { 72.dp.toPx() }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(video.videoId) { dragOffset = 0f }
+    val dragState = rememberDraggableState { delta ->
+        if (delta > 0f || dragOffset > 0f) {
+            dragOffset = (dragOffset + delta).coerceAtLeast(0f)
+        }
+    }
 
     Column(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 4.dp)
+            .offset { IntOffset(0, dragOffset.roundToInt()) }
+            .draggable(
+                state = dragState,
+                orientation = Orientation.Vertical,
+                onDragStopped = { velocity ->
+                    val dismiss = dragOffset > dismissThreshold || velocity > 1200f
+                    animate(
+                        initialValue = dragOffset,
+                        targetValue = if (dismiss) 600f else 0f,
+                        animationSpec = tween(durationMillis = if (dismiss) 160 else 180),
+                    ) { value, _ -> dragOffset = value }
+                    if (dismiss) player.clear()
+                },
+            )
             .clip(RoundedCornerShape(12.dp))
             .background(YtSurface)
             .clickable { ui.open(Screen.Watch(video)) },

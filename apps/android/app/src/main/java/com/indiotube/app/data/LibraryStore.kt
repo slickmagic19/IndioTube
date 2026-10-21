@@ -128,8 +128,14 @@ class LibraryStore(
     // ---- history -------------------------------------------------------------
 
     fun noteOpen(video: VideoItem) {
-        val next = listOf(HistoryEntry(video, System.currentTimeMillis(), 0)) +
-            _history.value.filterNot { it.video.videoId == video.videoId }
+        val existing = _history.value.firstOrNull { it.video.videoId == video.videoId }
+        val entry = HistoryEntry(
+            video = video,
+            ts = System.currentTimeMillis(),
+            positionMs = existing?.positionMs ?: 0,
+            durationMs = existing?.durationMs ?: 0,
+        )
+        val next = listOf(entry) + _history.value.filterNot { it.video.videoId == video.videoId }
         _history.value = next.take(HISTORY_CAP)
         persist()
     }

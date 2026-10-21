@@ -60,22 +60,69 @@ import com.indiotube.app.data.SearchFilter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+class SearchState {
+    var query by mutableStateOf("")
+    var filter by mutableStateOf<String?>(null)
+    var entries by mutableStateOf<List<SearchEntry>?>(null)
+    var continuation by mutableStateOf<String?>(null)
+    var error by mutableStateOf<String?>(null)
+    var suggestMode by mutableStateOf(false)
+    var suggestions by mutableStateOf<List<String>>(emptyList())
+    var focusedOnce = false
+    var scrollIndex = 0
+    var scrollOffset = 0
+
+    fun reset() {
+        query = ""
+        filter = null
+        entries = null
+        continuation = null
+        error = null
+        suggestMode = false
+        suggestions = emptyList()
+        focusedOnce = false
+        scrollIndex = 0
+        scrollOffset = 0
+    }
+}
+
 @Composable
 fun SearchScreen(container: Container, ui: UiRefs) {
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = ui.search.scrollIndex,
+        initialFirstVisibleItemScrollOffset = ui.search.scrollOffset,
+    )
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
 
-    var query by rememberSaveable { mutableStateOf("") }
-    var filter by rememberSaveable { mutableStateOf<String?>(null) }
-    var entries by remember { mutableStateOf<List<SearchEntry>?>(null) }
-    var continuation by remember { mutableStateOf<String?>(null) }
+    var query by rememberSaveable { mutableStateOf(ui.search.query) }
+    var filter by rememberSaveable { mutableStateOf(ui.search.filter) }
+    var entries by remember { mutableStateOf(ui.search.entries) }
+    var continuation by remember { mutableStateOf(ui.search.continuation) }
     var loading by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var suggestMode by remember { mutableStateOf(false) }
-    var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var error by remember { mutableStateOf(ui.search.error) }
+    var suggestMode by remember { mutableStateOf(ui.search.suggestMode) }
+    var suggestions by remember { mutableStateOf(ui.search.suggestions) }
+
+    LaunchedEffect(query, filter, entries, continuation, error, suggestMode, suggestions) {
+        ui.search.query = query
+        ui.search.filter = filter
+        ui.search.entries = entries
+        ui.search.continuation = continuation
+        ui.search.error = error
+        ui.search.suggestMode = suggestMode
+        ui.search.suggestions = suggestions
+    }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                ui.search.scrollIndex = index
+                ui.search.scrollOffset = offset
+            }
+    }
 
     fun runSearch(q: String = query, f: String? = filter) {
         val trimmed = q.trim()
@@ -120,7 +167,12 @@ fun SearchScreen(container: Container, ui: UiRefs) {
         if (asked == query) suggestions = result
     }
 
-    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    LaunchedEffect(Unit) {
+        if (!ui.search.focusedOnce) {
+            ui.search.focusedOnce = true
+            focusRequester.requestFocus()
+        }
+    }
 
     LaunchedEffect(listState) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
@@ -298,6 +350,7 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                                     },
                                     onChannelClick = { ui.openChannelOf(e.video) },
                                     onFeedback = { ui.feedback(e.video, it) },
+                                    onDownload = { ui.download(e.video) },
                                 )
                                 is SearchEntry.Channel -> ChannelResultRow(e.channel, ui)
                                 is SearchEntry.Playlist -> PlaylistResultRow(e.playlist, ui)

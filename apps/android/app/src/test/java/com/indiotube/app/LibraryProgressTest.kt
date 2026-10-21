@@ -3,6 +3,7 @@ package com.indiotube.app
 import com.indiotube.app.data.HistoryEntry
 import com.indiotube.app.data.LibraryStore
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.resumeStartPosition
 import com.indiotube.app.data.watchedFraction
 import java.nio.file.Files
 import kotlinx.coroutines.CoroutineScope
@@ -62,6 +63,27 @@ class LibraryProgressTest {
     @Test
     fun neverWatchedVideosHaveNoFraction() {
         assertNull(store().watchedFraction("nope"))
+    }
+
+    @Test
+    fun openingHistoryKeepsSavedPosition() {
+        val store = store()
+        val video = VideoItem("v5", "Video", durationSec = 100)
+        store.noteOpen(video)
+        store.notePosition(video, 40_000, 100_000)
+        store.noteOpen(video)
+        assertEquals(40_000, store.resumePosition("v5"))
+        assertEquals(0.4f, store.watchedFraction("v5")!!, 0.001f)
+    }
+
+    @Test
+    fun resumeStartSkipsShortAndFinishedVideos() {
+        assertEquals(40_000, resumeStartPosition(40_000, 0.4f, 100_000))
+        assertEquals(0, resumeStartPosition(15_000, 0.15f, 100_000))
+        assertEquals(0, resumeStartPosition(95_000, 0.95f, 100_000))
+        assertEquals(0, resumeStartPosition(95_000, 0.4f, 100_000))
+        assertEquals(0, resumeStartPosition(95_000, null, 100_000))
+        assertEquals(40_000, resumeStartPosition(40_000, null, 0))
     }
 
     @Test
