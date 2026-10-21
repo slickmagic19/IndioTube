@@ -350,6 +350,12 @@ fun WatchScreen(
         qualityError = loaded == null
     }
 
+    // Opening the sheet is a free head start: warm the CDN connections for the
+    // likely high-quality picks while the user is still looking at the list.
+    LaunchedEffect(qualitySheet, qualities) {
+        if (qualitySheet) player.prewarmQualityOptions(qualities)
+    }
+
     // Re-apply the remembered caption language once this video's tracks load,
     // so captions stay on across videos like the real app. Turning captions
     // off clears the preference, which also makes this a no-op.

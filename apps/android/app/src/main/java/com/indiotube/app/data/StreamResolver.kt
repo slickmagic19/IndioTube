@@ -180,6 +180,23 @@ internal fun downloadSources(qualities: VideoQualities, height: Int?): DownloadS
     )
 }
 
+// The exact streams a quality selection will open. Used to warm only the CDN
+// connections that the player is about to use, never an unused sibling file.
+internal fun QualityOption.playbackStreams(audio: ResolvedStream?): List<ResolvedStream> {
+    muxed?.let { return listOf(it) }
+    val video = videoOnly ?: return emptyList()
+    return listOfNotNull(video, audio)
+}
+
+internal fun playbackWarmStreams(
+    qualities: VideoQualities,
+    height: Int?,
+): List<ResolvedStream> {
+    if (height == null) return listOfNotNull(qualities.auto)
+    val option = qualities.nearest(height) ?: return emptyList()
+    return option.playbackStreams(qualities.audio)
+}
+
 // The player URIs a quality selection maps to. Pure strings on purpose so the
 // mapping is unit-testable without Android:
 //   auto            -> indio://stream/{id}                (best muxed file)

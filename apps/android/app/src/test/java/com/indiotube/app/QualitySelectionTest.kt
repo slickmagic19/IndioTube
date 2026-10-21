@@ -5,6 +5,7 @@ import com.indiotube.app.data.QualityUris
 import com.indiotube.app.data.ResolvedStream
 import com.indiotube.app.data.VideoQualities
 import com.indiotube.app.data.downloadSources
+import com.indiotube.app.data.playbackWarmStreams
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -138,6 +139,26 @@ class QualitySelectionTest {
         assertEquals(
             "indio://merge/abc123?h=1080",
             QualityUris.target("abc123", 2160, qualities),
+        )
+    }
+
+    @Test
+    fun warmupUsesTheSameStreamThePlayerWillOpen() {
+        assertEquals(
+            listOf("https://example.com/720"),
+            playbackWarmStreams(qualities, 720).map { it.url },
+        )
+        assertEquals(
+            listOf("https://example.com/1080", "https://example.com/0"),
+            playbackWarmStreams(qualities, 1080).map { it.url },
+        )
+    }
+
+    @Test
+    fun autoWarmupUsesTheAutoStream() {
+        assertEquals(
+            listOf("https://example.com/720"),
+            playbackWarmStreams(qualities, null).map { it.url },
         )
     }
 

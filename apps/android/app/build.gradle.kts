@@ -13,8 +13,8 @@ android {
         applicationId = "com.indiotube.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 117
-        versionName = "0.1.17"
+        versionCode = 118
+        versionName = "0.1.18"
     }
 
     // The keystore and its passwords are never committed. Provide them in
@@ -81,6 +81,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-process:2.8.6")
     implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
     implementation("androidx.media3:media3-session:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("io.coil-kt:coil-compose:2.7.0")

@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 
@@ -44,6 +45,18 @@ class Container(context: Context) {
     val downloadHttp: OkHttpClient = http.newBuilder()
         .dispatcher(Dispatcher().apply {
             maxRequests = 32
+            maxRequestsPerHost = 8
+        })
+        .build()
+
+    // ExoPlayer uses this client for the video and audio tracks. Keeping a
+    // dedicated pool means the connection warmed for an incoming quality is
+    // still idle (not evicted by feed/thumbnail traffic) when the real load
+    // starts, and both tracks can share a kept-alive CDN connection.
+    val playbackHttp: OkHttpClient = http.newBuilder()
+        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 16
             maxRequestsPerHost = 8
         })
         .build()

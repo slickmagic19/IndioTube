@@ -4,8 +4,8 @@ import android.net.Uri
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.FileDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.indiotube.app.Container
 import java.io.IOException
 
@@ -84,9 +84,9 @@ class IndioTubeDataSource(private val container: Container) : BaseDataSource(tru
         override fun createDataSource(): DataSource = IndioTubeDataSource(container)
     }
 
-    private fun httpSource(): DataSource = DefaultHttpDataSource.Factory()
+    private fun httpSource(): DataSource = OkHttpDataSource.Factory(container.playbackHttp)
         .setUserAgent(USER_AGENT)
-        .setAllowCrossProtocolRedirects(true)
+        .setDefaultRequestProperties(mapOf("Accept-Encoding" to "identity"))
         .createDataSource()
 
     companion object {

@@ -6,6 +6,7 @@ import android.os.Bundle
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -31,7 +32,12 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         val app = application as IndioTubeApplication
-        val player = ExoPlayer.Builder(this)
+        // Let MediaCodec fall back to another decoder (including software) if
+        // the first match cannot initialise. High-resolution VP9/AV1 ladders
+        // otherwise look like a network stall before quality fallback kicks in.
+        val renderers = DefaultRenderersFactory(this)
+            .setEnableDecoderFallback(true)
+        val player = ExoPlayer.Builder(this, renderers)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)

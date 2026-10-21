@@ -23,7 +23,10 @@ import com.indiotube.app.data.ResolvedStream
 import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
+import com.indiotube.app.data.playbackStreams
+import com.indiotube.app.data.playbackWarmStreams
 import com.indiotube.app.data.resumeStartPosition
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,6 +39,9 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import okhttp3.Request
+
+private const val WARM_TTL_MS = 120_000L
+private const val WARM_BODY_LIMIT = 16L * 1024
 
 // UI-facing playback facade. Talks to PlaybackService through a MediaController
 // so the notification/lock-screen controls and the in-app UI stay in lockstep.
@@ -123,6 +129,11 @@ class PlaybackController(
     // own indio:// Auto URI), so re-picking the same quality is a no-op even
     // though the controller item hides its local configuration.
     private var currentStreamUrl: String? = null
+
+    // CDN URLs whose connections were warmed recently. The sheet and the final
+    // quality pick often ask for the same streams, so this avoids duplicate
+    // preflight requests while still refreshing after the pool may have aged.
+    private val warmedAt = HashMap<String, Long>()
 
     init {
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
@@ -466,30 +477,60 @@ class PlaybackController(
         if (autoPlay) c.play()
     }
 
-    // Fire-and-forget 1-byte range requests that make the CDN answer the real
-    // load faster: DNS, TCP and TLS for the googlevideo host are already done
-    // by the time ExoPlayer opens the stream.
-    private fun warmConnections(rung: QualityOption?, qualities: VideoQualities) {
-        val http = container?.http ?: return
-        val targets = ArrayList<ResolvedStream>(3)
-        if (rung == null) {
-            qualities.auto?.let { targets.add(it) }
-        } else {
-            rung.muxed?.let { targets.add(it) }
-            rung.videoOnly?.let { targets.add(it) }
-            if (rung.videoOnly != null) qualities.audio?.let { targets.add(it) }
+    // Called when the quality sheet opens. The user usually needs a moment to
+    // pick a rung, which is enough time to run the DNS/TCP/TLS handshake for
+    // the likely targets. The real ExoPlayer load then reuses those idle
+    // connections because both paths use container.playbackHttp.
+    fun prewarmQualityOptions(qualities: VideoQualities?) {
+        val ladder = qualities ?: return
+        val streams = buildList {
+            ladder.auto?.let(::add)
+            ladder.options.take(4).forEach { addAll(it.playbackStreams(ladder.audio)) }
         }
-        for (stream in targets) {
-            scope.launch(Dispatchers.IO) {
+        warmStreams(streams)
+    }
+
+    private fun warmConnections(rung: QualityOption?, qualities: VideoQualities) {
+        warmStreams(playbackWarmStreams(qualities, rung?.height))
+    }
+
+    // Fire-and-forget small range requests that leave a reusable CDN
+    // connection in the playback pool. The response body is consumed (for a
+    // normal 206) because closing an unread body would discard the connection
+    // instead of returning it to the pool.
+    private fun warmStreams(streams: List<ResolvedStream>) {
+        val http = container?.playbackHttp ?: return
+        val now = System.currentTimeMillis()
+        val targets = synchronized(warmedAt) {
+            warmedAt.entries.removeAll { now - it.value > WARM_TTL_MS }
+            streams.distinctBy { it.url }
+                .filter { warmedAt[it.url] == null }
+                .also { fresh -> fresh.forEach { warmedAt[it.url] = now } }
+        }
+        if (targets.isEmpty()) return
+        scope.launch(Dispatchers.IO) {
+            for (stream in targets) {
                 try {
-                    http.newCall(
+                    val call = http.newCall(
                         Request.Builder()
                             .url(stream.url)
                             .header("Range", "bytes=0-1")
+                            .header("Accept-Encoding", "identity")
                             .header("User-Agent", IndioTubeDataSource.USER_AGENT)
                             .build(),
-                    ).execute().close()
-                } catch (_: Exception) { /* warming is best-effort */ }
+                    )
+                    call.timeout().timeout(5, TimeUnit.SECONDS)
+                    call.execute().use { response ->
+                        val body = response.body
+                        if (response.code == 206 && body != null &&
+                            body.contentLength() in 0..WARM_BODY_LIMIT
+                        ) {
+                            body.bytes()
+                        }
+                    }
+                } catch (_: Exception) {
+                    synchronized(warmedAt) { warmedAt.remove(stream.url) }
+                }
             }
         }
     }
