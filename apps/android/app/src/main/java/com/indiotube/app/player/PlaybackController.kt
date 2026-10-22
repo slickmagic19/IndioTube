@@ -66,6 +66,12 @@ class PlaybackController(
     private val _queue = MutableStateFlow<List<VideoItem>>(emptyList())
     val queue: StateFlow<List<VideoItem>> = _queue.asStateFlow()
 
+    // IDs the user added via "Play next" / "Add to queue". The player playlist
+    // also carries autoplay context from the feed, so the Queue sheet filters
+    // to these instead of showing every recommendation as a queued item.
+    private val _explicit = MutableStateFlow<Set<String>>(emptySet())
+    val explicitIds: StateFlow<Set<String>> = _explicit.asStateFlow()
+
     private val _index = MutableStateFlow(-1)
     val index: StateFlow<Int> = _index.asStateFlow()
 
@@ -310,6 +316,7 @@ class PlaybackController(
         val start = startIndex.coerceIn(0, videos.lastIndex)
         _queue.value = videos
         _index.value = start
+        _explicit.value = emptySet()
         _qualityHeight.value = null
         currentQualities = null
         qualityFallbackAttempts = 0
@@ -347,33 +354,54 @@ class PlaybackController(
     }
 
     // ---- queue editing ------------------------------------------------------
-    // The queue is both the player's media item list and the row the user sees,
-    // so every edit updates _queue and mirrors it onto the controller. Returns
-    // false when nothing changed (duplicate, current item, bad index).
+    // The player playlist doubles as autoplay context, so _explicit tracks the
+    // rows the user actually queued; the Queue sheet shows those plus the
+    // current video. Every edit updates _queue and mirrors it onto the
+    // controller. Returns false when nothing changed (duplicate, current
+    // item, bad index).
 
     fun addToQueue(video: VideoItem, playNext: Boolean = false): Boolean {
         val q = _queue.value
         val c = controller
         val current = c?.currentMediaItemIndex?.takeIf { it >= 0 } ?: _index.value.coerceAtLeast(0)
-        val result = QueueOps.add(q, current, video, playNext) ?: return false
         if (q.isEmpty()) {
             // Nothing is playing: adding the first item starts it, otherwise
             // the mini player would appear over a silent queue.
             setQueue(listOf(video), 0, play = true)
             return true
         }
-        _queue.value = result.queue
-        _index.value = result.index
-        if (c != null) {
-            val at = result.queue.indexOfFirst { it.videoId == video.videoId }
-            when {
-                c.mediaItemCount == q.size -> c.addMediaItem(at, toMediaItem(video))
-                c.mediaItemCount == 0 -> {
-                    c.setMediaItems(result.queue.map { toMediaItem(it) }, current, 0)
-                    c.prepare()
+        if (q.getOrNull(current)?.videoId == video.videoId) return false
+        if (QueueOps.isQueued(q, current, _explicit.value, video.videoId)) return false
+        val existing = q.indexOfFirst { it.videoId == video.videoId }
+        if (existing >= 0) {
+            // Already in the autoplay context: promote it instead of adding a
+            // duplicate media item that would be indistinguishable in the
+            // media session.
+            val target = if (playNext) (current + 1).coerceAtMost(q.lastIndex) else q.lastIndex
+            if (existing != target) {
+                val moved = QueueOps.move(q, current, existing, target) ?: return false
+                _queue.value = moved.queue
+                if (c != null && existing < c.mediaItemCount && target < c.mediaItemCount) {
+                    c.moveMediaItem(existing, target)
+                }
+                _index.value = moved.index
+            }
+        } else {
+            val result = QueueOps.add(q, current, video, playNext) ?: return false
+            _queue.value = result.queue
+            _index.value = result.index
+            if (c != null) {
+                val at = result.queue.indexOfFirst { it.videoId == video.videoId }
+                when {
+                    c.mediaItemCount == q.size -> c.addMediaItem(at, toMediaItem(video))
+                    c.mediaItemCount == 0 -> {
+                        c.setMediaItems(result.queue.map { toMediaItem(it) }, current, 0)
+                        c.prepare()
+                    }
                 }
             }
         }
+        _explicit.value = _explicit.value + video.videoId
         return true
     }
 
@@ -381,10 +409,12 @@ class PlaybackController(
         val q = _queue.value
         val c = controller
         val current = c?.currentMediaItemIndex?.takeIf { it >= 0 } ?: _index.value
+        val removedId = q.getOrNull(index)?.videoId ?: return false
         // Keeping the row for the playing video avoids leaving the player on a
         // removed (and therefore stopped) item; skip to another row instead.
         val result = QueueOps.remove(q, current, index) ?: return false
         _queue.value = result.queue
+        _explicit.value = _explicit.value - removedId
         if (c != null && index < c.mediaItemCount) c.removeMediaItem(index)
         _index.value = result.index
         return true

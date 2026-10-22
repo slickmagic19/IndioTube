@@ -8,6 +8,28 @@ object QueueOps {
 
     data class Result(val queue: List<VideoItem>, val index: Int)
 
+    data class Entry(val index: Int, val video: VideoItem)
+
+    // The Queue sheet only shows what the user explicitly added, plus the
+    // current video. Autoplay context from the feed stays in the player
+    // playlist but is not presented as "your queue".
+    fun visibleEntries(
+        queue: List<VideoItem>,
+        currentIndex: Int,
+        explicitIds: Set<String>,
+    ): List<Entry> = queue.withIndex()
+        .filter { (i, v) -> i == currentIndex || (i > currentIndex && v.videoId in explicitIds) }
+        .map { Entry(it.index, it.value) }
+
+    fun isQueued(
+        queue: List<VideoItem>,
+        currentIndex: Int,
+        explicitIds: Set<String>,
+        videoId: String,
+    ): Boolean = queue.withIndex().any { (i, v) ->
+        i > currentIndex && v.videoId == videoId && videoId in explicitIds
+    }
+
     fun add(
         queue: List<VideoItem>,
         index: Int,

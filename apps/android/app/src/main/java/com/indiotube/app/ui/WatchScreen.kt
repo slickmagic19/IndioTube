@@ -56,8 +56,6 @@ import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
@@ -147,6 +145,7 @@ import com.indiotube.app.data.recommendableVideos
 import com.indiotube.app.data.sponsorSegmentAt
 import com.indiotube.app.data.stripChapterLines
 import com.indiotube.app.player.PlaybackController
+import com.indiotube.app.player.QueueOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -174,6 +173,7 @@ fun WatchScreen(
     val playingVideoFlow by player.current.collectAsState()
     val queue by player.queue.collectAsState()
     val queueIndex by player.index.collectAsState()
+    val explicitIds by player.explicitIds.collectAsState()
     val playingVideo = queue.getOrNull(queueIndex) ?: playingVideoFlow
     val video = playingVideo ?: videoArg
     val playing by player.playing.collectAsState()
@@ -216,6 +216,7 @@ fun WatchScreen(
     var descExpanded by remember(video.videoId) { mutableStateOf(false) }
     var saveSheet by remember { mutableStateOf(false) }
     var queueSheet by remember { mutableStateOf(false) }
+    var chaptersSheet by remember(video.videoId) { mutableStateOf(false) }
     var qualitySheet by remember { mutableStateOf(false) }
     var downloadSheet by remember(video.videoId) { mutableStateOf(false) }
     var captionsSheet by remember { mutableStateOf(false) }
@@ -700,6 +701,7 @@ fun WatchScreen(
                     onSeekBy = { player.seekBy(it) },
                     onNext = { player.next() },
                     onQueue = { queueSheet = true },
+                    onChapters = { chaptersSheet = true },
                     onToggleFullscreen = { toggleFullscreen() },
                     onScrub = { scrub = it },
                     onScrubFinished = {
@@ -1155,10 +1157,22 @@ fun WatchScreen(
         QueueSheet(
             queue = queue,
             currentIndex = queueIndex,
+            explicitIds = explicitIds,
             onSelect = { player.playQueueItem(it) },
             onRemove = { player.removeFromQueue(it) },
-            onMove = { from, to -> player.moveInQueue(from, to) },
             onDismiss = { queueSheet = false },
+        )
+    }
+
+    if (chaptersSheet && chapters.isNotEmpty()) {
+        ChaptersSheet(
+            chapters = chapters,
+            currentIndex = chapters.indexOfLast { position >= it.startMs },
+            onSelect = { chapter ->
+                player.seekTo(chapter.startMs)
+                chaptersSheet = false
+            },
+            onDismiss = { chaptersSheet = false },
         )
     }
 
@@ -1314,6 +1328,7 @@ private fun PlayerChrome(
     onSeekBy: (Long) -> Unit,
     onNext: () -> Unit,
     onQueue: () -> Unit,
+    onChapters: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onScrub: (Float) -> Unit,
     onScrubFinished: () -> Unit,
@@ -1410,7 +1425,11 @@ private fun PlayerChrome(
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 2.dp, bottom = 2.dp),
+                        modifier = Modifier
+                            .padding(start = 2.dp, bottom = 2.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable(onClickLabel = "Show chapters", onClick = onChapters)
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1569,19 +1588,17 @@ private fun YtSeekBar(
                         cornerRadius = cr,
                     )
                 }
-                // Chapter boundaries: little white ticks on top of the track,
-                // just like YouTube's chaptered timelines.
+                // Chapter boundaries: tiny, low-contrast dots instead of
+                // tall ticks so the timeline stays calm.
                 if (markers.isNotEmpty()) {
-                    val markW = 1.5.dp.toPx()
-                    val markH = 10.dp.toPx()
+                    val dotR = 1.25.dp.toPx()
                     markers.forEach { fraction ->
                         val x = size.width * fraction.coerceIn(0f, 1f)
-                        if (x > markW && x < size.width - markW) {
-                            drawRoundRect(
-                                color = Color(0xCCFFFFFF),
-                                topLeft = Offset(x - markW / 2f, cy - markH / 2f),
-                                size = Size(markW, markH),
-                                cornerRadius = CornerRadius(markW / 2f),
+                        if (x > dotR && x < size.width - dotR) {
+                            drawCircle(
+                                color = Color(0x73FFFFFF),
+                                radius = dotR,
+                                center = Offset(x, cy),
                             )
                         }
                     }
@@ -2536,11 +2553,13 @@ private fun VideoActionsMenu(onPlayNext: () -> Unit, onAddToQueue: () -> Unit) {
 private fun QueueSheet(
     queue: List<VideoItem>,
     currentIndex: Int,
+    explicitIds: Set<String>,
     onSelect: (Int) -> Unit,
     onRemove: (Int) -> Unit,
-    onMove: (Int, Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val entries = QueueOps.visibleEntries(queue, currentIndex, explicitIds)
+    val upcoming = entries.count { it.index != currentIndex }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -2562,26 +2581,44 @@ private fun QueueSheet(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    if (queue.size == 1) "1 video" else "${queue.size} videos",
+                    if (upcoming == 1) "1 video" else "$upcoming videos",
                     style = MaterialTheme.typography.bodySmall,
                     color = YtMuted,
                 )
             }
             HorizontalDivider(color = YtDivider)
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
-                itemsIndexed(queue, key = { _, v -> v.videoId }) { index, video ->
+                itemsIndexed(entries, key = { _, entry -> entry.index }) { displayIndex, entry ->
+                    val current = entry.index == currentIndex
                     QueueRow(
-                        video = video,
-                        index = index,
-                        current = index == currentIndex,
-                        canMoveUp = index > 0,
-                        canMoveDown = index < queue.lastIndex,
-                        canRemove = index != currentIndex,
-                        onSelect = { onSelect(index) },
-                        onRemove = { onRemove(index) },
-                        onMoveUp = { onMove(index, index - 1) },
-                        onMoveDown = { onMove(index, index + 1) },
+                        video = entry.video,
+                        current = current,
+                        number = if (current) {
+                            0
+                        } else {
+                            entries.take(displayIndex).count { it.index != currentIndex } + 1
+                        },
+                        onSelect = { onSelect(entry.index) },
+                        onRemove = { onRemove(entry.index) },
                     )
+                }
+                if (upcoming == 0) {
+                    item(key = "queue-empty") {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 22.dp)) {
+                            Text(
+                                "Your queue is empty",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = YtText,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Videos you add with Play next or Add to queue will show up here.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = YtMuted,
+                                lineHeight = 18.sp,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -2591,22 +2628,19 @@ private fun QueueSheet(
 @Composable
 private fun QueueRow(
     video: VideoItem,
-    index: Int,
     current: Boolean,
-    canMoveUp: Boolean,
-    canMoveDown: Boolean,
-    canRemove: Boolean,
+    number: Int,
     onSelect: () -> Unit,
     onRemove: () -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
             .background(if (current) YtSurfaceHi.copy(alpha = 0.5f) else Color.Transparent)
-            .clickable(onClick = onSelect)
+            // Tapping the playing row would seek it back to 0: it is a status
+            // line, not a destination.
+            .clickable(enabled = !current, onClick = onSelect)
             .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2619,7 +2653,7 @@ private fun QueueRow(
                     modifier = Modifier.size(16.dp),
                 )
             } else {
-                Text("${index + 1}", color = YtMuted, fontSize = 12.sp)
+                Text("$number", color = YtMuted, fontSize = 12.sp)
             }
         }
         Spacer(Modifier.width(6.dp))
@@ -2651,35 +2685,17 @@ private fun QueueRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Box {
-            IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    Icons.Filled.MoreVert,
-                    "Queue options",
-                    tint = YtMuted,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Move up") },
-                    leadingIcon = { Icon(Icons.Filled.KeyboardArrowUp, null, tint = YtText) },
-                    enabled = canMoveUp,
-                    onClick = {
-                        menuOpen = false
-                        onMoveUp()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("Move down") },
-                    leadingIcon = { Icon(Icons.Filled.KeyboardArrowDown, null, tint = YtText) },
-                    enabled = canMoveDown,
-                    onClick = {
-                        menuOpen = false
-                        onMoveDown()
-                    },
-                )
-                if (canRemove) {
+        if (!current) {
+            Box {
+                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        "Queue options",
+                        tint = YtMuted,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(
                         text = { Text("Remove from queue") },
                         leadingIcon = { Icon(Icons.Filled.Close, null, tint = YtText) },
@@ -2688,6 +2704,89 @@ private fun QueueRow(
                             onRemove()
                         },
                     )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChaptersSheet(
+    chapters: List<Chapter>,
+    currentIndex: Int,
+    onSelect: (Chapter) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = currentIndex.coerceAtLeast(0),
+    )
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = YtSurface,
+        contentColor = YtText,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Chapters",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = YtText,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    if (chapters.size == 1) "1 chapter" else "${chapters.size} chapters",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtMuted,
+                )
+            }
+            HorizontalDivider(color = YtDivider)
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+            ) {
+                itemsIndexed(chapters, key = { index, chapter -> "$index-${chapter.startMs}" }) { index, chapter ->
+                    val current = index == currentIndex
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(if (current) YtSurfaceHi.copy(alpha = 0.5f) else Color.Transparent)
+                            .clickable { onSelect(chapter) }
+                            .padding(horizontal = 16.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            chapterTimestamp(chapter.startMs),
+                            color = if (current) YtRed else YtBlue,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.width(52.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            chapter.title,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (current) YtRed else YtText,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (current) {
+                            Icon(
+                                Icons.Filled.PlayArrow,
+                                "Playing",
+                                tint = YtRed,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
