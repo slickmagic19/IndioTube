@@ -25,6 +25,7 @@ import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
 import com.indiotube.app.data.playbackStreams
 import com.indiotube.app.data.playbackWarmStreams
+import com.indiotube.app.data.playsAutoStream
 import com.indiotube.app.data.resumeStartPosition
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Request
 
 private const val WARM_TTL_MS = 120_000L
@@ -103,6 +105,14 @@ class PlaybackController(
     // current video instead of continuing with the next item in the queue.
     val autoplayNext: StateFlow<Boolean> get() = prefs.autoplayNext
 
+    // What a new video starts on instead of plain Auto: null keeps YouTube's
+    // behaviour (the best single file, fastest start), a height pins the rung.
+    // The player applies it as soon as the video's ladder is known, so the
+    // preference never costs a second of waiting on screen.
+    val defaultQualityHeight: StateFlow<Int?> get() = prefs.defaultQualityHeight
+
+    fun setDefaultQualityHeight(height: Int?) = prefs.setDefaultQualityHeight(height)
+
     val current: StateFlow<VideoItem?> = combine(_queue, _index) { q, i -> q.getOrNull(i) }
         .stateIn(scope, SharingStarted.Eagerly, null)
 
@@ -131,10 +141,16 @@ class PlaybackController(
     private var attachedSubtitleVideoId: String? = null
     private var attachedSubtitleUrl: String? = null
 
-    // URI of the stream currently selected by applyQuality (null = the item's
-    // own indio:// Auto URI), so re-picking the same quality is a no-op even
-    // though the controller item hides its local configuration.
+    // URI of the stream the current item plays: the one applyQuality picked,
+    // or the Auto URI it was built with. Media items lose their local
+    // configuration crossing the session boundary, so re-picking the same
+    // quality has to be a no-op from what the controller remembers here.
     private var currentStreamUrl: String? = null
+
+    // The URI the item that starts playback was built with, kept until the
+    // player reports the transition: a video that opens straight on the
+    // preferred quality must report that quality, not pretend to be on Auto.
+    private var builtItemUri: String? = null
 
     // CDN URLs whose connections were warmed recently. The sheet and the final
     // quality pick often ask for the same streams, so this avoids duplicate
@@ -211,10 +227,21 @@ class PlaybackController(
                     captionRetryAttempted = false
                     attachedSubtitleVideoId = null
                     attachedSubtitleUrl = null
-                    currentStreamUrl = null
+                    // A fresh item plays whatever it was built with; an item
+                    // added to the queue by the player itself is always Auto.
+                    currentStreamUrl = builtItemUri ?: id?.let { QualityUris.auto(it) }
+                    builtItemUri = null
                 }
                 if (newVideo && reason != Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                     _queue.value.getOrNull(idx)?.let { store.noteOpen(it) }
+                }
+                if (newVideo) {
+                    _queue.value.getOrNull(idx)?.let { video ->
+                        applyDefaultQuality(c, idx, video)
+                        // The row below this one is next; resolving it now
+                        // keeps the autoplay jump off the extractor.
+                        prefetchLadder(_queue.value.getOrNull(idx + 1)?.videoId)
+                    }
                 }
             }
 
@@ -274,7 +301,7 @@ class PlaybackController(
 
         // queue set before the controller finished connecting (cold start tap)
         if (_queue.value.isNotEmpty() && c.mediaItemCount == 0) {
-            val items = _queue.value.map { toMediaItem(it) }
+            val items = buildItems(_queue.value, _index.value.coerceAtLeast(0))
             c.setMediaItems(items, _index.value.coerceAtLeast(0), pendingStartPosition)
             if (pendingShuffle) c.shuffleModeEnabled = true
             c.prepare()
@@ -336,13 +363,17 @@ class PlaybackController(
         } else {
             0L
         }
+        // Built before the controller check: a cold-start tap (the session
+        // still connecting) keeps the same URI choice for when it connects.
+        val items = buildItems(videos, start)
+
         val c = controller ?: run {
             pendingPlay = play
             pendingShuffle = shuffleOn
             pendingStartPosition = resume
             return
         }
-        c.setMediaItems(videos.map { toMediaItem(it) }, start, resume)
+        c.setMediaItems(items, start, resume)
         c.shuffleModeEnabled = shuffleOn
         c.prepare()
         if (play) c.play()
@@ -588,6 +619,44 @@ class PlaybackController(
         if (autoPlay) c.play()
     }
 
+    // The user's default quality, applied to a video as soon as its ladder is
+    // known. The ladder is resolved ahead of the player whenever it can be, so
+    // this usually lands within the first second: the video plays on the
+    // chosen rung instead of opening the single-file Auto and swapping over.
+    private fun applyDefaultQuality(c: MediaController, idx: Int, video: VideoItem) {
+        val preferred = prefs.defaultQualityHeight.value ?: return
+        val resolver = container?.resolver ?: return
+        scope.launch {
+            val ladder = withContext(Dispatchers.IO) {
+                runCatching { resolver.qualities(video.videoId) }.getOrNull()
+            } ?: return@launch
+            // A video this rung cannot improve on is already on the right
+            // stream - swapping would only rebuild the same source.
+            if (ladder.playsAutoStream(preferred)) return@launch
+            // A rung the user picked by hand always wins, however late the
+            // ladder lands, and so does a video that has moved on.
+            if (_qualityHeight.value != null) return@launch
+            if (_queue.value.getOrNull(idx)?.videoId != video.videoId) return@launch
+            if (c.getMediaItemAt(idx)?.mediaId != video.videoId) return@launch
+            currentQualities = ladder
+            // Respect a pause the user managed to hit in the first second:
+            // only the swap itself happens, playback is not forced back on.
+            applyQuality(c, idx, video, ladder, preferred, autoPlay = c.playWhenReady)
+        }
+    }
+
+    // Resolve a queue item's ladder before the player reaches it. An autoplay
+    // jump (or a tap on a queued row) then opens straight away instead of
+    // spending its first second waiting on the extractor.
+    private fun prefetchLadder(videoId: String?) {
+        val id = videoId ?: return
+        val resolver = container?.resolver ?: return
+        if (resolver.cachedQualities(id) != null) return
+        scope.launch(Dispatchers.IO) {
+            runCatching { resolver.qualities(id) }
+        }
+    }
+
     // Called when the quality sheet opens. The user usually needs a moment to
     // pick a rung, which is enough time to run the DNS/TCP/TLS handshake for
     // the likely targets. The real ExoPlayer load then reuses those idle
@@ -744,9 +813,41 @@ class PlaybackController(
         attachedSubtitleVideoId = null
         attachedSubtitleUrl = null
         currentStreamUrl = null
+        builtItemUri = null
     }
 
-    private fun toMediaItem(v: VideoItem): MediaItem {
+    // The media items a queue start plays. Every row keeps its own Auto URI
+    // except the one starting now: with a default quality set, and its ladder
+    // already known, that row opens the chosen rung straight away instead of
+    // playing the single file and swapping a second later. A ladder that is
+    // not known yet leaves the start on Auto - the default is then applied by
+    // applyDefaultQuality the moment the ladder arrives.
+    private fun buildItems(videos: List<VideoItem>, startIndex: Int): List<MediaItem> {
+        val startVideo = videos.getOrNull(startIndex)
+        val preferred = prefs.defaultQualityHeight.value
+        val ladder = startVideo?.let { container?.resolver?.cachedQualities(it.videoId) }
+        val startUri = if (startVideo != null && ladder != null && preferred != null &&
+            !ladder.playsAutoStream(preferred)
+        ) {
+            QualityUris.target(startVideo.videoId, preferred, ladder)
+        } else {
+            null
+        }
+        builtItemUri = startVideo?.let { startUri ?: QualityUris.auto(it.videoId) }
+        // A start on the preferred rung opens streams the player is about to
+        // fetch anyway, so their CDN connections are worth warming while it
+        // prepares. A plain Auto start needs no warm: its own load is the
+        // first request to that host either way.
+        if (startUri != null && ladder != null) {
+            warmStreams(playbackWarmStreams(ladder, preferred))
+        }
+        prefetchLadder(videos.getOrNull(startIndex + 1)?.videoId)
+        return videos.mapIndexed { i, v ->
+            toMediaItem(v, if (i == startIndex) startUri ?: QualityUris.auto(v.videoId) else QualityUris.auto(v.videoId))
+        }
+    }
+
+    private fun toMediaItem(v: VideoItem, uri: String = QualityUris.auto(v.videoId)): MediaItem {
         val meta = MediaMetadata.Builder()
             .setTitle(v.title.ifBlank { "Video" })
             .setArtist(v.channelName)
@@ -754,7 +855,7 @@ class PlaybackController(
             .build()
         return MediaItem.Builder()
             .setMediaId(v.videoId)
-            .setUri("indio://stream/${v.videoId}")
+            .setUri(uri)
             .setMediaMetadata(meta)
             .build()
     }

@@ -197,6 +197,17 @@ internal fun playbackWarmStreams(
     return option.playbackStreams(qualities.audio)
 }
 
+// True when the rung a default-quality preference resolves to is exactly the
+// stream plain Auto already plays (the best single file). A video that offers
+// nothing better than Auto is then already starting on the right stream, and
+// swapping would only rebuild the same source for no visible change.
+internal fun VideoQualities.playsAutoStream(height: Int?): Boolean {
+    if (height == null) return true
+    val best = auto ?: return true
+    val rung = nearest(height) ?: return true
+    return rung.height == best.height && rung.muxed != null
+}
+
 // The player URIs a quality selection maps to. Pure strings on purpose so the
 // mapping is unit-testable without Android:
 //   auto            -> indio://stream/{id}                (best muxed file)
@@ -285,6 +296,20 @@ class StreamResolver(private val http: OkHttpClient) {
         }
     }
 
+    // Stores a resolved ladder under one definition, so the cache and its
+    // timestamp cannot drift apart.
+    internal fun cacheQualities(videoId: String, qualities: VideoQualities) {
+        cache[videoId] = Entry(qualities, System.currentTimeMillis())
+    }
+
+    // The ladder of a video that is already known, without ever waiting on
+    // the extractor. The player reads it to start straight on a remembered
+    // quality, so this must stay a pure in-memory lookup.
+    fun cachedQualities(
+        videoId: String,
+        now: Long = System.currentTimeMillis(),
+    ): VideoQualities? = cache[videoId]?.takeIf { now - it.at < TTL_MS }?.qualities
+
     fun qualities(videoId: String, forceRefresh: Boolean = false): VideoQualities {
         if (!forceRefresh) {
             cache[videoId]?.let { if (System.currentTimeMillis() - it.at < TTL_MS) return it.qualities }
@@ -308,7 +333,7 @@ class StreamResolver(private val http: OkHttpClient) {
                     if (qualities.auto == null && qualities.options.isEmpty()) {
                         throw IOException("This video has no downloadable stream without ads")
                     }
-                    cache[videoId] = Entry(qualities, System.currentTimeMillis())
+                    cacheQualities(videoId, qualities)
                     misses.remove(videoId)
                     qualities
                 } catch (e: Exception) {

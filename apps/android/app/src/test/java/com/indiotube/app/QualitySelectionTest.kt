@@ -6,7 +6,9 @@ import com.indiotube.app.data.ResolvedStream
 import com.indiotube.app.data.VideoQualities
 import com.indiotube.app.data.downloadSources
 import com.indiotube.app.data.playbackWarmStreams
+import com.indiotube.app.data.playsAutoStream
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -229,5 +231,32 @@ class QualitySelectionTest {
         val sources = downloadSources(downloadLadder, 1440)
         assertEquals(360, sources.video.height)
         assertNull(sources.audio)
+    }
+
+    // The default quality is applied to a video when it starts. When the rung
+    // it resolves to is exactly what Auto already plays, the swap would only
+    // rebuild the same source, so the player has to leave the video alone.
+    @Test
+    fun aDefaultThatAutoAlreadyPlaysIsLeftAlone() {
+        assertTrue("no default is Auto", qualities.playsAutoStream(null))
+        assertTrue("the Auto rung itself changes nothing", qualities.playsAutoStream(720))
+        assertFalse("a higher rung is a real switch", qualities.playsAutoStream(1080))
+        assertFalse("a lower rung is a real switch", qualities.playsAutoStream(480))
+        assertFalse("an absurd height still picks a real rung", qualities.playsAutoStream(4320))
+    }
+
+    @Test
+    fun aVideoCappedBelowTheDefaultStaysOnAuto() {
+        val capped = VideoQualities(
+            options = listOf(option(360, muxed = true)),
+            auto = stream(360),
+            audio = stream(0, "audio/mp4"),
+        )
+        assertTrue("nothing better than Auto exists here", capped.playsAutoStream(1080))
+    }
+
+    @Test
+    fun anEmptyLadderIsLeftAlone() {
+        assertTrue(VideoQualities(emptyList(), null, null).playsAutoStream(1080))
     }
 }

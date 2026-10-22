@@ -1,6 +1,7 @@
 package com.indiotube.app
 
 import com.indiotube.app.data.InnerTube
+import com.indiotube.app.data.QualityUris
 import com.indiotube.app.data.SearchDuration
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.SearchFilter
@@ -8,12 +9,15 @@ import com.indiotube.app.data.SearchUploadDate
 import com.indiotube.app.data.SponsorBlock
 import com.indiotube.app.data.StreamResolver
 import com.indiotube.app.data.downloadSources
+import com.indiotube.app.data.playsAutoStream
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -377,6 +381,29 @@ class LiveNetworkTest {
             assertNotNull("adaptive rung should download with an audio track", sources.audio)
             assertEquals(option.height, sources.video.height)
         }
+    }
+
+    // A high default quality is applied by the player straight from the
+    // cached ladder, so the ladder must be servable from the cache, and any
+    // rung above the muxed Auto must map onto a stream the player can open.
+    @Test
+    fun aHighDefaultQualityMapsOntoARealRung() = runBlocking {
+        StreamResolver.init(http)
+        val resolver = StreamResolver(http)
+        val qualities = resolver.qualities(videoId)
+
+        assertSame("the ladder is served from the cache", qualities, resolver.cachedQualities(videoId))
+
+        val aboveAuto = qualities.options.firstOrNull { it.height > (qualities.auto?.height ?: 0) }
+            ?: return@runBlocking // this video tops out at the muxed file
+
+        assertFalse("a rung above Auto is a real switch", qualities.playsAutoStream(aboveAuto.height))
+        assertEquals(
+            "a video-only rung opens as a merged stream",
+            "indio://merge/$videoId?h=${aboveAuto.height}",
+            QualityUris.target(videoId, aboveAuto.height, qualities),
+        )
+        assertTrue("the rung must have a stream", aboveAuto.hasStream)
     }
 
     // Switching quality used to be able to serve another video's stream. The

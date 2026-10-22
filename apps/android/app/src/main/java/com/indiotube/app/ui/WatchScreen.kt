@@ -231,6 +231,7 @@ fun WatchScreen(
     var sponsorSegments by remember(video.videoId) { mutableStateOf<List<SponsorSegment>>(emptyList()) }
     var dismissedSponsors by remember(video.videoId) { mutableStateOf<Set<String>>(emptySet()) }
     val qualityHeight by player.qualityHeight.collectAsState()
+    val defaultQuality by player.defaultQualityHeight.collectAsState()
     val captionLanguage by container.captions.language.collectAsState()
     val captionStyle by container.captions.style.collectAsState()
     val downloadSettings by container.downloadPrefs.settings.collectAsState()
@@ -1201,6 +1202,13 @@ fun WatchScreen(
             error = qualityError,
             selectedHeight = qualityHeight,
             downloaded = downloaded,
+            defaultHeight = defaultQuality,
+            onSelectDefault = { height ->
+                player.setDefaultQualityHeight(height)
+                ui.toast(
+                    if (height == null) "Default quality: Auto" else "Default quality: ${height}p",
+                )
+            },
             onSelect = { height ->
                 val q = qualities
                 if (q != null) {
@@ -1885,6 +1893,8 @@ private fun QualitySheet(
     error: Boolean,
     selectedHeight: Int?,
     downloaded: Boolean,
+    defaultHeight: Int?,
+    onSelectDefault: (Int?) -> Unit,
     onSelect: (Int?) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1997,6 +2007,62 @@ private fun QualitySheet(
                     )
                 }
             }
+            DefaultQualitySection(
+                selectedHeight = defaultHeight,
+                onSelect = onSelectDefault,
+            )
+        }
+    }
+}
+
+// The rungs a default quality can be pinned to. Fixed on purpose: the default
+// is global, and a video that does not offer the chosen rung simply starts on
+// the next lower one it has.
+internal val DefaultQualityHeights = listOf(360, 480, 720, 1080, 1440, 2160)
+
+// What new videos start on instead of plain Auto. Kept apart from the ladder
+// above it so the sheet always offers the choice, even while a video's
+// qualities are still loading (or failed to load).
+@Composable
+internal fun DefaultQualitySection(
+    selectedHeight: Int?,
+    onSelect: (Int?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.fillMaxWidth()) {
+        Text(
+            "Default for new videos",
+            style = MaterialTheme.typography.titleMedium,
+            color = YtText,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp),
+        )
+        Text(
+            "Every video starts on this quality; one that doesn't offer it uses the next lower rung. " +
+                "Picking a quality for the video you're watching still wins for that video.",
+            style = MaterialTheme.typography.bodySmall,
+            color = YtMuted,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 8.dp),
+        )
+        ChoiceRow(
+            label = "Auto",
+            subtitle = "YouTube's pick — starts fastest",
+            selected = selectedHeight == null,
+            onClick = { onSelect(null) },
+        )
+        DefaultQualityHeights.forEach { height ->
+            val badge = when {
+                height >= 2160 -> "4K"
+                height >= 1440 -> "2K"
+                height >= 1080 -> "Full HD"
+                height >= 720 -> "HD"
+                else -> "SD"
+            }
+            ChoiceRow(
+                label = "${height}p",
+                subtitle = badge,
+                selected = selectedHeight == height,
+                onClick = { onSelect(height) },
+            )
         }
     }
 }
