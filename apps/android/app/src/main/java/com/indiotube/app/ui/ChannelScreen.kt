@@ -31,7 +31,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,7 +56,10 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: String?, avatar: String?) {
+fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
+    val channelId = screen.channelId
+    val name = screen.name
+    val avatar = screen.avatar
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val active by container.accounts.active.collectAsState()
@@ -73,7 +75,10 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
     // Not every channel has a Playlists tab; the old hardcoded fallback asked
     // YouTube for a tab that does not exist and showed whatever came back.
     var hasPlaylistsTab by remember(channelId) { mutableStateOf(true) }
-    var tabIdx by remember { mutableIntStateOf(0) }
+    // The selected tab lives on the screen object, not in this composable:
+    // the screen is torn down while a playlist is open on top of it, and
+    // going back must land on the Playlists tab again.
+    val tabIdx = screen.selectedTab.value
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
@@ -143,9 +148,9 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
     }
 
     LaunchedEffect(channelId, tabIdx) {
-        if (tabIdx == 1 && livePage == null && !liveLoading) loadLive(false)
-        if (tabIdx == 2 && !playlistsLoaded && !playlistsLoading) loadPlaylists(false)
-        if (tabIdx == 3 && about == null && !aboutLoading) loadAbout(false)
+        if (tabIdx == CHANNEL_TAB_LIVE && livePage == null && !liveLoading) loadLive(false)
+        if (tabIdx == CHANNEL_TAB_PLAYLISTS && !playlistsLoaded && !playlistsLoading) loadPlaylists(false)
+        if (tabIdx == CHANNEL_TAB_ABOUT && about == null && !aboutLoading) loadAbout(false)
     }
 
     // Playlists are laid out as a grid of cards, so the list holds rows of
@@ -157,7 +162,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .collect { last ->
                 when (tabIdx) {
-                    0 -> {
+                    CHANNEL_TAB_VIDEOS -> {
                         val p = page ?: return@collect
                         val token = p.continuation ?: return@collect
                         if (last >= p.videos.size - 3 && !loadingMore && last >= 0) {
@@ -225,9 +230,9 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                 scope.launch {
                     refreshing = true
                     load(true)
-                    if (tabIdx == 1) loadLive(true)
-                    if (tabIdx == 2) loadPlaylists(true)
-                    if (tabIdx == 3) loadAbout(true)
+                    if (tabIdx == CHANNEL_TAB_LIVE) loadLive(true)
+                    if (tabIdx == CHANNEL_TAB_PLAYLISTS) loadPlaylists(true)
+                    if (tabIdx == CHANNEL_TAB_ABOUT) loadAbout(true)
                     refreshing = false
                 }
             },
@@ -293,12 +298,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                         }
                     }
                     item(key = "tabs") {
-                        Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                            ChannelTab("Videos", tabIdx == 0, Modifier.weight(1f)) { tabIdx = 0 }
-                            ChannelTab("Live", tabIdx == 1, Modifier.weight(1f)) { tabIdx = 1 }
-                            ChannelTab("Playlists", tabIdx == 2, Modifier.weight(1f)) { tabIdx = 2 }
-                            ChannelTab("About", tabIdx == 3, Modifier.weight(1f)) { tabIdx = 3 }
-                        }
+                        ChannelTabRow(screen)
                     }
                     when (tabIdx) {
                         0 -> {
@@ -327,8 +327,8 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                             }
                         }
 
-                        1 -> {
-                            val videos = livePage?.videos.orEmpty()
+                    CHANNEL_TAB_LIVE -> {
+                        val videos = livePage?.videos.orEmpty()
                             when {
                                 livePage == null && liveError == null -> item(key = "live-loading") {
                                     LoadingBox(Modifier.height(120.dp))
@@ -360,9 +360,9 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                             }
                         }
 
-                        2 -> {
-                            when {
-                                !playlistsLoaded && playlistsLoading -> item(key = "pl-loading") {
+                    CHANNEL_TAB_PLAYLISTS -> {
+                        when {
+                            !playlistsLoaded && playlistsLoading -> item(key = "pl-loading") {
                                     LoadingBox(Modifier.height(120.dp))
                                 }
 
@@ -425,6 +425,28 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                     item { Spacer(Modifier.height(10.dp)) }
                 }
             }
+        }
+    }
+}
+
+// The tab row of a channel. The selected tab lives on the screen object, so
+// it survives a playlist screen opened on top of it: going back returns to
+// the Playlists tab instead of the videos.
+@Composable
+internal fun ChannelTabRow(screen: Screen.Channel, modifier: Modifier = Modifier) {
+    val selected = screen.selectedTab.value
+    Row(modifier.fillMaxWidth().padding(top = 8.dp)) {
+        ChannelTab("Videos", selected == CHANNEL_TAB_VIDEOS, Modifier.weight(1f)) {
+            screen.selectedTab.value = CHANNEL_TAB_VIDEOS
+        }
+        ChannelTab("Live", selected == CHANNEL_TAB_LIVE, Modifier.weight(1f)) {
+            screen.selectedTab.value = CHANNEL_TAB_LIVE
+        }
+        ChannelTab("Playlists", selected == CHANNEL_TAB_PLAYLISTS, Modifier.weight(1f)) {
+            screen.selectedTab.value = CHANNEL_TAB_PLAYLISTS
+        }
+        ChannelTab("About", selected == CHANNEL_TAB_ABOUT, Modifier.weight(1f)) {
+            screen.selectedTab.value = CHANNEL_TAB_ABOUT
         }
     }
 }

@@ -237,6 +237,28 @@ class LiveNetworkTest {
         )
     }
 
+    // Opening a playlist used to answer "This playlist doesn't have any
+    // playable videos": YouTube builds the list from video lockups now and the
+    // parser only understood the retired playlistVideoRenderer items.
+    @Test
+    fun playlistVideosAreParsed() = runBlocking {
+        val channelId = "UC8butISFwT-Wl7EV0hUK0BQ" // freeCodeCamp.org
+        val playlists = innerTube.channelPlaylistsPage(channelId).playlists
+        assertTrue("playlists expected", playlists.isNotEmpty())
+        val playlist = playlists.first()
+        val loaded = innerTube.playlist(playlist.playlistId)
+        assertTrue("playlist videos expected", loaded.videos.isNotEmpty())
+        assertTrue(
+            "videos need ids and titles",
+            loaded.videos.all { it.videoId.isNotBlank() && it.title.isNotBlank() },
+        )
+        assertTrue("the playlist keeps its title", loaded.title.isNotBlank())
+        assertTrue(
+            "the playlist keeps its owner",
+            !loaded.author.isNullOrBlank(),
+        )
+    }
+
     // Lofi Girl runs permanent live radio streams, so the Live tab must come
     // back with playable live cards rather than an empty page.
     @Test

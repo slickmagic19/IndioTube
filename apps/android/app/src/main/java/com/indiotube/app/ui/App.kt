@@ -78,8 +78,19 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+// The tabs of a channel screen, in the order they are shown.
+const val CHANNEL_TAB_VIDEOS = 0
+const val CHANNEL_TAB_LIVE = 1
+const val CHANNEL_TAB_PLAYLISTS = 2
+const val CHANNEL_TAB_ABOUT = 3
+
 sealed interface Screen {
-    data class Channel(val channelId: String, val name: String?, val avatar: String?) : Screen
+    data class Channel(val channelId: String, val name: String?, val avatar: String?) : Screen {
+        // The tab the user is on. The channel screen is torn down while a
+        // playlist is open on top of it, so the tab is kept here: going back
+        // returns to the Playlists tab instead of jumping to the videos.
+        val selectedTab = mutableIntStateOf(CHANNEL_TAB_VIDEOS)
+    }
     data class Watch(val video: VideoItem, val context: List<VideoItem>? = null) : Screen
     data class YtPlaylist(val playlistId: String, val title: String?) : Screen
     data class LocalPlaylist(val id: String) : Screen
@@ -87,6 +98,32 @@ sealed interface Screen {
     data object Search : Screen
     data object Downloads : Screen
     data object ManageSubscriptions : Screen
+}
+
+// The back stack of the app. Screens are pushed on top of each other and the
+// top one is shown; going back pops it. The stack keeps the screen objects
+// alive, which is what lets a channel remember the tab it was on.
+class NavStack {
+    val entries = mutableStateListOf<Screen>()
+
+    val current: Screen? get() = entries.lastOrNull()
+    // The screen on top of the stack. Only call it when the stack is not empty.
+    val top: Screen get() = entries.last()
+    val isEmpty: Boolean get() = entries.isEmpty()
+
+    fun open(screen: Screen) {
+        entries.add(screen)
+    }
+
+    fun replace(screen: Screen) {
+        if (entries.isEmpty()) entries.add(screen) else entries[entries.lastIndex] = screen
+    }
+
+    fun pop(): Screen? = if (entries.isEmpty()) null else entries.removeAt(entries.lastIndex)
+
+    fun clear() {
+        entries.clear()
+    }
 }
 
 enum class LibKind { HISTORY, WATCH_LATER, LIKED }
@@ -253,7 +290,7 @@ class UiRefs(
 
 @Composable
 fun IndioTubeApp(container: Container, player: PlaybackController) {
-    val stack = remember { mutableStateListOf<Screen>() }
+    val stack = remember { NavStack() }
     val scope = rememberCoroutineScope()
     val toasts = remember { ToastState() }
     val searchState = remember { SearchState() }
@@ -266,18 +303,17 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
             player = player,
             scope = scope,
             toasts = toasts,
-            onOpen = { stack.add(it) },
-            onReplace = { if (stack.isNotEmpty()) stack[stack.lastIndex] = it else stack.add(it) },
+            onOpen = { stack.open(it) },
+            onReplace = { stack.replace(it) },
             onBack = {
-                if (stack.isNotEmpty()) {
-                    val removed = stack.removeAt(stack.lastIndex)
+                stack.pop()?.let { removed ->
                     if (removed is Screen.Search) searchState.reset()
                 }
             },
             onGoTab = { tab = it },
             onOpenAccounts = { accountSheetOpen = true },
             search = searchState,
-        ).also { refs -> refs.topProvider = { stack.lastOrNull() } }
+        ).also { refs -> refs.topProvider = { stack.current } }
     }
 
     val current by player.current.collectAsState()
@@ -301,9 +337,9 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
         }
     }
 
-    BackHandler(enabled = stack.isNotEmpty()) { ui.back() }
+    BackHandler(enabled = !stack.isEmpty) { ui.back() }
 
-    val watchOpen = stack.lastOrNull() is Screen.Watch
+    val watchOpen = stack.current is Screen.Watch
 
     // Watched-progress lookup for every thumbnail in the app. Rebuilt whenever
     // history changes so the red bars appear/update without leaving a screen.
@@ -327,7 +363,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                     // watch, search, channel and every other screen. It only
                     // yields during fullscreen playback.
                     if (!ui.playerFullscreen) {
-                        BottomBar(if (stack.isEmpty()) tab else -1) { i ->
+                        BottomBar(if (stack.isEmpty) tab else -1) { i ->
                             // Tapping Home returns to the feed and refreshes
                             // it, the way YouTube's home tab behaves.
                             if (i == 0) ui.refreshHome()
@@ -340,7 +376,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
             },
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
-                if (stack.isEmpty()) {
+                if (stack.isEmpty) {
                     when (tab) {
                         0 -> HomeScreen(container, ui)
                         1 -> ExploreScreen(container, ui)
@@ -348,9 +384,9 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                         else -> YouScreen(container, ui)
                     }
                 } else {
-                    when (val s = stack.last()) {
+                    when (val s = stack.top) {
                         is Screen.Watch -> WatchScreen(container, player, ui, s.video, s.context ?: listOf(s.video))
-                        is Screen.Channel -> ChannelScreen(container, ui, s.channelId, s.name, s.avatar)
+                        is Screen.Channel -> ChannelScreen(container, ui, s)
                         is Screen.YtPlaylist -> YtPlaylistScreen(container, ui, s.playlistId, s.title)
                         is Screen.LocalPlaylist -> LocalPlaylistScreen(container, ui, s.id)
                         is Screen.LibraryList -> LibraryListScreen(container, ui, s.kind)

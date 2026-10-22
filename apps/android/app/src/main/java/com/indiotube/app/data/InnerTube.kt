@@ -41,6 +41,8 @@ private val AGO_RE = Regex("(ago|Premiered|Streamed|\\b\\d{4}\\b)", RegexOption.
 private val LIKES_ALONG_RE = Regex("along with ([\\d.,]+[KMB]?) other", RegexOption.IGNORE_CASE)
 private val COUNT_RE = Regex("^[\\d.,]+[KMB]?$")
 private val MEMBERS_RE = Regex("\\bmembers?[- ]only\\b|\\bchannel members?\\b", RegexOption.IGNORE_CASE)
+// "20 videos", "1 video": the video count on a playlist page.
+private val PLAYLIST_COUNT_RE = Regex("\\bvideos?$", RegexOption.IGNORE_CASE)
 
 private fun JsonElement?.hasMembersBadge(maxDepth: Int = 12): Boolean {
     if (this == null) return false
@@ -1369,29 +1371,44 @@ class InnerTube(private val http: OkHttpClient) {
         return withContext(Dispatchers.Default) { parsePlaylist(root) }
     }
 
-    private fun parsePlaylist(root: JsonElement): PlaylistPage {
+    internal fun parsePlaylist(root: JsonElement): PlaylistPage {
         var title = ""
         var author: String? = null
         var countText: String? = null
+        // Older clients answer with a playlist header.
         root.findAll("playlistHeaderRenderer", maxDepth = 12, limit = 2).firstOrNull()?.let { h ->
             title = h.pathStr("title", "simpleText") ?: h.path("title").runsText().orEmpty()
             author = h.path("ownerText").runsText()
             countText = h.pathStr("numVideosText", "simpleText")?.let { "$it videos" }
                 ?: h.pathStr("numVideosText", "runs", 0, "text")
         }
+        // The current playlist page is built from view models: a page header
+        // with the title, the owner and the video count.
         if (title.isBlank()) {
             root.findAll("pageHeaderViewModel", maxDepth = 12, limit = 2).firstOrNull()?.let { h ->
                 title = h.pathStr("title", "dynamicTextViewModel", "text", "content").orEmpty()
                 val rows = h.path("metadata", "contentMetadataViewModel", "metadataRows") as? JsonArray
                 rows?.forEach { row ->
                     (row.arr("metadataParts") ?: return@forEach).forEach { part ->
-                        val t = part.pathStr("text", "content") ?: return@forEach
+                        val t = part.pathStr("text", "content")?.trim().orEmpty()
+                        if (t.isEmpty()) return@forEach
                         when {
-                            Regex("videos?$", RegexOption.IGNORE_CASE).containsMatchIn(t) -> countText = t
-                            !t.startsWith("@") && author == null -> author = t
+                            PLAYLIST_COUNT_RE.containsMatchIn(t) -> if (countText == null) countText = t
+                            t.equals("Playlist", true) -> Unit
+                            t.startsWith("by ", true) -> if (author == null) {
+                                author = t.removePrefix("by ").trim().takeIf { it.isNotEmpty() }
+                            }
+                            VIEWS_RE.containsMatchIn(t) -> Unit
+                            author == null -> author = t
                         }
                     }
                 }
+            }
+        }
+        // The owner is repeated in the sidebar, which is the cleanest source.
+        if (author.isNullOrBlank()) {
+            root.findAll("videoOwnerRenderer", maxDepth = 16, limit = 2).firstOrNull()?.let { o ->
+                author = o.path("title").runsText()?.trim()?.takeIf { it.isNotEmpty() }
             }
         }
         if (title.isBlank()) {
@@ -1400,14 +1417,23 @@ class InnerTube(private val http: OkHttpClient) {
             }
         }
 
-        val videos = ArrayList<VideoItem>()
+        // The videos of a playlist are plain video lockups today. The old
+        // layout used playlistVideoRenderer items; both are read so a layout
+        // switch doesn't empty the screen.
+        val legacy = root.findAll("playlistVideoRenderer", maxDepth = 16, limit = 200)
+            .mapNotNull { parseVideoRenderer(it) }
+        val lockups = root.findAll("lockupViewModel", maxDepth = 18, limit = 200)
+            .mapNotNull { parseLockup(it) }
+        val videos = (if (legacy.isNotEmpty()) legacy else lockups).distinctBy { it.videoId }
+
         var continuation: String? = null
-        val direct = root.findAll("playlistVideoRenderer", maxDepth = 14, limit = 200)
-        direct.forEach { pv ->
-            parseVideoRenderer(pv)?.let { videos.add(it) }
+        // The "load more" marker of the current layout.
+        root.findAll("continuationItemViewModel", maxDepth = 18, limit = 4).forEach { cont ->
+            cont.pathStr("continuationCommand", "innertubeCommand", "continuationCommand", "token")
+                ?.let { if (continuation == null) continuation = it }
         }
         root.findAll("continuationItemRenderer", maxDepth = 14, limit = 4).forEach { cont ->
-            extractContinuation(cont)?.let { continuation = continuation ?: it }
+            extractContinuation(cont)?.let { if (continuation == null) continuation = it }
         }
         return PlaylistPage(title.ifBlank { "Playlist" }, author, countText, videos, continuation)
     }
