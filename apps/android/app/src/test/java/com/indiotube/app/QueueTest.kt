@@ -131,6 +131,33 @@ class QueueTest {
         assertFalse(QueueOps.isQueued(queue, 1, setOf("b"), "b"))
     }
 
+    // "Clear queue" removes what the user queued but leaves the playing item
+    // and the autoplay context alone.
+    @Test
+    fun clearQueueRemovesOnlyExplicitRows() {
+        val queue = listOf(video("a"), video("b"), video("c"), video("d"))
+
+        val result = QueueOps.clearQueued(queue, 0, setOf("a", "c"))
+        assertEquals(listOf("a", "b", "d"), ids(result))
+        assertEquals(0, result?.index)
+    }
+
+    @Test
+    fun clearQueueKeepsThePlayingRowSelectedWhenEarlierRowsGo() {
+        val result = QueueOps.clearQueued(
+            listOf(video("a"), video("b"), video("c")),
+            2,
+            setOf("a", "b"),
+        )
+        assertEquals(listOf("c"), ids(result))
+        assertEquals(0, result?.index)
+    }
+
+    @Test
+    fun clearingWithNothingExplicitIsANoOp() {
+        assertNull(QueueOps.clearQueued(listOf(video("a"), video("b")), 0, emptySet()))
+    }
+
     @Test
     fun invalidQueueEditsAreRejected() {
         val queue = listOf(video("a"), video("b"))

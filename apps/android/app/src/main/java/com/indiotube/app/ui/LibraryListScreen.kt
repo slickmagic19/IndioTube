@@ -1,5 +1,6 @@
 package com.indiotube.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,19 +9,30 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -30,8 +42,10 @@ import com.indiotube.app.data.VideoItem
 @Composable
 fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
     val history by container.library.history.collectAsState()
+    val historyPaused by container.library.historyPaused.collectAsState()
     val watchLater by container.library.watchLater.collectAsState()
     val liked by container.library.liked.collectAsState()
+    var confirmClear by remember { mutableStateOf(false) }
 
     val videos: List<VideoItem> = when (kind) {
         LibKind.HISTORY -> history.map { it.video }
@@ -70,6 +84,81 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
             }
         }
 
+        if (kind == LibKind.HISTORY) {
+            HorizontalDivider(color = YtDivider)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { container.library.setHistoryPaused(!historyPaused) }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    if (historyPaused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                    null,
+                    tint = YtText,
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.width(18.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Pause watch history",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = YtText,
+                    )
+                    Text(
+                        if (historyPaused) {
+                            "History is paused. Videos you watch won't be saved."
+                        } else {
+                            "Stop saving videos you watch to this account."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = YtMuted,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Switch(
+                    checked = historyPaused,
+                    onCheckedChange = { container.library.setHistoryPaused(it) },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = androidx.compose.ui.graphics.Color.White,
+                        checkedTrackColor = YtRed,
+                        uncheckedThumbColor = YtMuted,
+                        uncheckedTrackColor = YtSurfaceHi,
+                        uncheckedBorderColor = YtDivider,
+                    ),
+                )
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = videos.isNotEmpty()) { confirmClear = true }
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Outlined.Delete,
+                    null,
+                    tint = if (videos.isEmpty()) YtMuted else YtText,
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.width(18.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Clear all watch history",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (videos.isEmpty()) YtMuted else YtText,
+                    )
+                    Text(
+                        "Remove every video saved in this account's history.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = YtMuted,
+                    )
+                }
+            }
+            HorizontalDivider(color = YtDivider)
+        }
+
         if (videos.isEmpty()) {
             val (t, s) = when (kind) {
                 LibKind.HISTORY -> "No watch history" to "Videos you watch show up here."
@@ -106,5 +195,32 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
                 item { Spacer(Modifier.height(10.dp)) }
             }
         }
+    }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            containerColor = YtSurface,
+            titleContentColor = YtText,
+            textContentColor = YtMuted,
+            title = { Text("Clear watch history?") },
+            text = {
+                Text("This removes all videos from this account's history and can't be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    container.library.clearHistory()
+                    confirmClear = false
+                    ui.toast("Watch history cleared")
+                }) {
+                    Text("Clear", color = YtRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) {
+                    Text("Cancel", color = YtMuted)
+                }
+            },
+        )
     }
 }

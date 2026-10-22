@@ -181,6 +181,9 @@ data class LocalPlaylist(
 @Serializable
 data class LibraryFile(
     val watchLater: List<VideoItem> = emptyList(),
+    // When true this account stops recording new watches and progress, like
+    // YouTube's "Pause watch history". Existing entries stay until cleared.
+    val historyPaused: Boolean = false,
     val history: List<HistoryEntry> = emptyList(),
     val playlists: List<LocalPlaylist> = emptyList(),
     val liked: List<VideoItem> = emptyList(),

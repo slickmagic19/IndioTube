@@ -1,5 +1,7 @@
 package com.indiotube.app.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -21,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,12 +43,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indiotube.app.Container
+import com.indiotube.app.data.ChannelAbout
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.ChannelPage
 import com.indiotube.app.data.PlaylistItem
@@ -57,6 +62,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val active by container.accounts.active.collectAsState()
+    val context = LocalContext.current
 
     var page by remember { mutableStateOf<ChannelPage?>(null) }
     var playlists by remember { mutableStateOf<List<PlaylistItem>>(emptyList()) }
@@ -65,6 +71,14 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
     var refreshing by remember { mutableStateOf(false) }
     var loadingMore by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+
+    var livePage by remember(channelId) { mutableStateOf<ChannelPage?>(null) }
+    var liveLoading by remember(channelId) { mutableStateOf(false) }
+    var liveError by remember(channelId) { mutableStateOf<String?>(null) }
+
+    var about by remember(channelId) { mutableStateOf<ChannelAbout?>(null) }
+    var aboutLoading by remember(channelId) { mutableStateOf(false) }
+    var aboutError by remember(channelId) { mutableStateOf<String?>(null) }
 
     suspend fun load(force: Boolean) {
         try {
@@ -79,10 +93,34 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
         }
     }
 
+    suspend fun loadLive(force: Boolean) {
+        liveLoading = true
+        liveError = null
+        try {
+            livePage = container.innerTube.channelLive(channelId, force)
+        } catch (e: Exception) {
+            liveError = e.message ?: "Couldn't load live videos"
+        }
+        liveLoading = false
+    }
+
+    suspend fun loadAbout(force: Boolean) {
+        aboutLoading = true
+        aboutError = null
+        about = container.innerTube.channelAbout(channelId, page?.aboutToken, force)
+        if (about == null) aboutError = "Couldn't load this channel's info"
+        aboutLoading = false
+    }
+
     LaunchedEffect(channelId) {
         loading = true
         load(false)
         loading = false
+    }
+
+    LaunchedEffect(channelId, tabIdx) {
+        if (tabIdx == 1 && livePage == null && !liveLoading) loadLive(false)
+        if (tabIdx == 3 && about == null && !aboutLoading) loadAbout(false)
     }
 
     LaunchedEffect(listState, tabIdx) {
@@ -95,7 +133,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                     loadingMore = true
                     try {
                         val more = container.innerTube.channelContinuation(token)
-                        page = ChannelPage(p.channel, p.videos + more.videos, more.continuation)
+                        page = p.copy(videos = p.videos + more.videos, continuation = more.continuation)
                     } catch (_: Exception) { /* keep what we have */ }
                     loadingMore = false
                 }
@@ -133,6 +171,8 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                 scope.launch {
                     refreshing = true
                     load(true)
+                    if (tabIdx == 1) loadLive(true)
+                    if (tabIdx == 3) loadAbout(true)
                     refreshing = false
                 }
             },
@@ -200,47 +240,102 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                     item(key = "tabs") {
                         Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                             ChannelTab("Videos", tabIdx == 0, Modifier.weight(1f)) { tabIdx = 0 }
-                            ChannelTab("Playlists", tabIdx == 1, Modifier.weight(1f)) { tabIdx = 1 }
+                            ChannelTab("Live", tabIdx == 1, Modifier.weight(1f)) { tabIdx = 1 }
+                            ChannelTab("Playlists", tabIdx == 2, Modifier.weight(1f)) { tabIdx = 2 }
+                            ChannelTab("About", tabIdx == 3, Modifier.weight(1f)) { tabIdx = 3 }
                         }
                     }
-                    if (tabIdx == 0) {
-                        val videos = page?.videos.orEmpty()
-                        if (videos.isEmpty() && !loading) {
-                            item {
-                                EmptyState(
-                                    title = "No videos yet",
-                                    subtitle = "This channel hasn't posted anything we can show.",
-                                    modifier = Modifier.fillMaxWidth(),
+                    when (tabIdx) {
+                        0 -> {
+                            val videos = page?.videos.orEmpty()
+                            if (videos.isEmpty() && !loading) {
+                                item {
+                                    EmptyState(
+                                        title = "No videos yet",
+                                        subtitle = "This channel hasn't posted anything we can show.",
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
+                            items(videos, key = { it.videoId }) { video ->
+                                VideoCard(
+                                    video,
+                                    onClick = { ui.openWatch(video, videos) },
+                                    onChannelClick = { ui.openChannel(channelId, dispName, dispAvatar) },
+                                    onDownload = { ui.download(video) },
+                                    onPlayNext = { ui.playNext(video) },
+                                    onAddToQueue = { ui.addToQueue(video) },
                                 )
                             }
+                            if (loadingMore) {
+                                item { LoadingBox(Modifier.height(70.dp)) }
+                            }
                         }
-                        items(videos, key = { it.videoId }) { video ->
-                            VideoCard(
-                                video,
-                                onClick = { ui.openWatch(video, videos) },
-                                onChannelClick = { ui.openChannel(channelId, dispName, dispAvatar) },
-                                onDownload = { ui.download(video) },
-                                onPlayNext = { ui.playNext(video) },
-                                onAddToQueue = { ui.addToQueue(video) },
+
+                        1 -> {
+                            val videos = livePage?.videos.orEmpty()
+                            when {
+                                livePage == null && liveError == null -> item(key = "live-loading") {
+                                    LoadingBox(Modifier.height(120.dp))
+                                }
+                                liveError != null && livePage == null -> item(key = "live-error") {
+                                    ErrorState(
+                                        liveError!!,
+                                        onRetry = { scope.launch { loadLive(true) } },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                                videos.isEmpty() -> item(key = "live-empty") {
+                                    EmptyState(
+                                        title = "No live videos",
+                                        subtitle = "This channel isn't live right now and has no recent streams.",
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                                else -> items(videos, key = { "live-" + it.videoId }) { video ->
+                                    VideoCard(
+                                        video,
+                                        onClick = { ui.openWatch(video, videos) },
+                                        onChannelClick = { ui.openChannel(channelId, dispName, dispAvatar) },
+                                        onDownload = { ui.download(video) },
+                                        onPlayNext = { ui.playNext(video) },
+                                        onAddToQueue = { ui.addToQueue(video) },
+                                    )
+                                }
+                            }
+                        }
+
+                        2 -> {
+                            if (playlists.isEmpty() && !loading) {
+                                item {
+                                    EmptyState(
+                                        title = "No playlists",
+                                        subtitle = "This channel has no public playlists.",
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
+                            items(playlists, key = { "pl-" + it.playlistId }) { pl ->
+                                ChannelPlaylistRow(pl) {
+                                    ui.open(Screen.YtPlaylist(pl.playlistId, pl.title))
+                                }
+                            }
+                        }
+
+                        else -> item(key = "about") {
+                            ChannelAboutTab(
+                                about = about,
+                                loading = aboutLoading,
+                                error = aboutError,
+                                onRetry = { scope.launch { loadAbout(true) } },
+                                onOpenLink = { url ->
+                                    try {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                    } catch (_: Exception) {
+                                        ui.toast("Couldn't open this link")
+                                    }
+                                },
                             )
-                        }
-                        if (loadingMore) {
-                            item { LoadingBox(Modifier.height(70.dp)) }
-                        }
-                    } else {
-                        if (playlists.isEmpty() && !loading) {
-                            item {
-                                EmptyState(
-                                    title = "No playlists",
-                                    subtitle = "This channel has no public playlists.",
-                                    modifier = Modifier.fillMaxWidth(),
-                                )
-                            }
-                        }
-                        items(playlists, key = { "pl-" + it.playlistId }) { pl ->
-                            ChannelPlaylistRow(pl) {
-                                ui.open(Screen.YtPlaylist(pl.playlistId, pl.title))
-                            }
                         }
                     }
                     item { Spacer(Modifier.height(10.dp)) }
@@ -325,5 +420,104 @@ private fun ChannelPlaylistRow(pl: PlaylistItem, onClick: () -> Unit) {
                 color = YtMuted,
             )
         }
+    }
+}
+
+// About tab: the full description, channel stats and external links YouTube
+// keeps behind the "more about this channel" panel.
+@Composable
+private fun ChannelAboutTab(
+    about: ChannelAbout?,
+    loading: Boolean,
+    error: String?,
+    onRetry: () -> Unit,
+    onOpenLink: (String) -> Unit,
+) {
+    when {
+        about == null && (loading || error == null) -> LoadingBox(Modifier.height(120.dp))
+        about == null -> ErrorState(
+            error ?: "Couldn't load this channel's info",
+            onRetry = onRetry,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        else -> Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            if (!about.description.isNullOrBlank()) {
+                Text(
+                    "Description",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = YtText,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    about.description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = YtText,
+                    lineHeight = 20.sp,
+                )
+                Spacer(Modifier.height(18.dp))
+            }
+            val stats = listOfNotNull(
+                about.subscribersText?.let { "Subscribers" to it },
+                about.videoCountText?.let { "Videos" to it },
+                about.viewCountText?.let { "Views" to it },
+                about.joinedText?.removePrefix("Joined ")?.let { "Joined" to it },
+                about.country?.let { "Country" to it },
+            )
+            stats.forEach { (label, value) -> AboutStatRow(label, value) }
+            if (about.links.isNotEmpty()) {
+                HorizontalDivider(color = YtDivider, modifier = Modifier.padding(vertical = 10.dp))
+                Text(
+                    "Links",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = YtText,
+                )
+                about.links.forEach { link ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenLink(link.url) }
+                            .padding(vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                link.title,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = YtText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "Open link",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = YtMuted,
+                            )
+                        }
+                        Text(
+                            "Open",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = YtBlue,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutStatRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = YtMuted,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = YtText,
+        )
     }
 }

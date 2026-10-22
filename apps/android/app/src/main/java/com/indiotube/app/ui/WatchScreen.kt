@@ -56,6 +56,8 @@ import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
@@ -66,11 +68,13 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.ThumbDown
 import androidx.compose.material.icons.outlined.ThumbUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -83,6 +87,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -1160,6 +1165,20 @@ fun WatchScreen(
             explicitIds = explicitIds,
             onSelect = { player.playQueueItem(it) },
             onRemove = { player.removeFromQueue(it) },
+            onMove = { from, to -> player.moveInQueue(from, to) },
+            onClearQueue = {
+                if (player.clearQueue()) ui.toast("Queue cleared")
+            },
+            onSaveQueue = { name ->
+                val entries = QueueOps.visibleEntries(queue, queueIndex, explicitIds)
+                if (entries.isEmpty()) {
+                    ui.toast("Queue is empty")
+                } else {
+                    val playlist = container.library.createPlaylist(name)
+                    entries.forEach { container.library.addToPlaylist(playlist.id, it.video) }
+                    ui.toast("Saved ${entries.size} videos to ${playlist.name}")
+                }
+            },
             onDismiss = { queueSheet = false },
         )
     }
@@ -2556,11 +2575,17 @@ private fun QueueSheet(
     explicitIds: Set<String>,
     onSelect: (Int) -> Unit,
     onRemove: (Int) -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onClearQueue: () -> Unit,
+    onSaveQueue: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val entries = QueueOps.visibleEntries(queue, currentIndex, explicitIds)
     val upcoming = entries.count { it.index != currentIndex }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var confirmClear by remember { mutableStateOf(false) }
+    var saveOpen by remember { mutableStateOf(false) }
+    var saveName by remember { mutableStateOf("My queue") }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -2585,11 +2610,42 @@ private fun QueueSheet(
                     style = MaterialTheme.typography.bodySmall,
                     color = YtMuted,
                 )
+                if (upcoming > 0) {
+                    IconButton(
+                        onClick = {
+                            saveName = "My queue"
+                            saveOpen = true
+                        },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.PlaylistAdd,
+                            "Save queue as playlist",
+                            tint = YtText,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = { confirmClear = true },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Delete,
+                            "Clear queue",
+                            tint = YtText,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
             }
             HorizontalDivider(color = YtDivider)
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
                 itemsIndexed(entries, key = { _, entry -> entry.index }) { displayIndex, entry ->
                     val current = entry.index == currentIndex
+                    // The playing row is entries[0]; never move a queued item
+                    // above it, or it would count as already watched.
+                    val canMoveUp = displayIndex > 1
+                    val canMoveDown = displayIndex < entries.lastIndex
                     QueueRow(
                         video = entry.video,
                         current = current,
@@ -2598,8 +2654,16 @@ private fun QueueSheet(
                         } else {
                             entries.take(displayIndex).count { it.index != currentIndex } + 1
                         },
+                        canMoveUp = canMoveUp,
+                        canMoveDown = canMoveDown,
                         onSelect = { onSelect(entry.index) },
                         onRemove = { onRemove(entry.index) },
+                        onMoveUp = {
+                            entries.getOrNull(displayIndex - 1)?.let { onMove(entry.index, it.index) }
+                        },
+                        onMoveDown = {
+                            entries.getOrNull(displayIndex + 1)?.let { onMove(entry.index, it.index) }
+                        },
                     )
                 }
                 if (upcoming == 0) {
@@ -2623,6 +2687,74 @@ private fun QueueSheet(
             }
         }
     }
+
+    if (saveOpen) {
+        AlertDialog(
+            onDismissRequest = { saveOpen = false },
+            containerColor = YtSurface,
+            titleContentColor = YtText,
+            textContentColor = YtMuted,
+            title = { Text("Save queue") },
+            text = {
+                Column {
+                    Text(
+                        "Saves the playing video and $upcoming queued ${if (upcoming == 1) "video" else "videos"} to a new playlist.",
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = saveName,
+                        onValueChange = { saveName = it },
+                        singleLine = true,
+                        placeholder = { Text("Playlist name", color = YtMuted) },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = saveName.isNotBlank(),
+                    onClick = {
+                        onSaveQueue(saveName.trim())
+                        saveOpen = false
+                    },
+                ) {
+                    Text("Save", color = if (saveName.isNotBlank()) YtBlue else YtMuted)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { saveOpen = false }) {
+                    Text("Cancel", color = YtMuted)
+                }
+            },
+        )
+    }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            containerColor = YtSurface,
+            titleContentColor = YtText,
+            textContentColor = YtMuted,
+            title = { Text("Clear queue?") },
+            text = {
+                Text(
+                    "This removes the $upcoming queued ${if (upcoming == 1) "video" else "videos"}. The video you're watching keeps playing.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onClearQueue()
+                    confirmClear = false
+                }) {
+                    Text("Clear", color = YtRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) {
+                    Text("Cancel", color = YtMuted)
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -2630,8 +2762,12 @@ private fun QueueRow(
     video: VideoItem,
     current: Boolean,
     number: Int,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
     onSelect: () -> Unit,
     onRemove: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
@@ -2696,6 +2832,24 @@ private fun QueueRow(
                     )
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Move up") },
+                        leadingIcon = { Icon(Icons.Filled.KeyboardArrowUp, null, tint = YtText) },
+                        enabled = canMoveUp,
+                        onClick = {
+                            menuOpen = false
+                            onMoveUp()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move down") },
+                        leadingIcon = { Icon(Icons.Filled.KeyboardArrowDown, null, tint = YtText) },
+                        enabled = canMoveDown,
+                        onClick = {
+                            menuOpen = false
+                            onMoveDown()
+                        },
+                    )
                     DropdownMenuItem(
                         text = { Text("Remove from queue") },
                         leadingIcon = { Icon(Icons.Filled.Close, null, tint = YtText) },

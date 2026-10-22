@@ -420,6 +420,23 @@ class PlaybackController(
         return true
     }
 
+    fun clearQueue(): Boolean {
+        val q = _queue.value
+        val c = controller
+        val current = c?.currentMediaItemIndex?.takeIf { it >= 0 } ?: _index.value
+        val removals = q.indices.filter { it != current && q[it].videoId in _explicit.value }
+        val result = QueueOps.clearQueued(q, current, _explicit.value) ?: return false
+        if (c != null) {
+            removals.sortedDescending().forEach { i ->
+                if (i < c.mediaItemCount) c.removeMediaItem(i)
+            }
+        }
+        _queue.value = result.queue
+        _index.value = result.index
+        _explicit.value = emptySet()
+        return true
+    }
+
     fun moveInQueue(from: Int, to: Int): Boolean {
         val q = _queue.value
         val c = controller

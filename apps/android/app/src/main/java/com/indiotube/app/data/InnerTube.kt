@@ -133,6 +133,7 @@ private const val TRENDING_PARAMS = "EgYIAxABGAM%3D"
 
 // channel tab params
 private const val CHANNEL_TAB_VIDEOS = "EgZ2aWRlb3PyBgQKAjoA"
+private const val CHANNEL_TAB_LIVE = "EgdzdHJlYW1z8gYECgJ6AA%3D%3D"
 private const val CHANNEL_TAB_PLAYLISTS = "EgZwbGF5bGlzdHPyBgQKAkIA"
 
 data class Chip(val title: String, val params: String?, val token: String?)
@@ -174,6 +175,25 @@ data class ChannelPage(
     val videos: List<VideoItem>,
     val continuation: String?,
     val playlists: List<PlaylistItem> = emptyList(),
+    // Continuation behind the channel's "about" engagement panel. The panel
+    // body is loaded on demand when the About tab is opened.
+    val aboutToken: String? = null,
+)
+
+data class ChannelLink(
+    val title: String,
+    val url: String,
+)
+
+data class ChannelAbout(
+    val description: String? = null,
+    val country: String? = null,
+    val subscribersText: String? = null,
+    val videoCountText: String? = null,
+    val viewCountText: String? = null,
+    val joinedText: String? = null,
+    val canonicalUrl: String? = null,
+    val links: List<ChannelLink> = emptyList(),
 )
 
 data class WatchData(
@@ -720,6 +740,32 @@ class InnerTube(private val http: OkHttpClient) {
         return withContext(Dispatchers.Default) { parseChannelPage(root, "") }
     }
 
+    // The Live tab is the same channel page with YouTube's "streams" params;
+    // its cards are ordinary videos already carrying the LIVE badge.
+    suspend fun channelLive(channelId: String, force: Boolean = false): ChannelPage =
+        cached("channelLive:$channelId", 10 * 60_000L, force) {
+            parseChannelPage(browse(channelId, CHANNEL_TAB_LIVE), channelId)
+        }
+
+    // The About panel is lazily loaded: the channel page only carries a
+    // continuation token for it. Passing the token from the already-loaded
+    // page avoids a second browse request; the fallback fetches one.
+    suspend fun channelAbout(
+        channelId: String,
+        token: String? = null,
+        force: Boolean = false,
+    ): ChannelAbout? = try {
+        cached("channelAbout:$channelId", 30 * 60_000L, force) {
+            val aboutToken = token ?: run {
+                val root = browse(channelId, CHANNEL_TAB_VIDEOS)
+                parseAboutToken(root, parseChannelHeader(root, channelId).name)
+            }
+            aboutToken?.let { parseChannelAbout(browse("", continuation = it)) }
+        }
+    } catch (_: Exception) {
+        null
+    }
+
     suspend fun channelPlaylists(channelId: String, force: Boolean = false): List<PlaylistItem> = try {
         cached("channelPlaylists:$channelId", 30 * 60_000L, force) {
             val root = browse(channelId, CHANNEL_TAB_PLAYLISTS)
@@ -792,7 +838,55 @@ class InnerTube(private val http: OkHttpClient) {
                 channelAvatar = v.channelAvatar ?: channel.avatar,
             )
         }
-        return ChannelPage(channel, stamped, continuation)
+        return ChannelPage(
+            channel = channel,
+            videos = stamped,
+            continuation = continuation,
+            aboutToken = parseAboutToken(root, channel.name),
+        )
+    }
+
+    // The About panel lives in an engagement panel whose title is the channel
+    // name; the featured-channels panel uses a different title.
+    internal fun parseAboutToken(root: JsonElement, channelName: String): String? {
+        val panels = root.findAll("engagementPanelSectionListRenderer", maxDepth = 14, limit = 10)
+        if (panels.isEmpty()) return null
+        fun title(p: JsonElement) =
+            p.pathStr("header", "engagementPanelTitleHeaderRenderer", "title", "simpleText")
+        val panel = panels.firstOrNull { title(it) == channelName }
+            ?: panels.firstOrNull { val t = title(it); t != null && t != "Featured Channels" }
+            ?: return null
+        return panel.findAll("continuationCommand", maxDepth = 14, limit = 6)
+            .firstNotNullOfOrNull { it.pathStr("token") }
+    }
+
+    internal fun parseChannelAbout(root: JsonElement): ChannelAbout? {
+        val vm = root.findAll("aboutChannelViewModel", maxDepth = 16, limit = 3).firstOrNull()
+            ?: return null
+        val linkArray = vm.path("links") as? JsonArray ?: JsonArray(emptyList())
+        val links = linkArray.mapNotNull { el ->
+            val link = el.obj("channelExternalLinkViewModel") ?: return@mapNotNull null
+            val title = link.pathStr("title", "content")?.trim().orEmpty()
+            val url = link.pathStr(
+                "link", "commandRuns", 0, "onTap", "innertubeCommand", "urlEndpoint", "url",
+            ) ?: link.pathStr(
+                "link", "commandRuns", 0, "onTap", "innertubeCommand",
+                "commandMetadata", "webCommandMetadata", "url",
+            ) ?: return@mapNotNull null
+            if (title.isEmpty()) return@mapNotNull null
+            ChannelLink(title, url)
+        }.distinctBy { it.url }
+        fun text(vararg keys: Any): String? = vm.pathStr(*keys)?.trim()?.takeIf { it.isNotEmpty() }
+        return ChannelAbout(
+            description = text("description"),
+            country = text("country"),
+            subscribersText = text("subscriberCountText"),
+            videoCountText = text("videoCountText"),
+            viewCountText = text("viewCountText"),
+            joinedText = text("joinedDateText", "content"),
+            canonicalUrl = text("canonicalChannelUrl")?.replaceFirst("http://", "https://"),
+            links = links,
+        )
     }
 
     private fun parseChannelHeader(root: JsonElement, requestedId: String): ChannelItem {

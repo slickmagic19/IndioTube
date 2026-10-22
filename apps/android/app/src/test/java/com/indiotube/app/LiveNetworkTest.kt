@@ -186,6 +186,34 @@ class LiveNetworkTest {
         assertTrue("most videos should carry name+avatar+id", named >= page.videos.size / 2)
     }
 
+    // The About tab's data hides behind a lazy engagement panel: the channel
+    // page only carries its continuation token. Cover the whole chain against
+    // real YouTube so a layout change fails loudly.
+    @Test
+    fun channelAboutPanelParses() = runBlocking {
+        val channelId = "UCXuqSBlHAE6Xw-yeJA0Tunw" // Linus Tech Tips
+        val page = innerTube.channelVideos(channelId)
+        assertNotNull("about continuation expected", page.aboutToken)
+
+        val about = innerTube.channelAbout(channelId, page.aboutToken)
+        assertNotNull("about panel expected", about)
+        assertTrue("full description expected", !about!!.description.isNullOrBlank())
+        assertTrue("subscriber count expected", !about.subscribersText.isNullOrBlank())
+        assertTrue("joined date expected", !about.joinedText.isNullOrBlank())
+        assertTrue("external links expected", about.links.isNotEmpty())
+        assertTrue("links must be openable URLs", about.links.all { it.url.startsWith("https://") })
+    }
+
+    // Lofi Girl runs permanent live radio streams, so the Live tab must come
+    // back with playable live cards rather than an empty page.
+    @Test
+    fun channelLiveTabParses() = runBlocking {
+        val page = innerTube.channelLive("UCSJ4gkVC6NrvII8umztf0Ow")
+        assertTrue("live tab should return videos", page.videos.isNotEmpty())
+        assertTrue("live cards need titles and ids", page.videos.all { it.title.isNotBlank() && it.videoId.isNotBlank() })
+        assertTrue("current streams should carry the LIVE badge", page.videos.any { it.isLive })
+    }
+
     // Newer lockups put the view count in an accessibility label
     // ("21 million views") with only the bare number ("21M") as visible text.
     @Test

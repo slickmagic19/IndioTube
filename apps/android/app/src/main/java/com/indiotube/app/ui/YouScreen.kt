@@ -46,6 +46,7 @@ fun YouScreen(container: Container, ui: UiRefs) {
     val account by container.accounts.active.collectAsState()
     val allAccounts by container.accounts.accounts.collectAsState()
     val history by container.library.history.collectAsState()
+    val historyPaused by container.library.historyPaused.collectAsState()
     val watchLater by container.library.watchLater.collectAsState()
     val playlists by container.library.playlists.collectAsState()
     val liked by container.library.liked.collectAsState()
@@ -106,7 +107,12 @@ fun YouScreen(container: Container, ui: UiRefs) {
 
             item { SectionHeader("Your library") }
             item {
-                YouRow(Icons.Outlined.History, "History", "${history.size} videos") {
+                val subtitle = when {
+                    historyPaused && history.isEmpty() -> "Paused"
+                    historyPaused -> "Paused - ${history.size} videos"
+                    else -> "${history.size} videos"
+                }
+                YouRow(Icons.Outlined.History, "History", subtitle) {
                     ui.open(LibraryList(LibKind.HISTORY))
                 }
             }

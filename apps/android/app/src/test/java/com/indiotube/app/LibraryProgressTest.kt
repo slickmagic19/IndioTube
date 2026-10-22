@@ -87,6 +87,50 @@ class LibraryProgressTest {
     }
 
     @Test
+    fun pausingHistoryStopsNewEntriesAndProgress() {
+        val store = store()
+        val watched = VideoItem("p1", "Watched", durationSec = 100)
+        store.noteOpen(watched)
+        store.notePosition(watched, 20_000, 100_000)
+
+        store.setHistoryPaused(true)
+        val whilePaused = VideoItem("p2", "Paused")
+        store.noteOpen(whilePaused)
+        store.notePosition(watched, 60_000, 100_000)
+
+        assertEquals(listOf("p1"), store.history.value.map { it.video.videoId })
+        assertEquals("existing progress is frozen", 20_000, store.resumePosition("p1"))
+        assertNull("paused videos aren't added", store.watchedFraction("p2"))
+
+        store.setHistoryPaused(false)
+        store.noteOpen(whilePaused)
+        assertEquals(listOf("p2", "p1"), store.history.value.map { it.video.videoId })
+    }
+
+    @Test
+    fun historyPausePersistsWithTheAccount() {
+        val dir = Files.createTempDirectory("indiotube-library").toFile()
+        val store = LibraryStore(dir, CoroutineScope(Dispatchers.Unconfined))
+        store.setHistoryPaused(true)
+
+        // Persistence hops onto Dispatchers.IO, so wait for the account file to
+        // land rather than assuming the write completes inline.
+        val saved = java.io.File(dir, "library_.json")
+        val deadline = System.currentTimeMillis() + 2_000
+        while (System.currentTimeMillis() < deadline) {
+            if (saved.exists() && saved.readText().contains("\"historyPaused\":true")) break
+            Thread.sleep(20)
+        }
+
+        val reloaded = LibraryStore(dir, CoroutineScope(Dispatchers.Unconfined))
+        reloaded.load()
+        assertTrue("pause should be saved", reloaded.historyPaused.value)
+
+        reloaded.noteOpen(VideoItem("p3", "Not saved"))
+        assertTrue("a reloaded pause keeps blocking history", reloaded.history.value.isEmpty())
+    }
+
+    @Test
     fun entryFractionHandlesDurationFallbacks() {
         val withDuration = HistoryEntry(VideoItem("a"), positionMs = 25_000, durationMs = 100_000)
         assertEquals(0.25f, withDuration.watchedFraction()!!, 0.001f)

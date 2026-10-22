@@ -32,6 +32,9 @@ class LibraryStore(
     private val _history = MutableStateFlow<List<HistoryEntry>>(emptyList())
     val history: StateFlow<List<HistoryEntry>> = _history.asStateFlow()
 
+    private val _historyPaused = MutableStateFlow(false)
+    val historyPaused: StateFlow<Boolean> = _historyPaused.asStateFlow()
+
     private val _playlists = MutableStateFlow<List<LocalPlaylist>>(emptyList())
     val playlists: StateFlow<List<LocalPlaylist>> = _playlists.asStateFlow()
 
@@ -67,6 +70,7 @@ class LibraryStore(
             if (f.exists()) {
                 val data = SyncJson.decodeFromString(LibraryFile.serializer(), f.readText())
                 _watchLater.value = data.watchLater
+                _historyPaused.value = data.historyPaused
                 _history.value = data.history
                 _playlists.value = data.playlists
                 _liked.value = data.liked
@@ -76,6 +80,7 @@ class LibraryStore(
                 _blockedChannelIds.value = data.blockedChannelIds.toSet()
             } else {
                 _watchLater.value = emptyList()
+                _historyPaused.value = false
                 _history.value = emptyList()
                 _playlists.value = emptyList()
                 _liked.value = emptyList()
@@ -89,6 +94,7 @@ class LibraryStore(
                 accountFile(currentAccountId).renameTo(File(dir, "library_corrupt.json"))
             } catch (_: Exception) { }
             _watchLater.value = emptyList()
+            _historyPaused.value = false
             _history.value = emptyList()
             _playlists.value = emptyList()
             _liked.value = emptyList()
@@ -102,6 +108,7 @@ class LibraryStore(
     private fun persist() {
         val data = LibraryFile(
             watchLater = _watchLater.value,
+            historyPaused = _historyPaused.value,
             history = _history.value,
             playlists = _playlists.value,
             liked = _liked.value,
@@ -127,7 +134,16 @@ class LibraryStore(
 
     // ---- history -------------------------------------------------------------
 
+    fun setHistoryPaused(paused: Boolean) {
+        if (_historyPaused.value == paused) return
+        _historyPaused.value = paused
+        persist()
+    }
+
     fun noteOpen(video: VideoItem) {
+        // Paused history keeps the list frozen: no new rows, no timestamp or
+        // progress churn on existing ones.
+        if (_historyPaused.value) return
         val existing = _history.value.firstOrNull { it.video.videoId == video.videoId }
         val entry = HistoryEntry(
             video = video,
@@ -144,6 +160,7 @@ class LibraryStore(
     // alongside the position so thumbnails can draw the watched-progress bar;
     // this also un-throttles the very first save once the duration is known.
     fun notePosition(video: VideoItem, positionMs: Long, durationMs: Long = 0) {
+        if (_historyPaused.value) return
         val idx = _history.value.indexOfFirst { it.video.videoId == video.videoId }
         if (idx < 0) return
         val entry = _history.value[idx]

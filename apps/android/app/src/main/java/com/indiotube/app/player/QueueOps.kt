@@ -30,6 +30,24 @@ object QueueOps {
         i > currentIndex && v.videoId == videoId && videoId in explicitIds
     }
 
+    // "Clear queue" drops every explicitly queued row, keeping the playing
+    // video (and the autoplay context behind the scenes) intact.
+    fun clearQueued(
+        queue: List<VideoItem>,
+        currentIndex: Int,
+        explicitIds: Set<String>,
+    ): Result? {
+        val removals = queue.indices.filter { i ->
+            i != currentIndex && queue[i].videoId in explicitIds
+        }
+        if (removals.isEmpty()) return null
+        val next = queue.filterIndexed { i, _ -> i !in removals }
+        val index = if (next.isEmpty()) -1 else {
+            (currentIndex - removals.count { it < currentIndex }).coerceIn(0, next.lastIndex)
+        }
+        return Result(next, index)
+    }
+
     fun add(
         queue: List<VideoItem>,
         index: Int,
