@@ -65,7 +65,9 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
     val context = LocalContext.current
 
     var page by remember { mutableStateOf<ChannelPage?>(null) }
-    var playlists by remember { mutableStateOf<List<PlaylistItem>>(emptyList()) }
+    var playlists by remember(channelId) { mutableStateOf<List<PlaylistItem>>(emptyList()) }
+    var playlistsToken by remember(channelId) { mutableStateOf<String?>(null) }
+    var loadingMorePlaylists by remember(channelId) { mutableStateOf(false) }
     var tabIdx by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
@@ -86,7 +88,10 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
             page = p
             error = null
             if (playlists.isEmpty() || force) {
-                playlists = container.innerTube.channelPlaylists(channelId, force = force)
+                val pl = container.innerTube.channelPlaylistsPage(channelId, force = force)
+                playlists = pl.playlists
+                playlistsToken = pl.continuation
+                loadingMorePlaylists = false
             }
         } catch (e: Exception) {
             if (page == null) error = e.message ?: "Couldn't load this channel"
@@ -126,16 +131,33 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
     LaunchedEffect(listState, tabIdx) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .collect { last ->
-                if (tabIdx != 0) return@collect
-                val p = page ?: return@collect
-                val token = p.continuation ?: return@collect
-                if (last >= p.videos.size - 3 && !loadingMore && last >= 0) {
-                    loadingMore = true
-                    try {
-                        val more = container.innerTube.channelContinuation(token)
-                        page = p.copy(videos = p.videos + more.videos, continuation = more.continuation)
-                    } catch (_: Exception) { /* keep what we have */ }
-                    loadingMore = false
+                when (tabIdx) {
+                    0 -> {
+                        val p = page ?: return@collect
+                        val token = p.continuation ?: return@collect
+                        if (last >= p.videos.size - 3 && !loadingMore && last >= 0) {
+                            loadingMore = true
+                            try {
+                                val more = container.innerTube.channelContinuation(token)
+                                page = p.copy(videos = p.videos + more.videos, continuation = more.continuation)
+                            } catch (_: Exception) { /* keep what we have */ }
+                            loadingMore = false
+                        }
+                    }
+
+                    2 -> {
+                        val token = playlistsToken ?: return@collect
+                        if (last >= playlists.size - 3 && !loadingMorePlaylists && last >= 0) {
+                            loadingMorePlaylists = true
+                            try {
+                                val more = container.innerTube.channelPlaylistsContinuation(token)
+                                playlists = (playlists + more.playlists).distinctBy { it.playlistId }
+                                playlistsToken = more.continuation
+                                    ?.takeUnless { it == token }
+                            } catch (_: Exception) { /* keep what we have */ }
+                            loadingMorePlaylists = false
+                        }
+                    }
                 }
             }
     }
@@ -319,6 +341,9 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                                 ChannelPlaylistRow(pl) {
                                     ui.open(Screen.YtPlaylist(pl.playlistId, pl.title))
                                 }
+                            }
+                            if (loadingMorePlaylists) {
+                                item { LoadingBox(Modifier.height(70.dp)) }
                             }
                         }
 

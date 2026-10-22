@@ -204,6 +204,39 @@ class LiveNetworkTest {
         assertTrue("links must be openable URLs", about.links.all { it.url.startsWith("https://") })
     }
 
+    // freeCodeCamp used to show an empty Playlists tab: YouTube changed the
+    // tab's encoded params, so the old hardcoded value returned the Home tab.
+    // The page now discovers the params from the channel itself and paginates.
+    @Test
+    fun channelPlaylistsLoadForFreeCodeCamp() = runBlocking {
+        val channelId = "UC8butISFwT-Wl7EV0hUK0BQ" // freeCodeCamp.org
+        val params = innerTube.channelTabParams(channelId, "Playlists")
+        assertNotNull("the Playlists tab params should be discovered", params)
+        val page = innerTube.channelPlaylistsPage(channelId)
+        assertTrue("playlists expected", page.playlists.size >= 20)
+        assertTrue(
+            "playlists need titles and ids",
+            page.playlists.all { it.title.isNotBlank() && it.playlistId.isNotBlank() },
+        )
+        assertTrue(
+            "playlist thumbnails should parse",
+            page.playlists.count { !it.thumbnail.isNullOrBlank() } >= page.playlists.size / 2,
+        )
+        assertTrue(
+            "playlist video counts should parse",
+            page.playlists.count { !it.videoCountText.isNullOrBlank() } >= page.playlists.size / 2,
+        )
+        assertNotNull("freeCodeCamp should have more playlist pages", page.continuation)
+
+        val more = innerTube.channelPlaylistsContinuation(page.continuation!!)
+        assertTrue("continuation should return playlists", more.playlists.isNotEmpty())
+        val firstIds = page.playlists.map { it.playlistId }.toSet()
+        assertTrue(
+            "pages must not repeat playlists",
+            more.playlists.none { it.playlistId in firstIds },
+        )
+    }
+
     // Lofi Girl runs permanent live radio streams, so the Live tab must come
     // back with playable live cards rather than an empty page.
     @Test

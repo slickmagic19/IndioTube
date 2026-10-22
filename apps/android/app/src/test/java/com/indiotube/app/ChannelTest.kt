@@ -62,6 +62,21 @@ class ChannelTest {
     }
 
     @Test
+    fun playlistLockupsUseContentImageAndBadgeCount() {
+        val root = SyncJson.parseToJsonElement(
+            """{"contents":[{"gridRenderer":{"items":[{"lockupViewModel":{"contentId":"PLtest123","contentType":"LOCKUP_CONTENT_TYPE_PLAYLIST","contentImage":{"collectionThumbnailViewModel":{"primaryThumbnail":{"thumbnailViewModel":{"image":{"sources":[{"url":"https://img.example/playlist.jpg"}]},"overlays":[{"thumbnailOverlayBadgeViewModel":{"thumbnailBadges":[{"thumbnailBadgeViewModel":{"text":"1 video"}}]}}]}}}},"metadata":{"lockupMetadataViewModel":{"title":{"content":"Documentaries"},"metadata":{"contentMetadataViewModel":{"metadataRows":[{"metadataParts":[{"text":{"content":"Playlist"}}]}]}}}}}},{"lockupViewModel":{"contentId":"video123","contentType":"LOCKUP_CONTENT_TYPE_VIDEO","metadata":{"lockupMetadataViewModel":{"title":{"content":"Not a playlist"}}}}},{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"more-playlists"}}}}]}}]}""",
+        )
+
+        val page = innerTube.parseChannelPlaylistsPage(root)
+        assertEquals("video lockups are not playlists", 1, page.playlists.size)
+        assertEquals("Documentaries", page.playlists.first().title)
+        assertEquals("PLtest123", page.playlists.first().playlistId)
+        assertEquals("https://img.example/playlist.jpg", page.playlists.first().thumbnail)
+        assertEquals("1 video", page.playlists.first().videoCountText)
+        assertEquals("more-playlists", page.continuation)
+    }
+
+    @Test
     fun aboutWithoutPanelParsesToNull() {
         assertNull(innerTube.parseChannelAbout(SyncJson.parseToJsonElement("{}")))
     }

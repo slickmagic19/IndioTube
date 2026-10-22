@@ -134,7 +134,10 @@ private const val TRENDING_PARAMS = "EgYIAxABGAM%3D"
 // channel tab params
 private const val CHANNEL_TAB_VIDEOS = "EgZ2aWRlb3PyBgQKAjoA"
 private const val CHANNEL_TAB_LIVE = "EgdzdHJlYW1z8gYECgJ6AA%3D%3D"
-private const val CHANNEL_TAB_PLAYLISTS = "EgZwbGF5bGlzdHPyBgQKAkIA"
+// Fallback only: the Playlists tab params change when YouTube adds a sort or
+// filter row (freeCodeCamp's differ from the old grid params), so the live
+// value is read from the channel's own tab renderers first.
+private const val CHANNEL_TAB_PLAYLISTS = "EglwbGF5bGlzdHPyBgoKCEIGCgIQaCIA"
 
 data class Chip(val title: String, val params: String?, val token: String?)
 
@@ -178,6 +181,11 @@ data class ChannelPage(
     // Continuation behind the channel's "about" engagement panel. The panel
     // body is loaded on demand when the About tab is opened.
     val aboutToken: String? = null,
+)
+
+data class ChannelPlaylistsPage(
+    val playlists: List<PlaylistItem>,
+    val continuation: String? = null,
 )
 
 data class ChannelLink(
@@ -766,37 +774,103 @@ class InnerTube(private val http: OkHttpClient) {
         null
     }
 
-    suspend fun channelPlaylists(channelId: String, force: Boolean = false): List<PlaylistItem> = try {
-        cached("channelPlaylists:$channelId", 30 * 60_000L, force) {
-            val root = browse(channelId, CHANNEL_TAB_PLAYLISTS)
-            val out = ArrayList<PlaylistItem>()
-            root.findAll("gridPlaylistRenderer", maxDepth = 12, limit = 60).forEach { pl ->
-                parsePlaylistRenderer(pl)?.let { out.add(it) }
+    // The Playlists tab's params are not stable across channels: YouTube can
+    // add a sort/filter row and change the encoded value. Read the params from
+    // the channel's own tab renderers instead of hardcoding one shape.
+    internal suspend fun channelTabParams(channelId: String, title: String): String? =
+        cached("channelTabs:$channelId", 30 * 60_000L) {
+            val root = browse(channelId)
+            root.findAll("tabRenderer", maxDepth = 14, limit = 24)
+                .firstOrNull {
+                    it.pathStr("title") == title || it.pathStr("title", "content") == title
+                }
+                ?.pathStr("endpoint", "browseEndpoint", "params")
+        }
+
+    suspend fun channelPlaylistsPage(channelId: String, force: Boolean = false): ChannelPlaylistsPage = try {
+        cached("channelPlaylistsPage:$channelId", 30 * 60_000L, force) {
+            val params = channelTabParams(channelId, "Playlists") ?: CHANNEL_TAB_PLAYLISTS
+            parseChannelPlaylistsPage(browse(channelId, params))
+        }
+    } catch (_: Exception) {
+        ChannelPlaylistsPage(emptyList())
+    }
+
+    suspend fun channelPlaylists(channelId: String, force: Boolean = false): List<PlaylistItem> =
+        channelPlaylistsPage(channelId, force).playlists
+
+    suspend fun channelPlaylistsContinuation(token: String): ChannelPlaylistsPage {
+        val root = browse("", continuation = token)
+        return withContext(Dispatchers.Default) { parseChannelPlaylistsPage(root) }
+    }
+
+    internal fun parseChannelPlaylistsPage(root: JsonElement): ChannelPlaylistsPage {
+        val out = ArrayList<PlaylistItem>()
+        root.findAll("gridPlaylistRenderer", maxDepth = 24, limit = 60).forEach { pl ->
+            parsePlaylistRenderer(pl)?.let { out.add(it) }
+        }
+        // Playlist lockups sit behind several renderer/array layers (~16 deep),
+        // deeper than the video scans; a shallow bound silently returned none.
+        root.findAll("lockupViewModel", maxDepth = 24, limit = 90).forEach { lockup ->
+            if (lockup.pathStr("contentType")?.contains("PLAYLIST") == true) {
+                parsePlaylistLockup(lockup)?.let { out.add(it) }
             }
-            if (out.isEmpty()) {
-                root.findAll("lockupViewModel", maxDepth = 12, limit = 60).forEach { lockup ->
-                    if (lockup.pathStr("contentType")?.contains("PLAYLIST") == true) {
-                        parsePlaylistLockup(lockup)?.let { out.add(it) }
+        }
+        return ChannelPlaylistsPage(
+            playlists = out.distinctBy { it.playlistId },
+            continuation = playlistContinuation(root),
+        )
+    }
+
+    // The initial page nests its "more" item inside the playlists grid; a
+    // continuation page appends bare lockups plus the next continuation.
+    private fun playlistContinuation(root: JsonElement): String? {
+        root.findAll("gridRenderer", maxDepth = 24, limit = 6).forEach { grid ->
+            val items = grid.path("items") as? JsonArray ?: return@forEach
+            val hasPlaylists = items.any {
+                it.obj("lockupViewModel")?.pathStr("contentType")?.contains("PLAYLIST") == true
+            }
+            if (hasPlaylists) {
+                items.forEach { item ->
+                    item.obj("continuationItemRenderer")?.let { cont ->
+                        extractContinuation(cont)?.let { return it }
                     }
                 }
             }
-            out.distinctBy { it.playlistId }
         }
-    } catch (_: Exception) {
-        emptyList()
+        val hasPlaylists = root.findAll("lockupViewModel", maxDepth = 24, limit = 90).any {
+            it.pathStr("contentType")?.contains("PLAYLIST") == true
+        }
+        if (!hasPlaylists) return null
+        return root.findAll("continuationItemRenderer", maxDepth = 24, limit = 10)
+            .mapNotNull { extractContinuation(it) }
+            .lastOrNull()
     }
 
-    private fun parsePlaylistLockup(lockup: JsonElement): PlaylistItem? {
+    internal fun parsePlaylistLockup(lockup: JsonElement): PlaylistItem? {
         val playlistId = lockup.pathStr("contentId") ?: return null
         val meta = lockup.path("metadata", "lockupMetadataViewModel") ?: return null
         val title = meta.pathStr("title", "content")?.trim().orEmpty().ifEmpty { return null }
-        val thumb = xthFirstUrl(meta.path("image", "collectionThumbnailViewModel", "primaryThumbnail", "thumbnailViewModel", "image"))
-            ?: xthFirstUrl(meta.path("image"))
+        // Newer playlist lockups carry the thumbnail under contentImage, not
+        // metadata.image; playlists only showed a letter placeholder because
+        // of that move.
+        val thumbVm = lockup.path(
+            "contentImage", "collectionThumbnailViewModel", "primaryThumbnail", "thumbnailViewModel",
+        ) ?: lockup.path("contentImage", "thumbnailViewModel")
+            ?: meta.path("image", "collectionThumbnailViewModel", "primaryThumbnail", "thumbnailViewModel")
+        val thumb = xthFirstUrl(thumbVm.path("image")) ?: xthFirstUrl(meta.path("image"))
         var count: String? = null
+        val countRe = Regex("\\b(videos?|episodes?)\\b", RegexOption.IGNORE_CASE)
+        thumbVm.findAll("thumbnailBadgeViewModel", maxDepth = 8, limit = 6).forEach { badge ->
+            val text = badge.pathStr("text") ?: return@forEach
+            if (countRe.containsMatchIn(text)) count = count ?: text
+        }
         val rows = meta.path("metadata", "contentMetadataViewModel", "metadataRows") as? JsonArray
         rows?.forEach { row ->
             (row.arr("metadataParts") ?: return@forEach).forEach { part ->
-                part.pathStr("text", "content")?.takeIf { VIEWS_RE.containsMatchIn(it) }?.let { count = count ?: it }
+                part.pathStr("text", "content")
+                    ?.takeIf { countRe.containsMatchIn(it) }
+                    ?.let { count = count ?: it }
             }
         }
         return PlaylistItem(playlistId, title, null, null, thumb, count)

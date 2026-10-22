@@ -13,8 +13,8 @@ android {
         applicationId = "com.indiotube.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 124
-        versionName = "0.1.24"
+        versionCode = 125
+        versionName = "0.1.25"
     }
 
     // The keystore and its passwords are never committed. Provide them in
