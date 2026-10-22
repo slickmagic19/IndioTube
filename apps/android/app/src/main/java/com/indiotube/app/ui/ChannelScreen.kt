@@ -9,19 +9,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -41,9 +39,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,6 +67,12 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
     var playlists by remember(channelId) { mutableStateOf<List<PlaylistItem>>(emptyList()) }
     var playlistsToken by remember(channelId) { mutableStateOf<String?>(null) }
     var loadingMorePlaylists by remember(channelId) { mutableStateOf(false) }
+    var playlistsLoaded by remember(channelId) { mutableStateOf(false) }
+    var playlistsLoading by remember(channelId) { mutableStateOf(false) }
+    var playlistsError by remember(channelId) { mutableStateOf<String?>(null) }
+    // Not every channel has a Playlists tab; the old hardcoded fallback asked
+    // YouTube for a tab that does not exist and showed whatever came back.
+    var hasPlaylistsTab by remember(channelId) { mutableStateOf(true) }
     var tabIdx by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
@@ -87,15 +92,29 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
             val p = container.innerTube.channelVideos(channelId, force = force)
             page = p
             error = null
-            if (playlists.isEmpty() || force) {
-                val pl = container.innerTube.channelPlaylistsPage(channelId, force = force)
-                playlists = pl.playlists
-                playlistsToken = pl.continuation
-                loadingMorePlaylists = false
-            }
         } catch (e: Exception) {
             if (page == null) error = e.message ?: "Couldn't load this channel"
         }
+    }
+
+    // The playlists are loaded when their tab is opened instead of together
+    // with the videos: most channels are visited for their videos, and the
+    // Playlists tab costs an extra InnerTube round trip.
+    suspend fun loadPlaylists(force: Boolean) {
+        playlistsLoading = true
+        playlistsError = null
+        try {
+            val pl = container.innerTube.channelPlaylistsPage(channelId, force = force)
+            playlists = pl.playlists
+            playlistsToken = pl.continuation
+            hasPlaylistsTab = pl.hasTab
+            playlistsLoaded = true
+        } catch (e: Exception) {
+            playlistsError = e.message ?: "Couldn't load this channel's playlists"
+            playlistsLoaded = true
+        }
+        loadingMorePlaylists = false
+        playlistsLoading = false
     }
 
     suspend fun loadLive(force: Boolean) {
@@ -125,10 +144,16 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
 
     LaunchedEffect(channelId, tabIdx) {
         if (tabIdx == 1 && livePage == null && !liveLoading) loadLive(false)
+        if (tabIdx == 2 && !playlistsLoaded && !playlistsLoading) loadPlaylists(false)
         if (tabIdx == 3 && about == null && !aboutLoading) loadAbout(false)
     }
 
-    LaunchedEffect(listState, tabIdx) {
+    // Playlists are laid out as a grid of cards, so the list holds rows of
+    // cards instead of one item per playlist.
+    val columns = playlistGridColumns(LocalConfiguration.current.screenWidthDp.toFloat())
+    val playlistRows = remember(playlists, columns) { playlistGridRows(playlists, columns) }
+
+    LaunchedEffect(listState, tabIdx, columns) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .collect { last ->
                 when (tabIdx) {
@@ -147,7 +172,14 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
 
                     2 -> {
                         val token = playlistsToken ?: return@collect
-                        if (last >= playlists.size - 3 && !loadingMorePlaylists && last >= 0) {
+                        // The channel header and the tab row are the first two
+                        // list items; the playlist rows follow them. The rows
+                        // are rebuilt from the live list so a page that was
+                        // just appended is measured, not the one from when
+                        // this effect started.
+                        val rows = playlistGridRows(playlists, columns)
+                        val lastRow = last - 2
+                        if (lastRow >= rows.size - 2 && rows.isNotEmpty() && !loadingMorePlaylists) {
                             loadingMorePlaylists = true
                             try {
                                 val more = container.innerTube.channelPlaylistsContinuation(token)
@@ -194,6 +226,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                     refreshing = true
                     load(true)
                     if (tabIdx == 1) loadLive(true)
+                    if (tabIdx == 2) loadPlaylists(true)
                     if (tabIdx == 3) loadAbout(true)
                     refreshing = false
                 }
@@ -328,22 +361,48 @@ fun ChannelScreen(container: Container, ui: UiRefs, channelId: String, name: Str
                         }
 
                         2 -> {
-                            if (playlists.isEmpty() && !loading) {
-                                item {
+                            when {
+                                !playlistsLoaded && playlistsLoading -> item(key = "pl-loading") {
+                                    LoadingBox(Modifier.height(120.dp))
+                                }
+
+                                playlistsError != null && playlists.isEmpty() -> item(key = "pl-error") {
+                                    ErrorState(
+                                        playlistsError!!,
+                                        onRetry = { scope.launch { loadPlaylists(true) } },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+
+                                !hasPlaylistsTab -> item(key = "pl-no-tab") {
+                                    EmptyState(
+                                        title = "No playlists",
+                                        subtitle = "This channel doesn't have a playlists section.",
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+
+                                playlists.isEmpty() -> item(key = "pl-empty") {
                                     EmptyState(
                                         title = "No playlists",
                                         subtitle = "This channel has no public playlists.",
                                         modifier = Modifier.fillMaxWidth(),
                                     )
                                 }
-                            }
-                            items(playlists, key = { "pl-" + it.playlistId }) { pl ->
-                                ChannelPlaylistRow(pl) {
-                                    ui.open(Screen.YtPlaylist(pl.playlistId, pl.title))
+
+                                else -> {
+                                    itemsIndexed(
+                                        playlistRows,
+                                        key = { _, row -> "pl-row-" + row.first().playlistId },
+                                    ) { _, row ->
+                                        ChannelPlaylistRow(row, columns) { pl ->
+                                            ui.open(Screen.YtPlaylist(pl.playlistId, pl.title))
+                                        }
+                                    }
+                                    if (loadingMorePlaylists) {
+                                        item(key = "pl-loading-more") { LoadingBox(Modifier.height(70.dp)) }
+                                    }
                                 }
-                            }
-                            if (loadingMorePlaylists) {
-                                item { LoadingBox(Modifier.height(70.dp)) }
                             }
                         }
 
@@ -394,57 +453,73 @@ private fun ChannelTab(label: String, selected: Boolean, modifier: Modifier, onC
     }
 }
 
+// YouTube shows a channel's playlists as a grid of cards: a 16:9 cover on
+// top, the title underneath and the video count in the corner of the cover.
+// The old layout put one small cover in a full-width row, which left the tab
+// looking broken next to the rest of the app.
+internal fun playlistGridColumns(widthDp: Float): Int = when {
+    widthDp < 320f -> 1
+    widthDp < 600f -> 2
+    widthDp < 840f -> 3
+    else -> 4
+}
+
+internal fun playlistGridRows(playlists: List<PlaylistItem>, columns: Int): List<List<PlaylistItem>> =
+    playlists.chunked(columns.coerceAtLeast(1))
+
+// Lets the layout test find a playlist cover.
+internal const val PlaylistCoverTag = "playlist-cover"
+
 @Composable
-private fun ChannelPlaylistRow(pl: PlaylistItem, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
+fun ChannelPlaylistRow(
+    row: List<PlaylistItem>,
+    columns: Int,
+    onOpen: (PlaylistItem) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp)) {
+        row.forEach { pl ->
+            ChannelPlaylistCard(pl, Modifier.weight(1f)) { onOpen(pl) }
+        }
+        // The last row is usually short; the spacers keep its cards the same
+        // width as the rows above instead of stretching them.
+        repeat((columns - row.size).coerceAtLeast(0)) {
+            Spacer(Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun ChannelPlaylistCard(pl: PlaylistItem, modifier: Modifier, onClick: () -> Unit) {
+    Column(
+        modifier
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 4.dp, vertical = 8.dp),
     ) {
-        Box {
-            Thumb(
-                model = pl.thumbnail,
-                corner = 8.dp,
-                modifier = Modifier.width(150.dp).height(84.dp),
-            )
-            Box(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp))
-                    .background(YtBadge)
-                    .padding(vertical = 3.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(12.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        pl.videoCountText ?: "Playlist",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                pl.title,
-                style = MaterialTheme.typography.titleSmall,
-                color = YtText,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "View full playlist",
-                style = MaterialTheme.typography.bodySmall,
-                color = YtMuted,
-            )
-        }
+        Thumb(
+            model = pl.thumbnail,
+            corner = 10.dp,
+            badge = pl.videoCountText,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .testTag(PlaylistCoverTag),
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            pl.title,
+            style = MaterialTheme.typography.titleSmall,
+            color = YtText,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Playlist",
+            style = MaterialTheme.typography.bodySmall,
+            color = YtMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

@@ -186,6 +186,10 @@ data class ChannelPage(
 data class ChannelPlaylistsPage(
     val playlists: List<PlaylistItem>,
     val continuation: String? = null,
+    // False when the channel has no Playlists tab at all. Asking YouTube for
+    // a tab that does not exist answers with a different tab, which used to
+    // show random lockups under the Playlists heading.
+    val hasTab: Boolean = true,
 )
 
 data class ChannelLink(
@@ -774,26 +778,43 @@ class InnerTube(private val http: OkHttpClient) {
         null
     }
 
-    // The Playlists tab's params are not stable across channels: YouTube can
-    // add a sort/filter row and change the encoded value. Read the params from
-    // the channel's own tab renderers instead of hardcoding one shape.
-    internal suspend fun channelTabParams(channelId: String, title: String): String? =
-        cached("channelTabs:$channelId", 30 * 60_000L) {
+    // A channel's tabs are listed in the channel root response. Their params
+    // are not stable across channels: YouTube adds sort/filter rows and
+    // re-encodes them, so they are read from the channel itself.
+    internal data class ChannelTab(val title: String, val params: String?)
+
+    internal suspend fun channelTabs(channelId: String, force: Boolean = false): List<ChannelTab> =
+        cached("channelTabs:$channelId", 30 * 60_000L, force) {
             val root = browse(channelId)
-            root.findAll("tabRenderer", maxDepth = 14, limit = 24)
-                .firstOrNull {
-                    it.pathStr("title") == title || it.pathStr("title", "content") == title
-                }
-                ?.pathStr("endpoint", "browseEndpoint", "params")
+            root.findAll("tabRenderer", maxDepth = 14, limit = 24).mapNotNull { tab ->
+                val title = tab.pathStr("title") ?: tab.pathStr("title", "content")
+                    ?: return@mapNotNull null
+                ChannelTab(title, tab.pathStr("endpoint", "browseEndpoint", "params"))
+            }
         }
+
+    internal suspend fun channelTabParams(channelId: String, title: String): String? =
+        channelTabs(channelId).firstOrNull { it.title == title }?.params
 
     suspend fun channelPlaylistsPage(channelId: String, force: Boolean = false): ChannelPlaylistsPage = try {
         cached("channelPlaylistsPage:$channelId", 30 * 60_000L, force) {
-            val params = channelTabParams(channelId, "Playlists") ?: CHANNEL_TAB_PLAYLISTS
-            parseChannelPlaylistsPage(browse(channelId, params))
+            playlistsPage(channelTabs(channelId, force)) { params -> browse(channelId, params) }
         }
     } catch (_: Exception) {
         ChannelPlaylistsPage(emptyList())
+    }
+
+    // Picks the Playlists tab out of a channel's tabs and loads it. A channel
+    // without that tab is reported as such: asking YouTube for a tab that
+    // does not exist answers with a different tab, which used to fill the
+    // Playlists tab with unrelated lockups.
+    internal suspend fun playlistsPage(
+        tabs: List<ChannelTab>,
+        load: suspend (String) -> JsonElement,
+    ): ChannelPlaylistsPage {
+        val tab = tabs.firstOrNull { it.title == "Playlists" }
+            ?: return ChannelPlaylistsPage(emptyList(), null, hasTab = false)
+        return parseChannelPlaylistsPage(load(tab.params ?: CHANNEL_TAB_PLAYLISTS))
     }
 
     suspend fun channelPlaylists(channelId: String, force: Boolean = false): List<PlaylistItem> =

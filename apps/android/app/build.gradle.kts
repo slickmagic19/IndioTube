@@ -13,8 +13,8 @@ android {
         applicationId = "com.indiotube.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 125
-        versionName = "0.1.25"
+        versionCode = 126
+        versionName = "0.1.26"
     }
 
     // The keystore and its passwords are never committed. Provide them in
@@ -66,6 +66,13 @@ android {
         resources.excludes += "META-INF/LICENSE*"
         resources.excludes += "META-INF/INDEX.LIST"
     }
+    testOptions {
+        unitTests {
+            // Robolectric needs the merged resources to inflate the Compose
+            // test host activity.
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -94,4 +101,8 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.13")
     testImplementation("androidx.media3:media3-test-utils:1.4.1")
     testImplementation("androidx.media3:media3-test-utils-robolectric:1.4.1")
+    // Renders the real composables in a Robolectric test so the layout of a
+    // screen can be asserted, not just its logic.
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

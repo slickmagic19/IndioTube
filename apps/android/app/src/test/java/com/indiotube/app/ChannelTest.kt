@@ -3,8 +3,10 @@ package com.indiotube.app
 import com.indiotube.app.data.InnerTube
 import com.indiotube.app.data.SyncJson
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -74,6 +76,34 @@ class ChannelTest {
         assertEquals("https://img.example/playlist.jpg", page.playlists.first().thumbnail)
         assertEquals("1 video", page.playlists.first().videoCountText)
         assertEquals("more-playlists", page.continuation)
+    }
+
+    @Test
+    fun aChannelWithoutThePlaylistsTabIsReportedAsMissing() = runBlocking {
+        val tabs = listOf(
+            InnerTube.ChannelTab("Home", null),
+            InnerTube.ChannelTab("Videos", "EgZ2aWRlb3PyBgQKAjoA"),
+        )
+
+        val page = innerTube.playlistsPage(tabs) { error("the playlists tab must not be loaded") }
+        assertFalse("the tab should be reported as missing", page.hasTab)
+        assertTrue("no playlists should be invented", page.playlists.isEmpty())
+    }
+
+    @Test
+    fun thePlaylistsTabParamsAreUsedWhenTheTabExists() = runBlocking {
+        val tabs = listOf(
+            InnerTube.ChannelTab("Home", null),
+            InnerTube.ChannelTab("Playlists", "pl-params"),
+        )
+        var used: String? = null
+
+        val page = innerTube.playlistsPage(tabs) { params ->
+            used = params
+            SyncJson.parseToJsonElement("{}")
+        }
+        assertEquals("pl-params", used)
+        assertTrue("the tab exists", page.hasTab)
     }
 
     @Test
