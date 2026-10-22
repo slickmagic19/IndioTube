@@ -1,8 +1,11 @@
 package com.indiotube.app
 
 import com.indiotube.app.data.InnerTube
+import com.indiotube.app.data.SearchDuration
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.SearchFilter
+import com.indiotube.app.data.SearchUploadDate
+import com.indiotube.app.data.SponsorBlock
 import com.indiotube.app.data.StreamResolver
 import com.indiotube.app.data.downloadSources
 import java.util.concurrent.TimeUnit
@@ -58,6 +61,35 @@ class LiveNetworkTest {
         val avatars = channels.mapNotNull { it.avatar }
         assertTrue("most channels should carry an avatar", avatars.size >= channels.size - 1)
         assertTrue("avatars must be absolute https URLs", avatars.all { it.startsWith("https://") })
+        assertTrue(
+            "the channel filter must not leak videos into the results",
+            results.entries.all { it is SearchEntry.Channel },
+        )
+    }
+
+    @Test
+    fun searchDurationFilterCapsResults() = runBlocking {
+        val results = innerTube.search("lofi", SearchFilter.VIDEOS, duration = SearchDuration.SHORT)
+        val videos = results.entries.filterIsInstance<SearchEntry.Video>().map { it.video }
+        assertTrue("short search should return videos", videos.isNotEmpty())
+        // YouTube omits duration badges on shorts and live radios, so only
+        // videos that do carry one can be checked - but any parsed duration
+        // over four minutes means the filter was ignored.
+        assertTrue(
+            "YouTube's short filter must not return known long videos",
+            videos.all { it.isLive || it.durationSec < 240 },
+        )
+    }
+
+    @Test
+    fun searchUploadDateFilterIsAccepted() = runBlocking {
+        val results = innerTube.search(
+            "lofi",
+            SearchFilter.VIDEOS,
+            uploadDate = SearchUploadDate.THIS_WEEK,
+        )
+        assertTrue("this-week search should return entries", results.entries.isNotEmpty())
+        assertTrue("expect at least one video", results.entries.any { it is SearchEntry.Video })
     }
 
     // "quickybaby" is age-gated for anonymous clients: the plain search comes
@@ -324,6 +356,20 @@ class LiveNetworkTest {
         val (autoCode, autoBody) = fetchText(auto!!.url)
         assertTrue("auto caption URL should respond (got $autoCode)", autoCode == 200)
         assertTrue("auto caption body should be WebVTT", autoBody.startsWith("WEBVTT"))
+    }
+
+    // LGA4ZFr-hfo is a Linus Tech Tips upload with crowd-sourced segments;
+    // the API needs no key. If it ever loses them, swap the id - the unit
+    // tests pin the parsing, this only checks the live wire contract.
+    @Test
+    fun sponsorBlockServesSegmentsForAVideoThatHasThem() = runBlocking {
+        val segments = SponsorBlock(http).segments("LGA4ZFr-hfo")
+        assertTrue("the sample video should have segments", segments.isNotEmpty())
+        assertTrue(
+            "segments must be ordered by start",
+            segments.zipWithNext().all { (a, b) -> a.startMs <= b.startMs },
+        )
+        assertTrue("segments need a positive span", segments.all { it.endMs > it.startMs })
     }
 
     private fun probeStream(url: String): Pair<Int, Long> {

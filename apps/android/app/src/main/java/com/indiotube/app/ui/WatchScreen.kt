@@ -48,6 +48,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
@@ -124,12 +125,14 @@ import com.indiotube.app.data.CaptionStyleSettings
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
+import com.indiotube.app.data.SponsorSegment
 import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
 import com.indiotube.app.data.forLanguage
 import com.indiotube.app.data.formatDuration
 import com.indiotube.app.data.recommendableVideos
+import com.indiotube.app.data.sponsorSegmentAt
 import com.indiotube.app.player.PlaybackController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -205,6 +208,8 @@ fun WatchScreen(
     var captionStyleSheet by remember { mutableStateOf(false) }
     var qualities by remember(video.videoId) { mutableStateOf<VideoQualities?>(null) }
     var qualityError by remember(video.videoId) { mutableStateOf(false) }
+    var sponsorSegments by remember(video.videoId) { mutableStateOf<List<SponsorSegment>>(emptyList()) }
+    var dismissedSponsors by remember(video.videoId) { mutableStateOf<Set<String>>(emptySet()) }
     val qualityHeight by player.qualityHeight.collectAsState()
     val captionLanguage by container.captions.language.collectAsState()
     val captionStyle by container.captions.style.collectAsState()
@@ -351,6 +356,16 @@ fun WatchScreen(
         qualityError = loaded == null
     }
 
+    // SponsorBlock segments for the playing video. They only drive the
+    // "Jump ahead" pill; nothing seeks on its own.
+    LaunchedEffect(video.videoId, membersOnly) {
+        if (membersOnly) {
+            sponsorSegments = emptyList()
+            return@LaunchedEffect
+        }
+        sponsorSegments = container.sponsorBlock.segments(video.videoId)
+    }
+
     // Opening the sheet is a free head start: warm the CDN connections for the
     // likely high-quality picks while the user is still looking at the list.
     LaunchedEffect(qualitySheet, qualities) {
@@ -482,6 +497,8 @@ fun WatchScreen(
     val sliderValue = scrub ?: (position.toFloat() / durationF).coerceIn(0f, 1f)
     val posShown = scrub?.times(duration)?.toLong() ?: position
     val qualityLabel = qualityHeight?.let { h -> qualities?.labelFor(h) ?: "${h}p" } ?: "Auto"
+    // The crowd-sourced segment the playhead is inside, unless already jumped.
+    val jumpSegment = sponsorSegmentAt(sponsorSegments, position, dismissedSponsors)
 
     Column(Modifier.fillMaxSize()) {
         // ---- player surface -------------------------------------------------
@@ -655,6 +672,47 @@ fun WatchScreen(
                         scrub = null
                     },
                 )
+            }
+
+            // SponsorBlock's "Jump ahead" pill: shown while the playhead sits
+            // inside a submitted segment, drawn over the video the way
+            // Premium surfaces its own jump-ahead suggestion.
+            jumpSegment?.let { segment ->
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(
+                            end = 12.dp,
+                            bottom = if (controlsVisible) 98.dp else 16.dp,
+                        ),
+                    contentAlignment = Alignment.BottomEnd,
+                ) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0xF2FFFFFF))
+                            .clickable {
+                                player.seekTo(segment.endMs)
+                                dismissedSponsors = dismissedSponsors + segment.UUID
+                            }
+                            .padding(start = 12.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.FastForward,
+                            contentDescription = null,
+                            tint = Color(0xFF0F0F0F),
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Jump ahead",
+                            color = Color(0xFF0F0F0F),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
             }
 
             if (membersOnly) {

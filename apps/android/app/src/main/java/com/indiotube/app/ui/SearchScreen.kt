@@ -22,9 +22,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
@@ -57,14 +62,20 @@ import com.indiotube.app.Container
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.InnerTube
 import com.indiotube.app.data.PlaylistItem
+import com.indiotube.app.data.SearchDuration
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.SearchFilter
+import com.indiotube.app.data.SearchSort
+import com.indiotube.app.data.SearchUploadDate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class SearchState {
     var query by mutableStateOf("")
-    var filter by mutableStateOf<String?>(null)
+    var filter by mutableStateOf<Int?>(null)
+    var sort by mutableStateOf<Int?>(null)
+    var uploadDate by mutableStateOf<Int?>(null)
+    var duration by mutableStateOf<Int?>(null)
     var entries by mutableStateOf<List<SearchEntry>?>(null)
     var continuation by mutableStateOf<String?>(null)
     var error by mutableStateOf<String?>(null)
@@ -77,6 +88,9 @@ class SearchState {
     fun reset() {
         query = ""
         filter = null
+        sort = null
+        uploadDate = null
+        duration = null
         entries = null
         continuation = null
         error = null
@@ -100,6 +114,9 @@ fun SearchScreen(container: Container, ui: UiRefs) {
 
     var query by rememberSaveable { mutableStateOf(ui.search.query) }
     var filter by rememberSaveable { mutableStateOf(ui.search.filter) }
+    var sort by rememberSaveable { mutableStateOf(ui.search.sort) }
+    var uploadDate by rememberSaveable { mutableStateOf(ui.search.uploadDate) }
+    var duration by rememberSaveable { mutableStateOf(ui.search.duration) }
     var entries by remember { mutableStateOf(ui.search.entries) }
     var continuation by remember { mutableStateOf(ui.search.continuation) }
     var loading by remember { mutableStateOf(false) }
@@ -108,9 +125,15 @@ fun SearchScreen(container: Container, ui: UiRefs) {
     var suggestMode by remember { mutableStateOf(ui.search.suggestMode) }
     var suggestions by remember { mutableStateOf(ui.search.suggestions) }
 
-    LaunchedEffect(query, filter, entries, continuation, error, suggestMode, suggestions) {
+    LaunchedEffect(
+        query, filter, sort, uploadDate, duration,
+        entries, continuation, error, suggestMode, suggestions,
+    ) {
         ui.search.query = query
         ui.search.filter = filter
+        ui.search.sort = sort
+        ui.search.uploadDate = uploadDate
+        ui.search.duration = duration
         ui.search.entries = entries
         ui.search.continuation = continuation
         ui.search.error = error
@@ -126,7 +149,13 @@ fun SearchScreen(container: Container, ui: UiRefs) {
             }
     }
 
-    fun runSearch(q: String = query, f: String? = filter) {
+    fun runSearch(
+        q: String = query,
+        f: Int? = filter,
+        s: Int? = sort,
+        u: Int? = uploadDate,
+        d: Int? = duration,
+    ) {
         val trimmed = q.trim()
         if (trimmed.isEmpty()) return
         suggestMode = false
@@ -140,7 +169,7 @@ fun SearchScreen(container: Container, ui: UiRefs) {
         continuation = null
         scope.launch {
             try {
-                val result = container.innerTube.search(trimmed, f)
+                val result = container.innerTube.search(trimmed, f, s, u, d)
                 entries = result.entries
                 continuation = result.continuation
                 container.library.noteSearch(trimmed)
@@ -261,6 +290,27 @@ fun SearchScreen(container: Container, ui: UiRefs) {
 
         // type filters
         if (query.isNotEmpty() && !inSuggestMode) {
+            val uploadLabel = when (uploadDate) {
+                SearchUploadDate.LAST_HOUR -> "Last hour"
+                SearchUploadDate.TODAY -> "Today"
+                SearchUploadDate.THIS_WEEK -> "This week"
+                SearchUploadDate.THIS_MONTH -> "This month"
+                SearchUploadDate.THIS_YEAR -> "This year"
+                else -> null
+            }
+            val durationLabel = when (duration) {
+                SearchDuration.SHORT -> "Under 4 min"
+                SearchDuration.MEDIUM -> "4-20 min"
+                SearchDuration.LONG -> "Over 20 min"
+                else -> null
+            }
+            val sortLabel = when (sort) {
+                SearchSort.UPLOAD_DATE -> "Upload date"
+                SearchSort.VIEW_COUNT -> "View count"
+                SearchSort.RATING -> "Rating"
+                else -> null
+            }
+
             LazyRow(
                 Modifier.padding(top = 2.dp, bottom = 4.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp),
@@ -277,6 +327,63 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                         if (query.isNotBlank()) runSearch(f = value)
                     }
                     Spacer(Modifier.width(8.dp))
+                }
+            }
+
+            LazyRow(
+                Modifier.padding(bottom = 6.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                item {
+                    SearchFilterPill(
+                        label = uploadLabel ?: "Upload date",
+                        active = uploadLabel != null,
+                        selected = uploadDate,
+                        options = listOf(
+                            "Any time" to null,
+                            "Last hour" to SearchUploadDate.LAST_HOUR,
+                            "Today" to SearchUploadDate.TODAY,
+                            "This week" to SearchUploadDate.THIS_WEEK,
+                            "This month" to SearchUploadDate.THIS_MONTH,
+                            "This year" to SearchUploadDate.THIS_YEAR,
+                        ),
+                    ) { value ->
+                        uploadDate = value
+                        runSearch(u = value)
+                    }
+                }
+                item {
+                    SearchFilterPill(
+                        label = durationLabel ?: "Duration",
+                        active = durationLabel != null,
+                        selected = duration,
+                        options = listOf(
+                            "Any length" to null,
+                            "Under 4 minutes" to SearchDuration.SHORT,
+                            "4-20 minutes" to SearchDuration.MEDIUM,
+                            "Over 20 minutes" to SearchDuration.LONG,
+                        ),
+                    ) { value ->
+                        duration = value
+                        runSearch(d = value)
+                    }
+                }
+                item {
+                    SearchFilterPill(
+                        label = sortLabel ?: "Sort by",
+                        active = sortLabel != null,
+                        selected = sort,
+                        options = listOf(
+                            "Relevance" to null,
+                            "Upload date" to SearchSort.UPLOAD_DATE,
+                            "View count" to SearchSort.VIEW_COUNT,
+                            "Rating" to SearchSort.RATING,
+                        ),
+                    ) { value ->
+                        sort = value
+                        runSearch(s = value)
+                    }
                 }
             }
         }
@@ -455,6 +562,58 @@ private fun PlaylistResultRow(playlist: PlaylistItem, ui: UiRefs) {
             if (!playlist.channelName.isNullOrBlank()) {
                 Spacer(Modifier.height(3.dp))
                 Text(playlist.channelName, style = MaterialTheme.typography.bodySmall, color = YtMuted, maxLines = 1)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchFilterPill(
+    label: String,
+    active: Boolean,
+    selected: Int?,
+    options: List<Pair<String, Int?>>,
+    onSelect: (Int?) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(if (active) YtChipSelected else YtChip)
+                .clickable { open = true }
+                .padding(start = 12.dp, end = 8.dp, top = 7.dp, bottom = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (active) Color(0xFF0F0F0F) else YtText,
+                maxLines = 1,
+            )
+            Icon(
+                Icons.Filled.ArrowDropDown,
+                contentDescription = null,
+                tint = if (active) Color(0xFF0F0F0F) else YtText,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            containerColor = YtSurface,
+        ) {
+            options.forEach { (name, value) ->
+                DropdownMenuItem(
+                    text = { Text(name, color = YtText) },
+                    onClick = {
+                        open = false
+                        onSelect(value)
+                    },
+                    trailingIcon = {
+                        if (value == selected) Icon(Icons.Filled.Check, null, tint = YtBlue)
+                    },
+                )
             }
         }
     }

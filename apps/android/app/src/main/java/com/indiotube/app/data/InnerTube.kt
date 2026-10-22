@@ -3,6 +3,7 @@ package com.indiotube.app.data
 import java.io.IOException
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
+import java.util.Base64
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -57,11 +58,73 @@ private fun JsonElement?.hasMembersBadge(maxDepth: Int = 12): Boolean {
     return styled || texts.filterNotNull().any { MEMBERS_RE.containsMatchIn(it) }
 }
 
-// search filter params (same values the web client uses)
+// Search filters are protobuf-encoded into the InnerTube `params` field:
+// sort is field 1 of the outer message; upload date, type and duration are
+// fields 1-3 of the nested filter message. Verified against the live WEB
+// client: type video EgIQAQ==, channels EgIQAg==, playlists EgIQAw==;
+// upload today + video EgQIAhAB; sort by upload date CAI=.
 object SearchFilter {
-    const val VIDEOS = "EgIQAQ%3D%3D"
-    const val CHANNELS = "EgIQAg%3D%3D"
-    const val PLAYLISTS = "EgIQAw%3D%3D"
+    const val VIDEOS = 1
+    const val CHANNELS = 2
+    const val PLAYLISTS = 3
+}
+
+object SearchSort {
+    const val RATING = 1
+    const val UPLOAD_DATE = 2
+    const val VIEW_COUNT = 3
+}
+
+object SearchUploadDate {
+    const val LAST_HOUR = 1
+    const val TODAY = 2
+    const val THIS_WEEK = 3
+    const val THIS_MONTH = 4
+    const val THIS_YEAR = 5
+}
+
+object SearchDuration {
+    const val SHORT = 1
+    const val LONG = 2
+    const val MEDIUM = 3
+}
+
+// Null means "no filter" for every argument. YouTube orders the duration
+// values short=1, long=2, medium=3 - not by length.
+fun buildSearchParams(
+    type: Int? = null,
+    sort: Int? = null,
+    uploadDate: Int? = null,
+    duration: Int? = null,
+): String? {
+    fun writeVarint(value: Int, out: MutableList<Byte>) {
+        var v = value
+        while (v >= 0x80) {
+            out.add(((v and 0x7F) or 0x80).toByte())
+            v = v ushr 7
+        }
+        out.add(v.toByte())
+    }
+
+    fun writeField(field: Int, value: Int, out: MutableList<Byte>) {
+        out.add((field shl 3).toByte())
+        writeVarint(value, out)
+    }
+
+    val filters = ArrayList<Byte>()
+    if (uploadDate != null) writeField(1, uploadDate, filters)
+    if (type != null) writeField(2, type, filters)
+    if (duration != null) writeField(3, duration, filters)
+
+    val message = ArrayList<Byte>()
+    if (sort != null) writeField(1, sort, message)
+    if (filters.isNotEmpty()) {
+        message.add(0x12) // nested filters: field 2, length-delimited
+        writeVarint(filters.size, message)
+        message.addAll(filters)
+    }
+    if (message.isEmpty()) return null
+    return Base64.getEncoder().encodeToString(message.toByteArray())
 }
 
 // Search params for "this week, videos only, sorted by view count" - the
@@ -299,7 +362,7 @@ class InnerTube(private val http: OkHttpClient) {
     // UI can show its retry state instead of crashing.
     suspend fun trending(force: Boolean = false): HomeFeed = try {
         cached("trending:$country", 10 * 60_000L, force) {
-            val results = search("", TRENDING_PARAMS)
+            val results = rawSearch("", TRENDING_PARAMS)
             HomeFeed(
                 emptyList(),
                 results.entries.filterIsInstance<SearchEntry.Video>().map { it.video }
@@ -412,20 +475,27 @@ class InnerTube(private val http: OkHttpClient) {
 
     // ---- search ------------------------------------------------------------------
 
-    suspend fun search(query: String, filter: String? = null): SearchResults {
-        // Empty queries are meaningful here: trending() is search with
-        // TRENDING_PARAMS and an empty term.
-        val results = rawSearch(query, filter)
+    suspend fun search(
+        query: String,
+        type: Int? = null,
+        sort: Int? = null,
+        uploadDate: Int? = null,
+        duration: Int? = null,
+    ): SearchResults {
+        // Empty queries are still accepted by the endpoint (the UI guards
+        // them); they return YouTube's default feed rather than an error.
+        val params = buildSearchParams(type, sort, uploadDate, duration)
+        val results = rawSearch(query, params)
         if (results.entries.isNotEmpty()) return results
-        return recoverEmptySearch(query.trim(), filter, results) ?: results
+        return recoverEmptySearch(query.trim(), type, duration, params, results) ?: results
     }
 
-    private suspend fun rawSearch(query: String, filter: String?): SearchResults {
+    private suspend fun rawSearch(query: String, params: String?): SearchResults {
         val c = config()
         val body = buildJsonObject {
             put("context", contextOf(c))
             put("query", query)
-            filter?.let { put("params", it) }
+            params?.let { put("params", it) }
         }
         val root = post("search", body)
         return withContext(Dispatchers.Default) { parseSearch(root) }
@@ -441,7 +511,9 @@ class InnerTube(private val http: OkHttpClient) {
     //     which is usually enough to get past the gate.
     private suspend fun recoverEmptySearch(
         query: String,
-        filter: String?,
+        type: Int?,
+        duration: Int?,
+        params: String?,
         empty: SearchResults,
     ): SearchResults? {
         if (query.isEmpty() || !empty.restricted) return null
@@ -453,18 +525,18 @@ class InnerTube(private val http: OkHttpClient) {
                     avatar = base.avatar?.takeIf { it.isNotBlank() } ?: suggested.avatar,
                 )
             }
-            val playlists = if (filter == SearchFilter.PLAYLISTS) {
+            val playlists = if (type == SearchFilter.PLAYLISTS) {
                 runCatching { channelPlaylists(suggested.channelId) }.getOrDefault(emptyList())
             } else {
                 emptyList()
             }
-            val entries = fallbackSearchEntries(resolved, page?.videos.orEmpty(), playlists, filter)
+            val entries = fallbackSearchEntries(resolved, page?.videos.orEmpty(), playlists, type, duration)
             if (entries.isNotEmpty()) return SearchResults(entries, null)
         }
         val retry = suggestions(query).firstOrNull {
             it.isNotBlank() && !it.equals(query, ignoreCase = true)
         } ?: return null
-        val retried = rawSearch(retry, filter)
+        val retried = rawSearch(retry, params)
         return retried.takeIf { it.entries.isNotEmpty() }
     }
 
@@ -552,13 +624,22 @@ class InnerTube(private val http: OkHttpClient) {
         channel: ChannelItem,
         videos: List<VideoItem>,
         playlists: List<PlaylistItem>,
-        filter: String?,
+        type: Int?,
+        duration: Int? = null,
     ): List<SearchEntry> {
+        // Upload date and sort cannot be honored with only a channel's recent
+        // uploads, but duration can: apply it locally.
+        val matching = when (duration) {
+            SearchDuration.SHORT -> videos.filter { it.durationSec in 1..239 }
+            SearchDuration.MEDIUM -> videos.filter { it.durationSec in 240..1200 }
+            SearchDuration.LONG -> videos.filter { it.durationSec > 1200 }
+            else -> videos
+        }
         val out = ArrayList<SearchEntry>()
-        when (filter) {
+        when (type) {
             SearchFilter.CHANNELS -> out.add(SearchEntry.Channel(channel))
             SearchFilter.VIDEOS -> {
-                videos.take(20).forEach { out.add(SearchEntry.Video(it)) }
+                matching.take(20).forEach { out.add(SearchEntry.Video(it)) }
                 if (out.isEmpty()) out.add(SearchEntry.Channel(channel))
             }
             SearchFilter.PLAYLISTS -> {
@@ -567,7 +648,7 @@ class InnerTube(private val http: OkHttpClient) {
             }
             else -> {
                 out.add(SearchEntry.Channel(channel))
-                videos.take(20).forEach { out.add(SearchEntry.Video(it)) }
+                matching.take(20).forEach { out.add(SearchEntry.Video(it)) }
             }
         }
         return out
