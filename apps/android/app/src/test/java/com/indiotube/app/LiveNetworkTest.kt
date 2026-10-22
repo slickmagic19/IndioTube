@@ -117,6 +117,17 @@ class LiveNetworkTest {
         assertNotNull("comments entry point expected", watch.commentsToken)
     }
 
+    // LGA4ZFr-hfo is a Linus Tech Tips upload with creator-defined chapters;
+    // the watch response ships them as player-bar markers, not description
+    // text, so this exercises the real parsing path behind the chapter rail.
+    @Test
+    fun watchPageParsesChapters() = runBlocking {
+        val watch = innerTube.watch("LGA4ZFr-hfo")
+        assertTrue("chapters expected", watch.chapters.size >= 2)
+        assertEquals("first chapter starts at 0:00", 0L, watch.chapters.first().startMs)
+        assertTrue("chapter titles expected", watch.chapters.all { it.title.isNotBlank() })
+    }
+
     @Test
     fun commentsParse() = runBlocking {
         val watch = innerTube.watch(videoId)

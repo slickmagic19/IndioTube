@@ -346,6 +346,70 @@ class PlaybackController(
         controller?.play()
     }
 
+    // ---- queue editing ------------------------------------------------------
+    // The queue is both the player's media item list and the row the user sees,
+    // so every edit updates _queue and mirrors it onto the controller. Returns
+    // false when nothing changed (duplicate, current item, bad index).
+
+    fun addToQueue(video: VideoItem, playNext: Boolean = false): Boolean {
+        val q = _queue.value
+        val c = controller
+        val current = c?.currentMediaItemIndex?.takeIf { it >= 0 } ?: _index.value.coerceAtLeast(0)
+        val result = QueueOps.add(q, current, video, playNext) ?: return false
+        if (q.isEmpty()) {
+            // Nothing is playing: adding the first item starts it, otherwise
+            // the mini player would appear over a silent queue.
+            setQueue(listOf(video), 0, play = true)
+            return true
+        }
+        _queue.value = result.queue
+        _index.value = result.index
+        if (c != null) {
+            val at = result.queue.indexOfFirst { it.videoId == video.videoId }
+            when {
+                c.mediaItemCount == q.size -> c.addMediaItem(at, toMediaItem(video))
+                c.mediaItemCount == 0 -> {
+                    c.setMediaItems(result.queue.map { toMediaItem(it) }, current, 0)
+                    c.prepare()
+                }
+            }
+        }
+        return true
+    }
+
+    fun removeFromQueue(index: Int): Boolean {
+        val q = _queue.value
+        val c = controller
+        val current = c?.currentMediaItemIndex?.takeIf { it >= 0 } ?: _index.value
+        // Keeping the row for the playing video avoids leaving the player on a
+        // removed (and therefore stopped) item; skip to another row instead.
+        val result = QueueOps.remove(q, current, index) ?: return false
+        _queue.value = result.queue
+        if (c != null && index < c.mediaItemCount) c.removeMediaItem(index)
+        _index.value = result.index
+        return true
+    }
+
+    fun moveInQueue(from: Int, to: Int): Boolean {
+        val q = _queue.value
+        val c = controller
+        val current = c?.currentMediaItemIndex?.takeIf { it >= 0 } ?: _index.value
+        val result = QueueOps.move(q, current, from, to) ?: return false
+        _queue.value = result.queue
+        if (c != null && from < c.mediaItemCount && to < c.mediaItemCount) {
+            c.moveMediaItem(from, to)
+        }
+        _index.value = result.index
+        return true
+    }
+
+    fun playQueueItem(index: Int) {
+        val c = controller ?: return
+        if (index !in _queue.value.indices) return
+        c.seekTo(index, 0)
+        if (!c.isPlaying) c.play()
+    }
+
     fun togglePlayPause() {
         val c = controller ?: return
         if (c.isPlaying) {

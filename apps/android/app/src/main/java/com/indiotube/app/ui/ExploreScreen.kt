@@ -237,6 +237,8 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
                                 onChannelClick = { ui.openChannelOf(video) },
                                 onFeedback = { ui.feedback(video, it) },
                                 onDownload = { ui.download(video) },
+                                onPlayNext = { ui.playNext(video) },
+                                onAddToQueue = { ui.addToQueue(video) },
                             )
                         }
                         if (loadingMore) {

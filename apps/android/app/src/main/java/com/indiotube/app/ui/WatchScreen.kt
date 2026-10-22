@@ -32,12 +32,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -45,28 +47,35 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.ThumbUp
+import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
+import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.PlaylistAdd
-import androidx.compose.material.icons.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.ThumbDown
 import androidx.compose.material.icons.outlined.ThumbUp
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -123,16 +132,20 @@ import com.indiotube.app.Container
 import com.indiotube.app.data.CaptionPrefs
 import com.indiotube.app.data.CaptionStyleSettings
 import com.indiotube.app.data.ChannelItem
+import com.indiotube.app.data.Chapter
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
 import com.indiotube.app.data.SponsorSegment
 import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
+import com.indiotube.app.data.chapterAt
+import com.indiotube.app.data.chapterTimestamp
 import com.indiotube.app.data.forLanguage
 import com.indiotube.app.data.formatDuration
 import com.indiotube.app.data.recommendableVideos
 import com.indiotube.app.data.sponsorSegmentAt
+import com.indiotube.app.data.stripChapterLines
 import com.indiotube.app.player.PlaybackController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -202,6 +215,7 @@ fun WatchScreen(
     var disliked by remember(video.videoId) { mutableStateOf(false) }
     var descExpanded by remember(video.videoId) { mutableStateOf(false) }
     var saveSheet by remember { mutableStateOf(false) }
+    var queueSheet by remember { mutableStateOf(false) }
     var qualitySheet by remember { mutableStateOf(false) }
     var downloadSheet by remember(video.videoId) { mutableStateOf(false) }
     var captionsSheet by remember { mutableStateOf(false) }
@@ -469,13 +483,21 @@ fun WatchScreen(
     val publishedText = watch?.publishedText ?: video.publishedText
     val likesText = watch?.likesText
     val description = watch?.description
+    val chapters = watch?.chapters.orEmpty()
     val subscribersText = watch?.subscribersText
+
+    // Chapter timestamps are repeated at the top of most descriptions; once
+    // they render as a chapter list they'd be duplicated as plain text.
+    val descriptionText = remember(description, chapters) {
+        stripChapterLines(description.orEmpty(), chapters)
+    }
 
     // Collapsed previews flatten the description's blank lines; otherwise a
     // description that starts with a title followed by an empty line renders
     // the overflow ellipsis alone on the second line, which looks broken.
-    val descriptionPreview = remember(description) {
-        description?.replace(Regex("\\s+"), " ")?.trim()
+    val descriptionPreview = remember(descriptionText, chapters) {
+        descriptionText.replace(Regex("\\s+"), " ").trim()
+            .ifBlank { chapters.take(2).joinToString(" · ") { it.title } }
     }
 
     val merged = video.copy(
@@ -499,6 +521,16 @@ fun WatchScreen(
     val qualityLabel = qualityHeight?.let { h -> qualities?.labelFor(h) ?: "${h}p" } ?: "Auto"
     // The crowd-sourced segment the playhead is inside, unless already jumped.
     val jumpSegment = sponsorSegmentAt(sponsorSegments, position, dismissedSponsors)
+    val chapterTitle = chapterAt(chapters, posShown)?.title
+    val chapterMarks = remember(chapters, duration) {
+        if (duration <= 0) {
+            emptyList()
+        } else {
+            chapters.map { it.startMs }
+                .filter { it in 1 until duration }
+                .map { (it.toFloat() / duration).coerceIn(0f, 1f) }
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         // ---- player surface -------------------------------------------------
@@ -653,6 +685,8 @@ fun WatchScreen(
                     scrubbing = scrub != null,
                     positionText = formatDuration(posShown / 1000),
                     durationText = formatDuration(duration / 1000),
+                    chapterTitle = chapterTitle,
+                    chapterMarks = chapterMarks,
                     qualityLabel = qualityLabel,
                     captionsAvailable = captionsAvailable,
                     captionsOn = subtitle != null,
@@ -665,6 +699,7 @@ fun WatchScreen(
                     onTogglePlay = { player.togglePlayPause() },
                     onSeekBy = { player.seekBy(it) },
                     onNext = { player.next() },
+                    onQueue = { queueSheet = true },
                     onToggleFullscreen = { toggleFullscreen() },
                     onScrub = { scrub = it },
                     onScrubFinished = {
@@ -882,7 +917,7 @@ fun WatchScreen(
                             }
                         }
                         ActionButton(
-                            icon = { Icon(Icons.Outlined.PlaylistAdd, null, tint = YtText, modifier = Modifier.size(24.dp)) },
+                            icon = { Icon(Icons.AutoMirrored.Outlined.PlaylistAdd, null, tint = YtText, modifier = Modifier.size(24.dp)) },
                             label = "Save",
                         ) {
                             saveSheet = true
@@ -928,7 +963,7 @@ fun WatchScreen(
                     }
                 }
 
-                if (!description.isNullOrBlank()) {
+                if (!description.isNullOrBlank() || chapters.isNotEmpty()) {
                     item {
                         Column(
                             Modifier
@@ -950,15 +985,49 @@ fun WatchScreen(
                                 )
                                 Spacer(Modifier.height(8.dp))
                             }
-                            Text(
-                                if (descExpanded) description else descriptionPreview.orEmpty(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = YtText,
-                                maxLines = if (descExpanded) Int.MAX_VALUE else 2,
-                                overflow = TextOverflow.Ellipsis,
-                                lineHeight = 19.sp,
-                            )
-                            Spacer(Modifier.height(6.dp))
+                            if (descExpanded && chapters.isNotEmpty()) {
+                                // Chapter rows seek straight to the marker. The
+                                // inner clickable consumes the tap so the card
+                                // doesn't collapse under the user's finger.
+                                chapters.forEach { chapter ->
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable { player.seekTo(chapter.startMs) }
+                                            .padding(horizontal = 2.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            chapterTimestamp(chapter.startMs),
+                                            color = YtBlue,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                        )
+                                        Spacer(Modifier.width(10.dp))
+                                        Text(
+                                            chapter.title,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = YtText,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    }
+                                }
+                                if (descriptionText.isNotBlank()) Spacer(Modifier.height(8.dp))
+                            }
+                            if (descriptionText.isNotBlank()) {
+                                Text(
+                                    if (descExpanded) descriptionText else descriptionPreview,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = YtText,
+                                    maxLines = if (descExpanded) Int.MAX_VALUE else 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    lineHeight = 19.sp,
+                                )
+                                Spacer(Modifier.height(6.dp))
+                            }
 
                             Text(
                                 if (descExpanded) "Show less" else "Show more",
@@ -1054,6 +1123,12 @@ fun WatchScreen(
                             v,
                             onClick = { ui.openWatch(v, related) },
                             onChannelClick = { ui.openChannelOf(v) },
+                            trailing = {
+                                VideoActionsMenu(
+                                    onPlayNext = { ui.playNext(v) },
+                                    onAddToQueue = { ui.addToQueue(v) },
+                                )
+                            },
                         )
                     }
                 }
@@ -1073,6 +1148,17 @@ fun WatchScreen(
             onAddToPlaylist = { id -> container.library.addToPlaylist(id, merged) },
             onCreatePlaylist = { name -> container.library.createPlaylist(name).id.also { container.library.addToPlaylist(it, merged) } },
             onDismiss = { saveSheet = false },
+        )
+    }
+
+    if (queueSheet) {
+        QueueSheet(
+            queue = queue,
+            currentIndex = queueIndex,
+            onSelect = { player.playQueueItem(it) },
+            onRemove = { player.removeFromQueue(it) },
+            onMove = { from, to -> player.moveInQueue(from, to) },
+            onDismiss = { queueSheet = false },
         )
     }
 
@@ -1213,6 +1299,8 @@ private fun PlayerChrome(
     scrubbing: Boolean,
     positionText: String,
     durationText: String,
+    chapterTitle: String?,
+    chapterMarks: List<Float>,
     qualityLabel: String,
     captionsAvailable: Boolean,
     captionsOn: Boolean,
@@ -1225,6 +1313,7 @@ private fun PlayerChrome(
     onTogglePlay: () -> Unit,
     onSeekBy: (Long) -> Unit,
     onNext: () -> Unit,
+    onQueue: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onScrub: (Float) -> Unit,
     onScrubFinished: () -> Unit,
@@ -1313,10 +1402,22 @@ private fun PlayerChrome(
                         }
                     }
                 }
+                if (!chapterTitle.isNullOrBlank()) {
+                    Text(
+                        chapterTitle,
+                        color = Color(0xE6FFFFFF),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 2.dp, bottom = 2.dp),
+                    )
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(positionText, color = Color.White, fontSize = 11.sp)
                     YtSeekBar(
                         value = sliderValue,
+                        markers = chapterMarks,
                         modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                         onScrub = onScrub,
                         onScrubFinished = onScrubFinished,
@@ -1340,7 +1441,14 @@ private fun PlayerChrome(
                     )
                     Spacer(Modifier.weight(1f))
                     if (queueSize > 1) {
-
+                        IconButton(onClick = onQueue, modifier = Modifier.size(40.dp)) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.QueueMusic,
+                                "Queue",
+                                tint = Color.White,
+                                modifier = Modifier.size(25.dp),
+                            )
+                        }
                         IconButton(onClick = onNext, modifier = Modifier.size(40.dp)) {
                             Icon(Icons.Filled.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(26.dp))
                         }
@@ -1400,6 +1508,7 @@ private fun PlayerChrome(
 private fun YtSeekBar(
     value: Float,
     modifier: Modifier = Modifier,
+    markers: List<Float> = emptyList(),
     onScrub: (Float) -> Unit,
     onScrubFinished: () -> Unit,
 ) {
@@ -1459,6 +1568,23 @@ private fun YtSeekBar(
                         size = Size(activeW, h),
                         cornerRadius = cr,
                     )
+                }
+                // Chapter boundaries: little white ticks on top of the track,
+                // just like YouTube's chaptered timelines.
+                if (markers.isNotEmpty()) {
+                    val markW = 1.5.dp.toPx()
+                    val markH = 10.dp.toPx()
+                    markers.forEach { fraction ->
+                        val x = size.width * fraction.coerceIn(0f, 1f)
+                        if (x > markW && x < size.width - markW) {
+                            drawRoundRect(
+                                color = Color(0xCCFFFFFF),
+                                topLeft = Offset(x - markW / 2f, cy - markH / 2f),
+                                size = Size(markW, markH),
+                                cornerRadius = CornerRadius(markW / 2f),
+                            )
+                        }
+                    }
                 }
                 if (dragging) {
                     val cx = activeW.coerceIn(9.dp.toPx(), (size.width - 9.dp.toPx()).coerceAtLeast(9.dp.toPx()))
@@ -1634,7 +1760,7 @@ private fun SaveSheet(
             playlists.forEach { (id, rest) ->
                 val (name, contains) = rest
                 SheetRow(
-                    icon = { Icon(Icons.Outlined.PlaylistPlay, null, tint = YtText, modifier = Modifier.size(22.dp)) },
+                    icon = { Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, null, tint = YtText, modifier = Modifier.size(22.dp)) },
                     label = name,
                     checked = contains,
                 ) {
@@ -2364,6 +2490,206 @@ private fun ChoiceRow(
         }
         if (selected) {
             Icon(Icons.Filled.Check, "Selected", tint = YtBlue, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun VideoActionsMenu(onPlayNext: () -> Unit, onAddToQueue: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }, modifier = Modifier.size(32.dp)) {
+            Icon(
+                Icons.Filled.MoreVert,
+                "More options",
+                tint = YtMuted,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Play next") },
+                leadingIcon = {
+                    Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, null, tint = YtText)
+                },
+                onClick = {
+                    open = false
+                    onPlayNext()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Add to queue") },
+                leadingIcon = {
+                    Icon(Icons.AutoMirrored.Filled.QueueMusic, null, tint = YtText)
+                },
+                onClick = {
+                    open = false
+                    onAddToQueue()
+                },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QueueSheet(
+    queue: List<VideoItem>,
+    currentIndex: Int,
+    onSelect: (Int) -> Unit,
+    onRemove: (Int) -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = YtSurface,
+        contentColor = YtText,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Queue",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = YtText,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    if (queue.size == 1) "1 video" else "${queue.size} videos",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtMuted,
+                )
+            }
+            HorizontalDivider(color = YtDivider)
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+                itemsIndexed(queue, key = { _, v -> v.videoId }) { index, video ->
+                    QueueRow(
+                        video = video,
+                        index = index,
+                        current = index == currentIndex,
+                        canMoveUp = index > 0,
+                        canMoveDown = index < queue.lastIndex,
+                        canRemove = index != currentIndex,
+                        onSelect = { onSelect(index) },
+                        onRemove = { onRemove(index) },
+                        onMoveUp = { onMove(index, index - 1) },
+                        onMoveDown = { onMove(index, index + 1) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueueRow(
+    video: VideoItem,
+    index: Int,
+    current: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    canRemove: Boolean,
+    onSelect: () -> Unit,
+    onRemove: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(if (current) YtSurfaceHi.copy(alpha = 0.5f) else Color.Transparent)
+            .clickable(onClick = onSelect)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(22.dp), contentAlignment = Alignment.Center) {
+            if (current) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    "Now playing",
+                    tint = YtRed,
+                    modifier = Modifier.size(16.dp),
+                )
+            } else {
+                Text("${index + 1}", color = YtMuted, fontSize = 12.sp)
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Thumb(
+            model = video.thumbnail,
+            badge = video.durationText,
+            live = video.isLive,
+            corner = 6.dp,
+            membersOnly = video.membersOnly,
+            progress = LocalWatchProgress.current(video),
+            modifier = Modifier.width(72.dp).height(40.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                video.title,
+                style = MaterialTheme.typography.titleSmall,
+                color = YtText,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 17.sp,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                if (current) "Now playing" else video.channelName.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (current) YtRed else YtMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box {
+            IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    Icons.Filled.MoreVert,
+                    "Queue options",
+                    tint = YtMuted,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Move up") },
+                    leadingIcon = { Icon(Icons.Filled.KeyboardArrowUp, null, tint = YtText) },
+                    enabled = canMoveUp,
+                    onClick = {
+                        menuOpen = false
+                        onMoveUp()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Move down") },
+                    leadingIcon = { Icon(Icons.Filled.KeyboardArrowDown, null, tint = YtText) },
+                    enabled = canMoveDown,
+                    onClick = {
+                        menuOpen = false
+                        onMoveDown()
+                    },
+                )
+                if (canRemove) {
+                    DropdownMenuItem(
+                        text = { Text("Remove from queue") },
+                        leadingIcon = { Icon(Icons.Filled.Close, null, tint = YtText) },
+                        onClick = {
+                            menuOpen = false
+                            onRemove()
+                        },
+                    )
+                }
+            }
         }
     }
 }

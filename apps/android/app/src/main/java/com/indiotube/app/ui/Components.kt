@@ -25,6 +25,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
+import androidx.compose.material.icons.automirrored.outlined.QueueMusic
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -202,6 +204,8 @@ fun VideoCard(
     onChannelClick: (() -> Unit)? = null,
     onFeedback: ((FeedFeedback) -> Unit)? = null,
     onDownload: (() -> Unit)? = null,
+    onPlayNext: (() -> Unit)? = null,
+    onAddToQueue: (() -> Unit)? = null,
     // Search result lists supply their own uniform gap between entries, so
     // they zero this out; every other list keeps the Home-card rhythm.
     bottomPadding: Dp = 14.dp,
@@ -250,8 +254,8 @@ fun VideoCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (onFeedback != null || onDownload != null) {
-                CardFeedbackMenu(video, onFeedback, onDownload)
+            if (onFeedback != null || onDownload != null || onPlayNext != null || onAddToQueue != null) {
+                CardFeedbackMenu(video, onFeedback, onDownload, onPlayNext, onAddToQueue)
             }
         }
     }
@@ -262,6 +266,8 @@ private fun CardFeedbackMenu(
     video: VideoItem,
     onFeedback: ((FeedFeedback) -> Unit)?,
     onDownload: (() -> Unit)?,
+    onPlayNext: (() -> Unit)? = null,
+    onAddToQueue: (() -> Unit)? = null,
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
@@ -277,6 +283,30 @@ private fun CardFeedbackMenu(
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (onPlayNext != null) {
+                DropdownMenuItem(
+                    text = { Text("Play next") },
+                    leadingIcon = {
+                        Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, null, tint = YtText)
+                    },
+                    onClick = {
+                        open = false
+                        onPlayNext()
+                    },
+                )
+            }
+            if (onAddToQueue != null) {
+                DropdownMenuItem(
+                    text = { Text("Add to queue") },
+                    leadingIcon = {
+                        Icon(Icons.AutoMirrored.Outlined.QueueMusic, null, tint = YtText)
+                    },
+                    onClick = {
+                        open = false
+                        onAddToQueue()
+                    },
+                )
+            }
             if (onDownload != null) {
                 DropdownMenuItem(
                     text = { Text("Download") },

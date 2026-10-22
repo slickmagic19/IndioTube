@@ -474,6 +474,8 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                                     onChannelClick = { ui.openChannelOf(e.video) },
                                     onFeedback = { ui.feedback(e.video, it) },
                                     onDownload = { ui.download(e.video) },
+                                    onPlayNext = { ui.playNext(e.video) },
+                                    onAddToQueue = { ui.addToQueue(e.video) },
                                     bottomPadding = 0.dp,
                                 )
                                 is SearchEntry.Channel -> ChannelResultRow(e.channel, ui)

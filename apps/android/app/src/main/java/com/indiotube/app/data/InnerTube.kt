@@ -191,6 +191,7 @@ data class WatchData(
     val commentsToken: String?,
     val commentsCountText: String?,
     val membersOnly: Boolean = false,
+    val chapters: List<Chapter> = emptyList(),
 )
 
 data class CommentsPage(val comments: List<CommentItem>, val continuation: String?)
@@ -988,7 +989,31 @@ class InnerTube(private val http: OkHttpClient) {
             commentsToken = commentsToken,
             commentsCountText = commentsCount,
             membersOnly = membersOnly,
+            chapters = parseChapters(root),
         )
+    }
+
+    // Chapters ship as markers on the player bar: multiMarkersPlayerBarRenderer
+    // > markersMap[] where the DESCRIPTION_CHAPTERS entry holds chapterRenderer
+    // items with a title and a millisecond start. The same markers drive the
+    // tick marks on the seek bar.
+    internal fun parseChapters(root: JsonElement): List<Chapter> {
+        val bar = root.findAll("multiMarkersPlayerBarRenderer", maxDepth = 12, limit = 4).firstOrNull()
+            ?: return emptyList()
+        val maps = bar.arr("markersMap") ?: return emptyList()
+        val withChapters = maps.filter { it.path("value", "chapters") is JsonArray }
+        val chosen = withChapters.firstOrNull { it.str("key") == "DESCRIPTION_CHAPTERS" }
+            ?: withChapters.firstOrNull()
+            ?: return emptyList()
+        val items = chosen.path("value", "chapters") as? JsonArray ?: return emptyList()
+        return items.mapNotNull { el ->
+            val ch = el.obj("chapterRenderer") ?: return@mapNotNull null
+            val title = (ch.path("title").runsText() ?: ch.pathStr("title", "simpleText"))
+                ?.trim()
+                .orEmpty()
+            val start = ch.pathStr("timeRangeStartMillis")?.toLongOrNull() ?: return@mapNotNull null
+            if (title.isEmpty() || start < 0) null else Chapter(title, start)
+        }.distinctBy { it.startMs }.sortedBy { it.startMs }
     }
 
     private fun extractLikes(scope: JsonElement): String? {

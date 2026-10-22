@@ -421,6 +421,8 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                         onChannelClick = { ui.openChannelOf(video) },
                                         onFeedback = { ui.feedback(video, it) },
                                         onDownload = { ui.download(video) },
+                                        onPlayNext = { ui.playNext(video) },
+                                        onAddToQueue = { ui.addToQueue(video) },
                                     )
                                 }
                                 if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
@@ -528,6 +530,8 @@ fun VideoFeedList(
                 onClick = { ui.openWatch(video, videos) },
                 onChannelClick = { ui.openChannelOf(video) },
                 onDownload = { ui.download(video) },
+                onPlayNext = { ui.playNext(video) },
+                onAddToQueue = { ui.addToQueue(video) },
             )
         }
         if (footer != null) {

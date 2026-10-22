@@ -182,6 +182,22 @@ class UiRefs(
 
     var topProvider: () -> Screen? = { null }
 
+    fun addToQueue(video: VideoItem) {
+        if (video.membersOnly) {
+            toast("Members-only videos can't be queued")
+            return
+        }
+        toast(if (player.addToQueue(video)) "Added to queue" else "Already in queue")
+    }
+
+    fun playNext(video: VideoItem) {
+        if (video.membersOnly) {
+            toast("Members-only videos can't be queued")
+            return
+        }
+        toast(if (player.addToQueue(video, playNext = true)) "Playing next" else "Already in queue")
+    }
+
     fun openWatch(video: VideoItem, context: List<VideoItem>? = null) {
         if (video.membersOnly) {
             toast("Members-only video — join the channel to watch")

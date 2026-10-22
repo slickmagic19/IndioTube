@@ -90,6 +90,7 @@ fun SubscriptionsScreen(container: Container, ui: UiRefs) {
 
     LaunchedEffect(account?.id) {
         videos = null
+        selectedChannel = null
         load(false)
     }
 
@@ -136,7 +137,11 @@ fun SubscriptionsScreen(container: Container, ui: UiRefs) {
                     },
                     modifier = Modifier.fillMaxSize(),
                 )
-                videos == null && loading -> LoadingBox(Modifier.fillMaxSize())
+                videos == null -> SkeletonFeed(
+                    Modifier.fillMaxSize(),
+                    showChips = true,
+                    scrollable = true,
+                )
                 else -> {
                     val list = videos.orEmpty()
                         .filter { selectedChannel == null || it.channelId == selectedChannel }
