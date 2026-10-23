@@ -6,8 +6,10 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,13 +29,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.automirrored.outlined.QueueMusic
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.ThumbUp
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -68,6 +74,8 @@ import com.indiotube.app.data.normalizeImageUrl
 // Provided once at the app root from the library history; the default returns
 // nothing, so previews and tests don't need a provider.
 val LocalWatchProgress = compositionLocalOf<(VideoItem) -> Float?> { { null } }
+
+val LocalWatched = compositionLocalOf<(String) -> Boolean> { { false } }
 
 @Composable
 fun Thumb(
@@ -206,6 +214,7 @@ fun VideoCard(
     onDownload: (() -> Unit)? = null,
     onPlayNext: (() -> Unit)? = null,
     onAddToQueue: (() -> Unit)? = null,
+    onToggleWatched: (() -> Unit)? = null,
     // Search result lists supply their own uniform gap between entries, so
     // they zero this out; every other list keeps the Home-card rhythm.
     bottomPadding: Dp = 14.dp,
@@ -254,8 +263,10 @@ fun VideoCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (onFeedback != null || onDownload != null || onPlayNext != null || onAddToQueue != null) {
-                CardFeedbackMenu(video, onFeedback, onDownload, onPlayNext, onAddToQueue)
+            if (onFeedback != null || onDownload != null || onPlayNext != null ||
+                onAddToQueue != null || onToggleWatched != null
+            ) {
+                CardFeedbackMenu(video, onFeedback, onDownload, onPlayNext, onAddToQueue, onToggleWatched)
             }
         }
     }
@@ -268,6 +279,7 @@ private fun CardFeedbackMenu(
     onDownload: (() -> Unit)?,
     onPlayNext: (() -> Unit)? = null,
     onAddToQueue: (() -> Unit)? = null,
+    onToggleWatched: (() -> Unit)? = null,
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
@@ -283,6 +295,23 @@ private fun CardFeedbackMenu(
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (onToggleWatched != null) {
+                val watched = LocalWatched.current(video.videoId)
+                DropdownMenuItem(
+                    text = { Text(if (watched) "Mark as unwatched" else "Mark as watched") },
+                    leadingIcon = {
+                        Icon(
+                            if (watched) Icons.Outlined.Refresh else Icons.Filled.CheckCircle,
+                            null,
+                            tint = YtText,
+                        )
+                    },
+                    onClick = {
+                        open = false
+                        onToggleWatched()
+                    },
+                )
+            }
             if (onPlayNext != null) {
                 DropdownMenuItem(
                     text = { Text("Play next") },
@@ -479,6 +508,7 @@ private fun SkeletonCard(bone: Color) {
 }
 
 // Compact horizontal row: small thumbnail on the left, text on the right.
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun VideoRow(
     video: VideoItem,
@@ -488,14 +518,37 @@ fun VideoRow(
     trailing: @Composable (() -> Unit)? = null,
     index: Int? = null,
     height: Dp = 94.dp,
+    // Long-press starts a selection; while it is active a checkbox replaces
+    // nothing and the trailing remove button moves out of the way.
+    onLongClick: (() -> Unit)? = null,
+    selecting: Boolean = false,
+    selected: Boolean = false,
 ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .then(
+                if (onLongClick != null) {
+                    Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                } else {
+                    Modifier.clickable(onClick = onClick)
+                },
+            )
             .padding(horizontal = 12.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (selecting) {
+            Checkbox(
+                checked = selected,
+                onCheckedChange = { onClick() },
+                colors = CheckboxDefaults.colors(
+                    checkedColor = YtRed,
+                    uncheckedColor = YtMuted,
+                    checkmarkColor = Color.White,
+                ),
+            )
+            Spacer(Modifier.width(2.dp))
+        }
         if (index != null) {
             Text(
                 "$index",

@@ -47,6 +47,12 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
     val liked by container.library.liked.collectAsState()
     var confirmClear by remember { mutableStateOf(false) }
 
+    // Batch selection: long-press a row (or tap Select) to start checking
+    // videos, then remove them all at once. YouTube's own library screens use
+    // the same pattern, and it beats removing twenty rows one Close at a time.
+    var selecting by remember(kind) { mutableStateOf(false) }
+    var selected by remember(kind) { mutableStateOf<Set<String>>(emptySet()) }
+
     val videos: List<VideoItem> = when (kind) {
         LibKind.HISTORY -> history.map { it.video }
         LibKind.WATCH_LATER -> watchLater
@@ -59,6 +65,23 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
         LibKind.LIKED -> "Liked videos"
     }
 
+    fun toggleSelection(videoId: String) {
+        selected = if (videoId in selected) selected - videoId else selected + videoId
+    }
+
+    fun removeSelected() {
+        val ids = selected
+        if (ids.isEmpty()) return
+        when (kind) {
+            LibKind.HISTORY -> container.library.removeFromHistory(ids)
+            LibKind.WATCH_LATER -> container.library.removeFromWatchLater(ids)
+            LibKind.LIKED -> container.library.removeLiked(ids)
+        }
+        ui.toast("${ids.size} removed")
+        selecting = false
+        selected = emptySet()
+    }
+
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier
@@ -66,20 +89,49 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
                 .padding(start = 4.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = { ui.back() }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = YtText)
+            IconButton(onClick = {
+                if (selecting) {
+                    selecting = false
+                    selected = emptySet()
+                } else {
+                    ui.back()
+                }
+            }) {
+                Icon(
+                    if (selecting) Icons.Filled.Close else Icons.AutoMirrored.Filled.ArrowBack,
+                    if (selecting) "Cancel selection" else "Back",
+                    tint = YtText,
+                )
             }
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, color = YtText, maxLines = 1)
                 Text(
-                    "${videos.size} videos",
+                    if (selecting) "${selected.size} selected" else title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = YtText,
+                    maxLines = 1,
+                )
+                Text(
+                    if (selecting) title else "${videos.size} videos",
                     style = MaterialTheme.typography.bodySmall,
                     color = YtMuted,
                 )
             }
-            if (videos.isNotEmpty()) {
-                IconButton(onClick = { ui.play(videos, 0) }) {
-                    Icon(Icons.Filled.PlayArrow, "Play all", tint = YtText)
+            if (selecting) {
+                IconButton(enabled = selected.isNotEmpty(), onClick = { removeSelected() }) {
+                    Icon(
+                        Icons.Outlined.Delete,
+                        "Remove selected",
+                        tint = if (selected.isEmpty()) YtMuted else YtRed,
+                    )
+                }
+            } else {
+                if (videos.isNotEmpty()) {
+                    IconButton(onClick = { ui.play(videos, 0) }) {
+                        Icon(Icons.Filled.PlayArrow, "Play all", tint = YtText)
+                    }
+                    TextButton(onClick = { selecting = true }) {
+                        Text("Select", color = YtText)
+                    }
                 }
             }
         }
@@ -169,11 +221,12 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(videos, key = { it.videoId }) { v ->
-                    VideoRow(
-                        v,
-                        onClick = { ui.openWatch(v, videos) },
-                        onChannelClick = { ui.openChannelOf(v) },
-                        trailing = {
+                    // The trailing remove button belongs to single-item mode;
+                    // while selecting, the checkbox carries the action.
+                    val trailing: (@Composable () -> Unit)? = if (selecting) {
+                        null
+                    } else {
+                        {
                             IconButton(onClick = {
                                 when (kind) {
                                     LibKind.HISTORY -> container.library.removeFromHistory(v.videoId)
@@ -189,7 +242,25 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
                             }) {
                                 Icon(Icons.Filled.Close, "Remove", tint = YtMuted, modifier = Modifier.size(18.dp))
                             }
+                        }
+                    }
+                    VideoRow(
+                        v,
+                        onClick = {
+                            if (selecting) toggleSelection(v.videoId) else ui.openWatch(v, videos)
                         },
+                        onChannelClick = if (selecting) null else {
+                            { ui.openChannelOf(v) }
+                        },
+                        onLongClick = {
+                            if (!selecting) {
+                                selecting = true
+                                selected = setOf(v.videoId)
+                            }
+                        },
+                        selecting = selecting,
+                        selected = v.videoId in selected,
+                        trailing = trailing,
                     )
                 }
                 item { Spacer(Modifier.height(10.dp)) }

@@ -47,11 +47,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indiotube.app.Container
+import com.indiotube.app.data.ContinueWatchingItem
 import com.indiotube.app.data.HomeFeed
 import com.indiotube.app.data.HomeSnapshot
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.SearchFilter
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.continueWatching
 import com.indiotube.app.data.recommendableVideos
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -65,6 +67,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     val account by container.accounts.active.collectAsState()
     val hiddenIds by container.library.notInterestedIds.collectAsState()
     val blockedChannels by container.library.blockedChannelIds.collectAsState()
+    val history by container.library.history.collectAsState()
 
     // Paint the last successful Home render immediately on app start / tab
     // return instead of showing a skeleton while the first request is in
@@ -347,6 +350,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                     val localLabel = LOCAL_FEED_CHIPS.getOrNull(localChip)
                     val categoryMode = usingLocal && localChip > 0
                     val categoryFeed = if (categoryMode) localFeeds[localLabel] else null
+                    val continueItems = remember(history) { continueWatching(history) }
                     val shown = when {
                         categoryMode -> categoryFeed?.videos.orEmpty()
                         usingLocal -> localVideos
@@ -402,6 +406,16 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                 }
                             }
                         }
+                        if (!categoryMode && continueItems.isNotEmpty()) {
+                            item(key = "continue-watching") {
+                                ContinueWatchingRail(
+                                    items = continueItems,
+                                    onClick = { item ->
+                                        ui.openWatch(item.video, continueItems.map { it.video })
+                                    },
+                                )
+                            }
+                        }
                         // A tag/feed switch is in flight: keep the chip row
                         // visible, replace the old list with skeletons.
                         val categoryLoading = categoryMode && categoryFeed == null
@@ -423,6 +437,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                         onDownload = { ui.download(video) },
                                         onPlayNext = { ui.playNext(video) },
                                         onAddToQueue = { ui.addToQueue(video) },
+                                        onToggleWatched = { ui.toggleWatched(video) },
                                     )
                                 }
                                 if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
@@ -468,6 +483,57 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                         }
                         item { Spacer(Modifier.height(8.dp)) }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun ContinueWatchingRail(
+    items: List<ContinueWatchingItem>,
+    onClick: (ContinueWatchingItem) -> Unit,
+) {
+    Column {
+        SectionHeader("Continue watching")
+        LazyRow(
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+        ) {
+            items(items, key = { it.video.videoId }) { item ->
+                Column(
+                    Modifier
+                        .width(226.dp)
+                        .clickable { onClick(item) }
+                        .padding(end = 10.dp, bottom = 8.dp),
+                ) {
+                    Thumb(
+                        model = item.video.thumbnail,
+                        badge = item.remainingText,
+                        live = item.video.isLive,
+                        membersOnly = item.video.membersOnly,
+                        progress = item.fraction,
+                        modifier = Modifier.fillMaxWidth().height(127.dp),
+                    )
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        item.video.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = YtText,
+                        maxLines = 2,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        lineHeight = 18.sp,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        listOfNotNull(
+                            item.video.channelName?.takeIf { it.isNotBlank() },
+                            item.remainingText,
+                        ).joinToString(" \u00b7 "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = YtMuted,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
                 }
             }
         }
@@ -532,6 +598,7 @@ fun VideoFeedList(
                 onDownload = { ui.download(video) },
                 onPlayNext = { ui.playNext(video) },
                 onAddToQueue = { ui.addToQueue(video) },
+                onToggleWatched = { ui.toggleWatched(video) },
             )
         }
         if (footer != null) {

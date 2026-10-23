@@ -71,6 +71,7 @@ import com.indiotube.app.Container
 import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.DlEvent
 import com.indiotube.app.data.DlStatus
+import com.indiotube.app.data.COMPLETED_FRACTION
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.watchedFraction
 import com.indiotube.app.player.PlaybackController
@@ -98,6 +99,7 @@ sealed interface Screen {
     data object Search : Screen
     data object Downloads : Screen
     data object ManageSubscriptions : Screen
+    data object Settings : Screen
 }
 
 // The back stack of the app. Screens are pushed on top of each other and the
@@ -184,6 +186,36 @@ class UiRefs(
                 toast("Channel removed from recommendations", "Undo") {
                     container.library.unblockChannel(channelId)
                 }
+            }
+        }
+    }
+
+    fun isWatched(videoId: String): Boolean = container.library.isWatched(videoId)
+
+    fun toggleWatched(video: VideoItem) {
+        val watched = container.library.isWatched(video.videoId)
+        if (watched) {
+            container.library.markUnwatched(video.videoId)
+            toast("Marked as unwatched", "Undo") {
+                container.library.markWatched(video)
+            }
+            return
+        }
+        if (container.library.historyPaused.value) {
+            toast("Watch history is paused. Resume it in Settings to mark videos")
+            return
+        }
+        val previous = container.library.history.value
+            .firstOrNull { it.video.videoId == video.videoId }
+        if (!container.library.markWatched(video)) {
+            toast("Watch history is paused")
+            return
+        }
+        toast("Marked as watched", "Undo") {
+            if (previous == null) {
+                container.library.removeFromHistory(video.videoId)
+            } else {
+                container.library.restoreHistory(previous)
             }
         }
     }
@@ -344,13 +376,37 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
     // Watched-progress lookup for every thumbnail in the app. Rebuilt whenever
     // history changes so the red bars appear/update without leaving a screen.
     val history by container.library.history.collectAsState()
+    val searches by container.library.searches.collectAsState()
+    val activeAccount by container.accounts.active.collectAsState()
     val watchProgress: (VideoItem) -> Float? = remember(history) {
         val fractions = history.associate { it.video.videoId to it.watchedFraction() }
         val lookup: (VideoItem) -> Float? = { video -> fractions[video.videoId] }
         lookup
     }
+    val watchedLookup: (String) -> Boolean = remember(history) {
+        val done = history
+            .filter { (it.watchedFraction() ?: 0f) >= COMPLETED_FRACTION }
+            .map { it.video.videoId }
+            .toSet()
+        val lookup: (String) -> Boolean = { id -> id in done }
+        lookup
+    }
 
-    CompositionLocalProvider(LocalWatchProgress provides watchProgress) {
+    LaunchedEffect(activeAccount?.id, searches) {
+        val recent = searches.sortedByDescending { it.ts }
+            .map { it.query }
+            .distinctBy { it.lowercase() }
+            .take(20)
+        if (ui.recentSearches.toList() != recent) {
+            ui.recentSearches.clear()
+            ui.recentSearches.addAll(recent)
+        }
+    }
+
+    CompositionLocalProvider(
+        LocalWatchProgress provides watchProgress,
+        LocalWatched provides watchedLookup,
+    ) {
     Box(Modifier.fillMaxSize().background(YtBg)) {
         Scaffold(
             containerColor = YtBg,
@@ -393,6 +449,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                         Screen.Search -> SearchScreen(container, ui)
                         Screen.Downloads -> DownloadsScreen(container, ui, player)
                         Screen.ManageSubscriptions -> ManageSubsScreen(container, ui)
+                        Screen.Settings -> SettingsScreen(container, ui)
                     }
                 }
             }

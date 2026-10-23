@@ -2,6 +2,8 @@ package com.indiotube.app
 
 import com.indiotube.app.data.SponsorBlock
 import com.indiotube.app.data.SponsorSegment
+import com.indiotube.app.data.autoSkipTarget
+import com.indiotube.app.data.sponsorLabel
 import com.indiotube.app.data.sponsorSegmentAt
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
@@ -93,5 +95,25 @@ class SponsorBlockTest {
     @Test
     fun emptyBodyParsesToNothing() {
         assertTrue(sponsorBlock.parseSponsorSegments("[]").isEmpty())
+    }
+
+    @Test
+    fun autoSkipIsOptInAndNeverFiresTwice() {
+        val intro = SponsorSegment("intro", listOf(10.0, 20.0), "intro")
+        val sponsor = SponsorSegment("sponsor", listOf(60.0, 70.0), "sponsor")
+        val segments = listOf(intro, sponsor)
+
+        assertNull("off by default", autoSkipTarget(segments, 15_000L, emptySet(), autoSkip = false))
+        assertSame(intro, autoSkipTarget(segments, 15_000L, emptySet(), autoSkip = true))
+        assertNull("already skipped", autoSkipTarget(segments, 15_000L, setOf("intro"), autoSkip = true))
+        assertNull("outside any segment", autoSkipTarget(segments, 25_000L, emptySet(), autoSkip = true))
+        assertSame(sponsor, autoSkipTarget(segments, 65_000L, setOf("intro"), autoSkip = true))
+    }
+
+    @Test
+    fun categoryLabelsMatchTheSettingsCopy() {
+        assertEquals("Sponsor", sponsorLabel("sponsor"))
+        assertEquals("Non-music section", sponsorLabel("music_offtopic"))
+        assertEquals("Custom", sponsorLabel("custom"))
     }
 }

@@ -23,6 +23,12 @@ class LibraryStore(
     }
 
     private val mutex = Mutex()
+    // Writes are launched on Dispatchers.IO and the mutex does not promise
+    // FIFO order, so a slow older snapshot could overwrite a newer one and
+    // silently roll the library back. Each persist takes a sequence number;
+    // a write older than the newest attempted one is dropped.
+    private val writeSeq = java.util.concurrent.atomic.AtomicLong(0)
+    @Volatile private var lastAttemptedSeq = 0L
     @Volatile private var currentAccountId: String = ""
     private val accountFile = { id: String -> File(dir, "library_$id.json") }
 
@@ -118,8 +124,10 @@ class LibraryStore(
             blockedChannelIds = _blockedChannelIds.value.toList(),
         )
         val target = accountFile(currentAccountId)
+        val seq = writeSeq.incrementAndGet()
         scope.launch(Dispatchers.IO) {
             mutex.withLock {
+                if (seq <= lastAttemptedSeq) return@withLock
                 try {
                     val tmp = File(target.parentFile, target.name + ".tmp")
                     tmp.writeText(SyncJson.encodeToString(LibraryFile.serializer(), data))
@@ -127,7 +135,11 @@ class LibraryStore(
                         target.writeText(tmp.readText())
                         tmp.delete()
                     }
-                } catch (_: Exception) { /* next mutation retries */ }
+                } catch (_: Exception) {
+                    /* next mutation retries */
+                } finally {
+                    lastAttemptedSeq = maxOf(lastAttemptedSeq, seq)
+                }
             }
         }
     }
@@ -179,6 +191,50 @@ class LibraryStore(
     fun resumePosition(videoId: String): Long =
         _history.value.firstOrNull { it.video.videoId == videoId }?.positionMs ?: 0
 
+    fun isWatched(videoId: String): Boolean =
+        (_history.value.firstOrNull { it.video.videoId == videoId }?.watchedFraction() ?: 0f) >=
+            COMPLETED_FRACTION
+
+    // Explicit "Mark as watched" from a card or the watch page. Returns false
+    // when history is paused, so the caller can explain why nothing changed.
+    fun markWatched(video: VideoItem): Boolean {
+        if (_historyPaused.value) return false
+        val existing = _history.value.firstOrNull { it.video.videoId == video.videoId }
+        val knownDuration = existing?.durationMs?.takeIf { it > 0 }
+            ?: (video.durationSec * 1000L).takeIf { it > 0 }
+            ?: 1_000L
+        val entry = HistoryEntry(
+            video = video,
+            ts = System.currentTimeMillis(),
+            positionMs = knownDuration,
+            durationMs = knownDuration,
+        )
+        _history.value = listOf(entry) + _history.value.filterNot { it.video.videoId == video.videoId }
+        _history.value = _history.value.take(HISTORY_CAP)
+        persist()
+        return true
+    }
+
+    fun markUnwatched(videoId: String) {
+        val idx = _history.value.indexOfFirst { it.video.videoId == videoId }
+        if (idx < 0) return
+        val updated = _history.value[idx].copy(
+            positionMs = 0,
+            ts = System.currentTimeMillis(),
+        )
+        _history.value = listOf(updated) + _history.value.filterNot { it.video.videoId == videoId }
+        persist()
+    }
+
+    // Puts a saved history entry back exactly as it was, used by the Undo
+    // action so marking a half-watched video as watched really is reversible.
+    fun restoreHistory(entry: HistoryEntry) {
+        _history.value = (listOf(entry) + _history.value.filterNot {
+            it.video.videoId == entry.video.videoId
+        }).take(HISTORY_CAP)
+        persist()
+    }
+
     // How much of a video was watched (0..1), from history; null when it has
     // no measurable progress. Used for the red progress line on cards.
     fun watchedFraction(videoId: String): Float? = _history.value
@@ -194,6 +250,13 @@ class LibraryStore(
 
     fun removeFromHistory(videoId: String) {
         _history.value = _history.value.filterNot { it.video.videoId == videoId }
+        persist()
+    }
+
+    fun removeFromHistory(videoIds: Collection<String>) {
+        if (videoIds.isEmpty()) return
+        val ids = videoIds.toSet()
+        _history.value = _history.value.filterNot { it.video.videoId in ids }
         persist()
     }
 
@@ -252,6 +315,11 @@ class LibraryStore(
         persist()
     }
 
+    fun removeSearch(query: String) {
+        _searches.value = _searches.value.filterNot { it.query.equals(query, true) }
+        persist()
+    }
+
     fun clearSearches() {
         _searches.value = emptyList()
         persist()
@@ -273,6 +341,13 @@ class LibraryStore(
         return !present
     }
 
+    fun removeFromWatchLater(videoIds: Collection<String>) {
+        if (videoIds.isEmpty()) return
+        val ids = videoIds.toSet()
+        _watchLater.value = _watchLater.value.filterNot { it.videoId in ids }
+        persist()
+    }
+
     // ---- liked ------------------------------------------------------------------
 
     fun isLiked(videoId: String): Boolean = _liked.value.any { it.videoId == videoId }
@@ -287,6 +362,13 @@ class LibraryStore(
         }
         persist()
         return !present
+    }
+
+    fun removeLiked(videoIds: Collection<String>) {
+        if (videoIds.isEmpty()) return
+        val ids = videoIds.toSet()
+        _liked.value = _liked.value.filterNot { it.videoId in ids }
+        persist()
     }
 
     // ---- playlists -------------------------------------------------------------
@@ -324,6 +406,15 @@ class LibraryStore(
     fun removeFromPlaylist(playlistId: String, videoId: String) {
         _playlists.value = _playlists.value.map { pl ->
             if (pl.id != playlistId) pl else pl.copy(videos = pl.videos.filterNot { it.videoId == videoId })
+        }
+        persist()
+    }
+
+    fun removeFromPlaylist(playlistId: String, videoIds: Collection<String>) {
+        if (videoIds.isEmpty()) return
+        val ids = videoIds.toSet()
+        _playlists.value = _playlists.value.map { pl ->
+            if (pl.id != playlistId) pl else pl.copy(videos = pl.videos.filterNot { it.videoId in ids })
         }
         persist()
     }

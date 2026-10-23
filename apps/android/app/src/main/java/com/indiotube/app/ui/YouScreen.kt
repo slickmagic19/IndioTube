@@ -18,6 +18,7 @@ import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Subscriptions
 import androidx.compose.material.icons.outlined.ThumbUp
 import androidx.compose.material3.AlertDialog
@@ -152,6 +153,11 @@ fun YouScreen(container: Container, ui: UiRefs) {
             }
 
             item { SectionHeader("Account") }
+            item {
+                YouRow(Icons.Outlined.Settings, "Settings", null) {
+                    ui.open(Screen.Settings)
+                }
+            }
             item {
                 YouRow(Icons.Outlined.Subscriptions, "Manage subscriptions", null) {
                     ui.open(Screen.ManageSubscriptions)

@@ -50,6 +50,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.FastForward
@@ -70,6 +71,7 @@ import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.ThumbDown
@@ -138,6 +140,7 @@ import com.indiotube.app.data.ChannelItem
 import com.indiotube.app.data.Chapter
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
+import com.indiotube.app.data.LiveChatMessage
 import com.indiotube.app.data.SponsorSegment
 import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
@@ -146,7 +149,10 @@ import com.indiotube.app.data.chapterAt
 import com.indiotube.app.data.chapterTimestamp
 import com.indiotube.app.data.forLanguage
 import com.indiotube.app.data.formatDuration
+import com.indiotube.app.data.autoSkipTarget
+import com.indiotube.app.data.isAtLiveEdge
 import com.indiotube.app.data.recommendableVideos
+import com.indiotube.app.data.sponsorLabel
 import com.indiotube.app.data.sponsorSegmentAt
 import com.indiotube.app.data.stripChapterLines
 import com.indiotube.app.player.PlaybackController
@@ -192,6 +198,10 @@ fun WatchScreen(
     val playlists by container.library.playlists.collectAsState()
     val tasks by container.downloads.tasks.collectAsState()
     val dlItems by container.downloads.items.collectAsState()
+    val history by container.library.history.collectAsState()
+    val videoWatched = remember(history, video.videoId) {
+        container.library.isWatched(video.videoId)
+    }
 
     // These are keyed to the playing video so an autoplay/Next transition
     // swaps them in the same recomposition as the title, instead of leaving
@@ -201,6 +211,16 @@ fun WatchScreen(
     var commentsToken by remember(video.videoId) { mutableStateOf<String?>(null) }
     var loadingComments by remember(video.videoId) { mutableStateOf(false) }
     var loadingMoreComments by remember(video.videoId) { mutableStateOf(false) }
+
+    // Live chat (or its replay). The continuation token is kept as state so
+    // reopening the panel resumes where the conversation left off instead of
+    // replaying the first page.
+    var chatMessages by remember(video.videoId) {
+        mutableStateOf<List<LiveChatMessage>>(emptyList())
+    }
+    var chatToken by remember(video.videoId) { mutableStateOf<String?>(null) }
+    var chatExpanded by remember(video.videoId) { mutableStateOf(true) }
+    var chatConnecting by remember(video.videoId) { mutableStateOf(false) }
 
     // Loaded reply threads, keyed by the parent comment id.
 
@@ -230,6 +250,9 @@ fun WatchScreen(
     var qualityError by remember(video.videoId) { mutableStateOf(false) }
     var sponsorSegments by remember(video.videoId) { mutableStateOf<List<SponsorSegment>>(emptyList()) }
     var dismissedSponsors by remember(video.videoId) { mutableStateOf<Set<String>>(emptySet()) }
+    var autoSkippedSegments by remember(video.videoId) { mutableStateOf<Set<String>>(emptySet()) }
+    var skipNotice by remember(video.videoId) { mutableStateOf<String?>(null) }
+    val sponsorSettings by container.sponsorBlockPrefs.settings.collectAsState()
     val qualityHeight by player.qualityHeight.collectAsState()
     val defaultQuality by player.defaultQualityHeight.collectAsState()
     val captionLanguage by container.captions.language.collectAsState()
@@ -377,14 +400,51 @@ fun WatchScreen(
         qualityError = loaded == null
     }
 
-    // SponsorBlock segments for the playing video. They only drive the
-    // "Jump ahead" pill; nothing seeks on its own.
-    LaunchedEffect(video.videoId, membersOnly) {
+    // SponsorBlock segments for the playing video, filtered to the categories
+    // chosen in Settings. Auto-skip is off by default; with it off these only
+    // drive the manual "Jump ahead" pill.
+    LaunchedEffect(video.videoId, membersOnly, sponsorSettings.categories) {
         if (membersOnly) {
             sponsorSegments = emptyList()
             return@LaunchedEffect
         }
-        sponsorSegments = container.sponsorBlock.segments(video.videoId)
+        sponsorSegments = container.sponsorBlock.segments(
+            video.videoId,
+            sponsorSettings.categories,
+        )
+    }
+
+    // A skip notice self-dismisses; keeping the timer out of the skip effect
+    // means the next skip restarts it instead of being swallowed.
+    LaunchedEffect(skipNotice) {
+        if (skipNotice != null) {
+            delay(2200)
+            skipNotice = null
+        }
+    }
+
+    // Live chat polling. Stops as soon as the stream has no next continuation
+    // and pauses while the panel is collapsed, so a background stream does not
+    // keep polling YouTube. Replay chats tick slower: they are not live.
+    LaunchedEffect(video.videoId, watch?.liveChat?.token, chatExpanded) {
+        val info = watch?.liveChat ?: return@LaunchedEffect
+        if (!chatExpanded) return@LaunchedEffect
+        var token = chatToken ?: info.token
+        chatConnecting = chatMessages.isEmpty()
+        while (true) {
+            val page = container.innerTube.liveChat(token, info.replay)
+            if (page.messages.isNotEmpty()) {
+                chatMessages = (chatMessages + page.messages)
+                    .distinctBy { it.id }
+                    .takeLast(200)
+                chatConnecting = false
+            }
+            val next = page.continuation ?: break
+            token = next
+            chatToken = next
+            delay(if (info.replay) 7_000 else 4_000)
+        }
+        chatConnecting = false
     }
 
     // Opening the sheet is a free head start: warm the CDN connections for the
@@ -525,8 +585,37 @@ fun WatchScreen(
     val durationF = duration.coerceAtLeast(1L).toFloat()
     val sliderValue = scrub ?: (position.toFloat() / durationF).coerceIn(0f, 1f)
     val posShown = scrub?.times(duration)?.toLong() ?: position
+
+    // DVR behaviour for live streams: the seek bar covers the rewind window,
+    // the left clock counts backwards from the live edge, and a GO LIVE pill
+    // appears once the viewer has paused/rewound. A stream at the edge (or one
+    // whose window is still empty) simply reads LIVE.
+    val isLiveStream = video.isLive || watch?.isLive == true
+    val atLiveEdge = !isLiveStream || isAtLiveEdge(posShown, duration)
+    val behindByMs = (duration - posShown).coerceAtLeast(0L)
+    val positionLabel = if (isLiveStream && !atLiveEdge) {
+        "-" + formatDuration(behindByMs / 1000)
+    } else {
+        formatDuration(posShown / 1000)
+    }
     val qualityLabel = qualityHeight?.let { h -> qualities?.labelFor(h) ?: "${h}p" } ?: "Auto"
     // The crowd-sourced segment the playhead is inside, unless already jumped.
+    // With auto-skip on, a segment under the playhead is skipped instead of
+    // being offered as a pill. The set keeps each segment to one skip so
+    // scrolling back does not loop.
+    val autoSkip = autoSkipTarget(
+        sponsorSegments,
+        position,
+        autoSkippedSegments,
+        sponsorSettings.autoSkip && playing && scrub == null,
+    )
+    LaunchedEffect(autoSkip?.UUID) {
+        val target = autoSkip ?: return@LaunchedEffect
+        autoSkippedSegments = autoSkippedSegments + target.UUID
+        dismissedSponsors = dismissedSponsors + target.UUID
+        player.seekTo(target.endMs)
+        skipNotice = "Skipped ${sponsorLabel(target.category)}"
+    }
     val jumpSegment = sponsorSegmentAt(sponsorSegments, position, dismissedSponsors)
     val chapterTitle = chapterAt(chapters, posShown)?.title
     val chapterMarks = remember(chapters, duration) {
@@ -690,8 +779,11 @@ fun WatchScreen(
                     queueSize = queue.size,
                     sliderValue = sliderValue,
                     scrubbing = scrub != null,
-                    positionText = formatDuration(posShown / 1000),
+                    positionText = positionLabel,
                     durationText = formatDuration(duration / 1000),
+                    live = isLiveStream,
+                    atLiveEdge = atLiveEdge,
+                    onGoLive = { if (duration > 0) player.seekTo(duration) },
                     chapterTitle = chapterTitle,
                     chapterMarks = chapterMarks,
                     qualityLabel = qualityLabel,
@@ -758,6 +850,42 @@ fun WatchScreen(
                 }
             }
 
+            // Toast-like confirmation for an automatic skip, bottom-left so
+            // it never covers the manual pill on the right.
+            skipNotice?.let { notice ->
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(
+                            start = 12.dp,
+                            bottom = if (controlsVisible) 98.dp else 16.dp,
+                        ),
+                    contentAlignment = Alignment.BottomStart,
+                ) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0xE6212121))
+                            .padding(start = 10.dp, end = 14.dp, top = 7.dp, bottom = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.FastForward,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            notice,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+
             if (membersOnly) {
                 Box(
                     Modifier
@@ -810,7 +938,13 @@ fun WatchScreen(
                             publishedText?.takeIf { it.isNotBlank() },
                         ).joinToString(" • ")
                         if (meta.isNotBlank()) {
-                            Text(meta, style = MaterialTheme.typography.bodySmall, color = YtMuted)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (isLiveStream) {
+                                    LiveBadge()
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Text(meta, style = MaterialTheme.typography.bodySmall, color = YtMuted)
+                            }
                         }
                     }
                 }
@@ -930,6 +1064,56 @@ fun WatchScreen(
                         ) {
                             saveSheet = true
                         }
+                        // Overflow menu, like the app's "..." next to Save: the
+                        // remainder actions live here instead of stretching the
+                        // row any further.
+                        Box {
+                            var moreOpen by remember { mutableStateOf(false) }
+                            ActionButton(
+                                icon = { Icon(Icons.Filled.MoreVert, null, tint = YtText, modifier = Modifier.size(24.dp)) },
+                                label = "More",
+                            ) {
+                                moreOpen = true
+                            }
+                            DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(if (videoWatched) "Mark as unwatched" else "Mark as watched")
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (videoWatched) Icons.Outlined.Refresh else Icons.Filled.CheckCircle,
+                                            null,
+                                            tint = YtText,
+                                        )
+                                    },
+                                    onClick = {
+                                        moreOpen = false
+                                        ui.toggleWatched(merged)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Play next") },
+                                    leadingIcon = {
+                                        Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, null, tint = YtText)
+                                    },
+                                    onClick = {
+                                        moreOpen = false
+                                        ui.playNext(merged)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Add to queue") },
+                                    leadingIcon = {
+                                        Icon(Icons.AutoMirrored.Filled.QueueMusic, null, tint = YtText)
+                                    },
+                                    onClick = {
+                                        moreOpen = false
+                                        ui.addToQueue(merged)
+                                    },
+                                )
+                            }
+                        }
                         Spacer(Modifier.width(6.dp))
                     }
                 }
@@ -1047,6 +1231,21 @@ fun WatchScreen(
                     }
                 }
 
+                // ---- live chat -------------------------------------------------
+                val chatInfo = watch?.liveChat
+                if (chatInfo != null) {
+                    item {
+                        LiveChatSection(
+                            messages = chatMessages,
+                            replay = chatInfo.replay,
+                            viewersText = if (isLiveStream) viewsText else null,
+                            expanded = chatExpanded,
+                            loading = chatConnecting,
+                            onToggle = { chatExpanded = !chatExpanded },
+                        )
+                    }
+                }
+
                 // ---- comments -------------------------------------------------
                 item {
                     SectionHeader(
@@ -1054,7 +1253,20 @@ fun WatchScreen(
                     )
                 }
                 if (loadingComments && comments.isEmpty()) {
-                    item { LoadingBox(Modifier.height(80.dp)) }
+                    items(3) { CommentSkeleton() }
+                } else if (comments.isEmpty()) {
+                    item {
+                        Text(
+                            when {
+                                watch == null -> "Loading comments…"
+                                watch?.commentsToken == null -> "Comments are turned off."
+                                else -> "No comments yet. Be the first to react?"
+                            },
+                            color = YtMuted,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    }
                 }
                 items(comments, key = { it.id }) { c ->
                     val replies = replyStates[c.id]
@@ -1340,6 +1552,9 @@ private fun PlayerChrome(
     scrubbing: Boolean,
     positionText: String,
     durationText: String,
+    live: Boolean,
+    atLiveEdge: Boolean,
+    onGoLive: () -> Unit,
     chapterTitle: String?,
     chapterMarks: List<Float>,
     qualityLabel: String,
@@ -1468,7 +1683,50 @@ private fun PlayerChrome(
                         onScrub = onScrub,
                         onScrubFinished = onScrubFinished,
                     )
-                    Text(durationText, color = Color.White, fontSize = 11.sp)
+                    if (live) {
+                        if (atLiveEdge) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier
+                                        .size(7.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(YtRed),
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    "LIVE",
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        } else {
+                            Row(
+                                Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xF2FFFFFF))
+                                    .clickable(onClick = onGoLive)
+                                    .padding(horizontal = 5.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(6.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(YtRed),
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    "GO LIVE",
+                                    color = Color(0xFF0F0F0F),
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                    } else {
+                        Text(durationText, color = Color.White, fontSize = 11.sp)
+                    }
                 }
                 Row(
                     Modifier.fillMaxWidth().padding(top = 1.dp),
@@ -1647,6 +1905,50 @@ private data class CommentRepliesState(
     val error: Boolean = false,
 )
 
+// Shimmer-free placeholders shaped like real comment rows. Three of them fill
+// the gap while the first page loads, instead of one anonymous grey block.
+@Composable
+private fun CommentSkeleton() {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+    ) {
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(50))
+                .background(YtSurfaceHi),
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Box(
+                Modifier
+                    .fillMaxWidth(0.35f)
+                    .height(9.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(YtSurfaceHi),
+            )
+            Spacer(Modifier.height(9.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth(0.92f)
+                    .height(9.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(YtSurfaceHi),
+            )
+            Spacer(Modifier.height(6.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth(0.65f)
+                    .height(9.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(YtSurfaceHi),
+            )
+        }
+    }
+}
+
 @Composable
 private fun CommentRow(
     c: CommentItem,
@@ -1655,6 +1957,10 @@ private fun CommentRow(
     onLoadMoreReplies: (() -> Unit)? = null,
     nested: Boolean = false,
 ) {
+    // Long comments collapse to six lines with a Read more link, the way the
+    // YouTube app does, instead of pushing every other comment off screen.
+    var expanded by remember(c.id) { mutableStateOf(false) }
+    var overflows by remember(c.id) { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
@@ -1691,7 +1997,24 @@ private fun CommentRow(
                 style = MaterialTheme.typography.bodyMedium,
                 color = YtText,
                 lineHeight = if (nested) 17.sp else 19.sp,
+                maxLines = if (expanded) Int.MAX_VALUE else if (nested) 4 else 6,
+                overflow = TextOverflow.Ellipsis,
+                onTextLayout = { result ->
+                    if (!expanded) overflows = result.hasVisualOverflow
+                },
             )
+            if (overflows) {
+                Text(
+                    if (expanded) "Show less" else "Read more",
+                    fontSize = 12.sp,
+                    color = YtMuted,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { expanded = !expanded }
+                        .padding(vertical = 4.dp),
+                )
+            }
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -2314,7 +2637,7 @@ private fun CaptionsSheet(
 // player immediately (the style is observed by WatchScreen) and persisted.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CaptionStyleSheet(
+fun CaptionStyleSheet(
     prefs: CaptionPrefs,
     style: CaptionStyleSettings,
     onDismiss: () -> Unit,

@@ -425,18 +425,57 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                         Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(top = 4.dp, bottom = 8.dp),
                     ) {
-                        item { SectionHeader("Recent searches") }
+                        item {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(Modifier.weight(1f)) { SectionHeader("Recent searches") }
+                                Text(
+                                    "Clear all",
+                                    color = YtMuted,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .clickable {
+                                            container.library.clearSearches()
+                                            ui.recentSearches.clear()
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                )
+                            }
+                        }
                         items(ui.recentSearches.toList()) { q ->
                             Row(
                                 Modifier
                                     .fillMaxWidth()
                                     .clickable { runSearch(q = q) }
-                                    .padding(horizontal = 16.dp, vertical = 13.dp),
+                                    .padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(Icons.Outlined.History, null, tint = YtMuted, modifier = Modifier.size(20.dp))
                                 Spacer(Modifier.width(14.dp))
-                                Text(q, color = YtText, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    q,
+                                    color = YtText,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                IconButton(
+                                    onClick = {
+                                        container.library.removeSearch(q)
+                                        ui.recentSearches.remove(q)
+                                    },
+                                    modifier = Modifier.size(34.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Close,
+                                        "Remove $q",
+                                        tint = YtMuted,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
                             }
                         }
                     }

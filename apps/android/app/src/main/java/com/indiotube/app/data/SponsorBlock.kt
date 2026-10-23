@@ -29,31 +29,73 @@ fun sponsorSegmentAt(
     it.UUID !in dismissed && positionMs >= it.startMs && positionMs < it.endMs
 }
 
+// The segment to seek past automatically while the playhead sits inside it.
+// Auto-skip is strictly opt-in: with it off this always returns null and the
+// player keeps showing the manual "Jump ahead" pill instead. Segments already
+// auto-skipped stay skipped for the rest of the video, so seeking back into a
+// segment does not fight the user.
+fun autoSkipTarget(
+    segments: List<SponsorSegment>,
+    positionMs: Long,
+    skipped: Set<String>,
+    autoSkip: Boolean,
+): SponsorSegment? {
+    if (!autoSkip) return null
+    return segments.firstOrNull {
+        it.UUID !in skipped && positionMs >= it.startMs && positionMs < it.endMs
+    }
+}
+
+// Human label for a SponsorBlock category id, used by the skip pill and the
+// settings list.
+fun sponsorLabel(category: String): String = when (category) {
+    "sponsor" -> "Sponsor"
+    "selfpromo" -> "Self-promotion"
+    "interaction" -> "Interaction reminder"
+    "intro" -> "Intro"
+    "outro" -> "Outro"
+    "preview" -> "Preview"
+    "music_offtopic" -> "Non-music section"
+    "filler" -> "Filler"
+    else -> category.replaceFirstChar { it.uppercase() }
+}
+
 // SponsorBlock's public API only needs the video id - no account, no key.
-// We show a "Jump ahead" pill instead of seeking automatically, the way
-// YouTube Premium surfaces its own jump-ahead suggestion.
+// Auto-skip is off by default; when it is off the player only surfaces the
+// manual "Jump ahead" pill, the way YouTube Premium does.
 class SponsorBlock(private val http: OkHttpClient) {
 
     private val cache = ConcurrentHashMap<String, List<SponsorSegment>>()
 
-    suspend fun segments(videoId: String, force: Boolean = false): List<SponsorSegment> {
-        if (videoId.isBlank()) return emptyList()
-        if (force) cache.remove(videoId)
-        cache[videoId]?.let { return it }
+    suspend fun segments(
+        videoId: String,
+        categories: Set<String> = DEFAULT_SPONSOR_CATEGORIES,
+        force: Boolean = false,
+    ): List<SponsorSegment> {
+        if (videoId.isBlank() || categories.isEmpty()) return emptyList()
+        val key = cacheKey(videoId, categories)
+        if (force) cache.remove(key)
+        cache[key]?.let { return it }
         val loaded = try {
-            withContext(Dispatchers.IO) { fetch(videoId) }
+            withContext(Dispatchers.IO) { fetch(videoId, categories) }
         } catch (_: Exception) {
             // A transient failure must not poison the cache.
             return emptyList()
         }
-        cache[videoId] = loaded
+        cache[key] = loaded
         return loaded
     }
 
-    private fun fetch(videoId: String): List<SponsorSegment> {
+    private fun cacheKey(videoId: String, categories: Set<String>): String =
+        videoId + "|" + categories.sorted().joinToString(",")
+
+    private fun fetch(videoId: String, categories: Set<String>): List<SponsorSegment> {
         val url = "https://sponsor.ajay.app/api/skipSegments".toHttpUrl().newBuilder()
             .addQueryParameter("videoID", videoId)
-            .addQueryParameter("categories", CATEGORIES)
+            .addQueryParameter(
+                "categories",
+                categories.sorted().joinToString(",", "[", "]") { "\"$it\"" },
+            )
             .build()
         val request = Request.Builder()
             .url(url)
@@ -71,9 +113,4 @@ class SponsorBlock(private val http: OkHttpClient) {
             .filter { it.segment.size >= 2 && it.endMs > it.startMs }
             .sortedBy { it.startMs }
 
-    private companion object {
-        // Same categories the browser extension skips: paid promo, self-promo,
-        // interaction asks, intro and outro.
-        const val CATEGORIES = """["sponsor","selfpromo","interaction","intro","outro"]"""
-    }
 }

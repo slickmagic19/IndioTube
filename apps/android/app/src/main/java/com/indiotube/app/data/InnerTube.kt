@@ -226,6 +226,8 @@ data class WatchData(
     val commentsCountText: String?,
     val membersOnly: Boolean = false,
     val chapters: List<Chapter> = emptyList(),
+    val liveChat: LiveChatInfo? = null,
+    val isLive: Boolean = false,
 )
 
 data class CommentsPage(val comments: List<CommentItem>, val continuation: String?)
@@ -1165,6 +1167,39 @@ class InnerTube(private val http: OkHttpClient) {
             }
         }
 
+        // Live chat lives in the watch page's conversation bar. The token is
+        // either a live invalidation/timed continuation or, for a finished
+        // stream/premiere, a replay continuation.
+        var liveChat: LiveChatInfo? = null
+        root.findAll("liveChatRenderer", maxDepth = 14, limit = 4).forEach { lc ->
+            if (liveChat != null) return@forEach
+            val continuations = lc.arr("continuations") ?: return@forEach
+            for (cont in continuations) {
+                val replay = cont.pathStr("replayContinuationData", "continuation")
+                if (replay != null) {
+                    liveChat = LiveChatInfo(replay, replay = true)
+                    break
+                }
+                val live = cont.pathStr("invalidationContinuationData", "continuation")
+                    ?: cont.pathStr("timedContinuationData", "continuation")
+                    ?: cont.pathStr("continuationEndpoint", "continuationCommand", "token")
+                if (live != null) {
+                    liveChat = LiveChatInfo(live)
+                    break
+                }
+            }
+        }
+
+        // A live badge on the primary info (or the "N watching" counter) is
+        // authoritative even when the chat panel is collapsed.
+        val liveBadge = (primary ?: root).findAll("metadataBadgeRenderer", maxDepth = 8, limit = 20)
+            .any { badge ->
+                badge.str("style") == "BADGE_STYLE_TYPE_LIVE_NOW" ||
+                    badge.pathStr("label")?.equals("LIVE", true) == true
+            }
+        val isLiveNow = liveBadge || liveChat?.replay == false ||
+            viewCountRenderer.pathStr("isLive") == "true"
+
         return WatchData(
             videoId = videoId,
             title = title.trim(),
@@ -1181,6 +1216,8 @@ class InnerTube(private val http: OkHttpClient) {
             commentsCountText = commentsCount,
             membersOnly = membersOnly,
             chapters = parseChapters(root),
+            liveChat = liveChat,
+            isLive = isLiveNow,
         )
     }
 
@@ -1220,6 +1257,91 @@ class InnerTube(private val http: OkHttpClient) {
             }
         }
         return null
+    }
+
+    // ---- live chat ------------------------------------------------------------------
+
+    // Live chat and chat replay share one endpoint; the token decides which.
+    // A failed poll returns an empty page so the panel simply waits for the
+    // next tick instead of tearing down the conversation.
+    suspend fun liveChat(token: String, replay: Boolean = false): LiveChatPage {
+        if (token.isBlank()) return LiveChatPage(emptyList(), replay = replay)
+        return try {
+            val c = config()
+            val body = buildJsonObject {
+                put("context", contextOf(c))
+                put("continuation", token)
+            }
+            val root = post("live_chat/get_live_chat", body)
+            withContext(Dispatchers.Default) { parseLiveChat(root, replay) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            LiveChatPage(emptyList(), replay = replay)
+        }
+    }
+
+    internal fun parseLiveChat(root: JsonElement, replay: Boolean = false): LiveChatPage {
+        val cont = root.findAll("liveChatContinuation", maxDepth = 8, limit = 2).firstOrNull()
+            ?: return LiveChatPage(emptyList(), replay = replay)
+        val messages = ArrayList<LiveChatMessage>()
+        fun addItem(item: JsonElement?) {
+            parseLiveChatMessage(item)?.let { messages.add(it) }
+        }
+        (cont.arr("actions") ?: JsonArray(emptyList())).forEach { action ->
+            val direct = action.obj("addChatItemAction")?.obj("item")
+            if (direct != null) {
+                addItem(direct)
+                return@forEach
+            }
+            // Replay answers wrap each item in replayChatItemAction.actions.
+            action.obj("replayChatItemAction")?.arr("actions")?.forEach { inner ->
+                addItem(inner.obj("addChatItemAction")?.obj("item"))
+            }
+        }
+        var next: String? = null
+        (cont.arr("continuations") ?: JsonArray(emptyList())).forEach { c ->
+            if (next == null) {
+                next = c.pathStr("invalidationContinuationData", "continuation")
+                    ?: c.pathStr("timedContinuationData", "continuation")
+                    ?: c.pathStr("replayContinuationData", "continuation")
+                    ?: c.pathStr("continuationEndpoint", "continuationCommand", "token")
+            }
+        }
+        return LiveChatPage(
+            messages = messages.distinctBy { it.id },
+            continuation = next,
+            replay = replay,
+        )
+    }
+
+    private fun parseLiveChatMessage(item: JsonElement?): LiveChatMessage? {
+        if (item == null) return null
+        val renderer = item.obj("liveChatTextMessageRenderer")
+            ?: item.obj("liveChatPaidMessageRenderer")
+            ?: item.obj("liveChatMembershipItemRenderer")
+            ?: item.obj("liveChatPaidStickerRenderer")
+            ?: return null
+        val id = renderer.pathStr("id") ?: return null
+        val message = renderer.path("message")
+        val text = message.runsText()
+            ?: message.pathStr("simpleText")
+            ?: renderer.pathStr("headerSubtext", "simpleText")
+            ?: ""
+        val badge = renderer.arr("authorBadges")?.firstNotNullOfOrNull { b ->
+            liveChatBadgeLabel(b.obj("liveChatAuthorBadgeRenderer")?.path("icon")?.str("iconType"))
+        }
+        val amount = renderer.path("purchaseAmountText")
+            .let { it.runsText() ?: it.pathStr("simpleText") }
+        return LiveChatMessage(
+            id = id,
+            author = renderer.pathStr("authorName", "simpleText").orEmpty(),
+            text = text,
+            avatar = lastThumbUrl(renderer.path("authorPhoto")),
+            badge = badge,
+            timestampText = renderer.pathStr("timestampText", "simpleText"),
+            amountText = amount,
+        )
     }
 
     // ---- comments -------------------------------------------------------------------
