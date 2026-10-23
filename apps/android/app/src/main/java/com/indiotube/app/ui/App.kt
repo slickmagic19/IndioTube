@@ -76,6 +76,7 @@ import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.watchedFraction
 import com.indiotube.app.player.PlaybackController
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -220,6 +221,17 @@ class UiRefs(
         }
     }
 
+    // Hides an unfinished video from Home's Continue watching rail. Its
+    // history row is kept, so "Undo" restores the exact saved progress.
+    fun removeFromContinueWatching(video: VideoItem) {
+        val previous = container.library.history.value
+            .firstOrNull { it.video.videoId == video.videoId } ?: return
+        container.library.dismissContinueWatching(video.videoId)
+        toast("Removed from Continue watching", "Undo") {
+            container.library.restoreHistory(previous)
+        }
+    }
+
     fun download(video: VideoItem) {
         if (video.membersOnly) {
             toast("Members-only videos can't be downloaded")
@@ -346,6 +358,22 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
             onOpenAccounts = { accountSheetOpen = true },
             search = searchState,
         ).also { refs -> refs.topProvider = { stack.current } }
+    }
+
+    // True offline launch goes straight to Downloads: that is the only part of
+    // the app that can actually do something without a network. The short wait
+    // lets a validating connection settle before deciding. rememberSaveable
+    // keeps a rotation from re-opening the screen.
+    var offlineLaunchHandled by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (offlineLaunchHandled) return@LaunchedEffect
+        offlineLaunchHandled = true
+        if (container.net.online.value) return@LaunchedEffect
+        delay(600)
+        if (!container.net.online.value) {
+            stack.open(Screen.Downloads)
+            ui.toast("You're offline — showing your downloads")
+        }
     }
 
     val current by player.current.collectAsState()

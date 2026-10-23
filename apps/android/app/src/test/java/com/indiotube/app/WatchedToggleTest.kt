@@ -79,6 +79,19 @@ class WatchedToggleTest {
     }
 
     @Test
+    fun dismissingContinueWatchingClearsProgressButKeepsTheRow() {
+        val store = store()
+        val watched = VideoItem("cw", "Continue", durationSec = 100)
+        store.noteOpen(watched)
+        store.notePosition(watched, 40_000, 100_000)
+
+        store.dismissContinueWatching("cw")
+
+        assertNull("no progress means no Continue watching card", store.watchedFraction("cw"))
+        assertEquals(listOf("cw"), store.history.value.map { it.video.videoId })
+    }
+
+    @Test
     fun historyBatchRemoveDropsOnlyTheGivenIds() {
         val store = store()
         listOf("a", "b", "c").forEach { id ->

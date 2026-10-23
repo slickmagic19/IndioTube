@@ -30,7 +30,9 @@ import com.indiotube.app.data.resumeStartPosition
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -104,6 +106,18 @@ class PlaybackController(
     // YouTube's Autoplay switch: when off, the player pauses at the end of the
     // current video instead of continuing with the next item in the queue.
     val autoplayNext: StateFlow<Boolean> get() = prefs.autoplayNext
+
+    // The pending "Up next" transition shown on the watch page. It is null
+    // whenever autoplay is off, there is no next item, or the countdown has
+    // been cancelled.
+    private val _upNext = MutableStateFlow<UpNextState?>(null)
+    val upNext: StateFlow<UpNextState?> = _upNext.asStateFlow()
+    private var upNextJob: Job? = null
+
+    // Only the watch page can show the card, so the countdown is armed while it
+    // is on screen. Elsewhere (mini player, screen off) the player advances as
+    // soon as the item ends.
+    @Volatile private var countdownArmed = false
 
     // What a new video starts on instead of plain Auto: null keeps YouTube's
     // behaviour (the best single file, fastest start), a height pins the rung.
@@ -181,6 +195,7 @@ class PlaybackController(
                 _position.value = c.currentPosition.coerceAtLeast(0)
                 val d = c.duration
                 _duration.value = if (d > 0) d else 0
+                maybeStartUpNext(c)
                 // remember watch progress ~every 5s while playing
                 if (c.isPlaying) {
                     val now = System.currentTimeMillis()
@@ -197,7 +212,9 @@ class PlaybackController(
     }
 
     private fun attach(c: MediaController) {
-        sendAutoplay(c)
+        // The service may have been created while the watch page was already
+        // open; re-assert the countdown pause state on every connection.
+        sendCountdownPause(c)
         c.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _playing.value = isPlaying
@@ -211,6 +228,9 @@ class PlaybackController(
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // A transition (manual next, queue edit, or the countdown's own
+                // advance) always ends any pending card.
+                cancelUpNext()
                 val idx = c.currentMediaItemIndex
                 _index.value = idx
                 // A genuinely different video starts back on Auto; replacing
@@ -504,34 +524,116 @@ class PlaybackController(
 
     fun setAutoplayNext(enabled: Boolean) {
         prefs.setAutoplayNext(enabled)
-        controller?.let { sendAutoplay(it) }
+        if (!enabled) cancelUpNext()
     }
 
-    // The playlist behavior itself lives on the ExoPlayer inside the service:
-    // MediaController has no direct setPauseAtEndOfMediaItems(), so the switch
-    // travels over a custom session command.
-    private fun sendAutoplay(c: MediaController) {
+    // The watch page arms the countdown while it is visible; leaving the page
+    // (mini player) advances immediately, matching YouTube's behaviour when
+    // the video is no longer the thing you are looking at.
+    fun setAutoplayCountdownArmed(armed: Boolean) {
+        if (countdownArmed == armed) return
+        countdownArmed = armed
+        // Advance explicitly while the player is still paused at the end; the
+        // service's pause flag is only relaxed afterwards.
+        if (!armed) playUpNextNow()
+        controller?.let { sendCountdownPause(it) }
+    }
+
+    // Tells the service to keep the item paused at its end while the card is
+    // visible. With autoplay off the service pauses anyway.
+    private fun sendCountdownPause(c: MediaController) {
         c.sendCustomCommand(
-            PlaybackCommands.SET_AUTOPLAY_NEXT,
-            Bundle().apply { putBoolean(PlaybackCommands.KEY_ENABLED, prefs.autoplayNext.value) },
+            PlaybackCommands.SET_COUNTDOWN_PAUSE,
+            Bundle().apply { putBoolean(PlaybackCommands.KEY_ENABLED, countdownArmed) },
         )
     }
 
     fun next() {
+        cancelUpNext()
         controller?.seekToNextMediaItem()
     }
 
     fun previous() {
+        cancelUpNext()
         controller?.seekToPrevious()
     }
 
     fun seekTo(ms: Long) {
+        cancelUpNext()
         controller?.seekTo(ms)
     }
 
     fun seekBy(deltaMs: Long) {
         val c = controller ?: return
+        cancelUpNext()
         c.seekTo((c.currentPosition + deltaMs).coerceAtLeast(0))
+    }
+
+    // Press "Play now" on the Up next card: skip the rest of the countdown.
+    fun playUpNextNow() {
+        val c = controller
+        if (_upNext.value == null) return
+        upNextJob?.cancel()
+        upNextJob = null
+        _upNext.value = null
+        if (c == null || !c.hasNextMediaItem()) return
+        advanceToNext(c)
+    }
+
+    // Dismiss the card without moving on. The item stays paused at its end,
+    // exactly like cancelling autoplay in YouTube.
+    fun cancelUpNext() {
+        upNextJob?.cancel()
+        upNextJob = null
+        _upNext.value = null
+    }
+
+    // Runs on the 500ms tick. With autoplay on the player is already paused at
+    // the end of the item (the service always pauses at end now), so the card
+    // is a UI decision rather than a player transition.
+    private fun maybeStartUpNext(c: MediaController) {
+        val autoplay = prefs.autoplayNext.value
+        val shouldOffer = shouldStartAutoplayCountdown(
+            autoplayEnabled = autoplay,
+            hasNext = c.hasNextMediaItem(),
+            playbackReady = c.playbackState == Player.STATE_READY,
+            isPlaying = c.isPlaying,
+            positionMs = c.currentPosition,
+            durationMs = c.duration,
+            alreadyPending = _upNext.value != null,
+            isLive = _queue.value.getOrNull(c.currentMediaItemIndex)?.isLive == true,
+        )
+        if (!shouldOffer) return
+        if (!countdownArmed) {
+            advanceToNext(c)
+            return
+        }
+        val next = _queue.value.getOrNull(c.currentMediaItemIndex + 1) ?: return
+        startUpNextCountdown(next)
+    }
+
+    private fun startUpNextCountdown(video: VideoItem) {
+        upNextJob?.cancel()
+        _upNext.value = UpNextState(video, UP_NEXT_COUNTDOWN_SECONDS)
+        upNextJob = scope.launch {
+            repeat(UP_NEXT_COUNTDOWN_SECONDS) { elapsed ->
+                delay(1_000)
+                val remaining = UP_NEXT_COUNTDOWN_SECONDS - elapsed - 1
+                if (remaining > 0) _upNext.value = UpNextState(video, remaining)
+            }
+            _upNext.value = null
+            upNextJob = null
+            val c = controller ?: return@launch
+            if (c.hasNextMediaItem()) advanceToNext(c)
+        }
+    }
+
+    private fun advanceToNext(c: MediaController) {
+        val nextIndex = c.currentMediaItemIndex + 1
+        if (nextIndex >= c.mediaItemCount) return
+        _queue.value.getOrNull(nextIndex)?.let { store.noteOpen(it) }
+        c.seekToNextMediaItem()
+        if (!c.isPlaying) c.play()
     }
 
     // Switch the video that is playing to a specific height (null = Auto).
@@ -790,6 +892,19 @@ class PlaybackController(
     }
 
     // Dismiss the mini player entirely.
+    // Called when the hosting activity is destroyed. Playback lives on in the
+    // service; this only stops this controller's polling and countdown and
+    // drops the MediaController connection so a recreated activity does not
+    // leave a second controller racing the new one.
+    fun release() {
+        countdownArmed = false
+        cancelUpNext()
+        controller?.release()
+        controller = null
+        _connected.value = false
+        scope.cancel()
+    }
+
     fun clear() {
         val c = controller ?: return
         val v = _queue.value.getOrNull(c.currentMediaItemIndex)
@@ -814,6 +929,8 @@ class PlaybackController(
         attachedSubtitleUrl = null
         currentStreamUrl = null
         builtItemUri = null
+        cancelUpNext()
+        _upNext.value = null
     }
 
     // The media items a queue start plays. Every row keeps its own Auto URI

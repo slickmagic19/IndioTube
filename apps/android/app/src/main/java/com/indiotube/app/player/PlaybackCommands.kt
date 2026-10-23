@@ -6,10 +6,11 @@ import androidx.media3.session.SessionCommand
 // Custom MediaSession commands shared by the service and the controller.
 object PlaybackCommands {
 
-    // When true, the player pauses at the end of each item instead of moving
-    // on to the next one (YouTube's Autoplay off).
-    val SET_AUTOPLAY_NEXT = SessionCommand(
-        "com.indiotube.app.action.SET_AUTOPLAY_NEXT",
+    // While the watch page is showing the Up next card, the player must pause
+    // at the end of the item so the countdown can run. Elsewhere the service
+    // follows the Autoplay preference (auto-advance when on).
+    val SET_COUNTDOWN_PAUSE = SessionCommand(
+        "com.indiotube.app.action.SET_COUNTDOWN_PAUSE",
         Bundle.EMPTY,
     )
 

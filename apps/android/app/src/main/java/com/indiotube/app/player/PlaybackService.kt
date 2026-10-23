@@ -29,6 +29,10 @@ class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    // Set while the watch page's Up next countdown is on screen. It forces
+    // pause-at-end even with autoplay on so the card can run before the jump.
+    private var countdownPause = false
+
     override fun onCreate() {
         super.onCreate()
         val app = application as IndioTubeApplication
@@ -64,13 +68,12 @@ class PlaybackService : MediaSessionService() {
             .setMediaSourceFactory(IndioMediaSourceFactory(app.container))
             .build()
 
-        // Autoplay is a per-item playlist behaviour: with it off the player
-        // pauses when the current video ends instead of starting the next
-        // queue item. Observe the preference directly so the switch works even
-        // if the controller has not (re)connected yet.
+        // Autoplay is a playlist behaviour on the player itself. The watch
+        // page can additionally force pause-at-end while its countdown card is
+        // visible; with autoplay off the item always ends paused.
         scope.launch {
             app.container.playbackPrefs.autoplayNext.collect { enabled ->
-                player.setPauseAtEndOfMediaItems(!enabled)
+                player.setPauseAtEndOfMediaItems(!enabled || countdownPause)
             }
         }
 
@@ -90,7 +93,7 @@ class PlaybackService : MediaSessionService() {
                 ): MediaSession.ConnectionResult {
                     val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
                         .buildUpon()
-                        .add(PlaybackCommands.SET_AUTOPLAY_NEXT)
+                        .add(PlaybackCommands.SET_COUNTDOWN_PAUSE)
                         .build()
                     return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                         .setAvailableSessionCommands(commands)
@@ -103,9 +106,11 @@ class PlaybackService : MediaSessionService() {
                     customCommand: SessionCommand,
                     args: Bundle,
                 ): ListenableFuture<SessionResult> {
-                    if (customCommand.customAction == PlaybackCommands.SET_AUTOPLAY_NEXT.customAction) {
-                        val autoplay = args.getBoolean(PlaybackCommands.KEY_ENABLED, true)
-                        (session.player as? ExoPlayer)?.setPauseAtEndOfMediaItems(!autoplay)
+                    if (customCommand.customAction == PlaybackCommands.SET_COUNTDOWN_PAUSE.customAction) {
+                        countdownPause = args.getBoolean(PlaybackCommands.KEY_ENABLED, false)
+                        val autoplay = app.container.playbackPrefs.autoplayNext.value
+                        (session.player as? ExoPlayer)
+                            ?.setPauseAtEndOfMediaItems(!autoplay || countdownPause)
                         return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                     }
                     return super.onCustomCommand(session, controller, customCommand, args)

@@ -121,6 +121,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -147,6 +151,7 @@ import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.VideoQualities
 import com.indiotube.app.data.chapterAt
 import com.indiotube.app.data.chapterTimestamp
+import com.indiotube.app.data.findCommentTimestamps
 import com.indiotube.app.data.forLanguage
 import com.indiotube.app.data.formatDuration
 import com.indiotube.app.data.autoSkipTarget
@@ -188,6 +193,7 @@ fun WatchScreen(
     val playingVideo = queue.getOrNull(queueIndex) ?: playingVideoFlow
     val video = playingVideo ?: videoArg
     val playing by player.playing.collectAsState()
+    val upNext by player.upNext.collectAsState()
 
     val buffering by player.buffering.collectAsState()
     val position by player.position.collectAsState()
@@ -480,6 +486,14 @@ fun WatchScreen(
     LaunchedEffect(effectiveFullscreen) { ui.playerFullscreen = effectiveFullscreen }
     DisposableEffect(Unit) {
         onDispose { ui.playerFullscreen = false }
+    }
+
+    // This page is the only place that can show the Up next card, so the
+    // countdown is armed here. Leaving the page advances immediately (or stops
+    // the countdown) instead of leaving a paused video behind the mini player.
+    DisposableEffect(video.videoId) {
+        player.setAutoplayCountdownArmed(true)
+        onDispose { player.setAutoplayCountdownArmed(false) }
     }
 
     DisposableEffect(effectiveFullscreen) {
@@ -886,6 +900,17 @@ fun WatchScreen(
                 }
             }
 
+            // "Up next in 5…" card: appears when autoplay is about to move on.
+            // Play now skips the wait, Cancel leaves the video paused at its end.
+            upNext?.let { pending ->
+                UpNextCard(
+                    state = pending,
+                    onPlayNow = { player.playUpNextNow() },
+                    onCancel = { player.cancelUpNext() },
+                    modifier = Modifier.padding(bottom = if (controlsVisible) 96.dp else 12.dp),
+                )
+            }
+
             if (membersOnly) {
                 Box(
                     Modifier
@@ -1282,6 +1307,11 @@ fun WatchScreen(
                             { loadMoreReplies(c) }
                         } else {
                             null
+                        },
+                        maxSeconds = if (duration > 0) duration / 1000 else 0,
+                        onSeek = { seconds ->
+                            controlsVisible = true
+                            player.seekTo(seconds * 1000)
                         },
                     )
                 }
@@ -1905,6 +1935,50 @@ private data class CommentRepliesState(
     val error: Boolean = false,
 )
 
+// Comment text with its timestamps rendered as links. Tapping "1:42" seeks,
+// exactly like the YouTube app. Links are built as annotations so the rest of
+// the comment keeps normal text behaviour (maxLines, ellipsis, Read more).
+@Composable
+private fun CommentText(
+    text: String,
+    nested: Boolean,
+    maxLines: Int,
+    maxSeconds: Long,
+    onOverflow: (Boolean) -> Unit,
+    onSeek: ((Long) -> Unit)?,
+) {
+    val seekNow = rememberUpdatedState(onSeek)
+    val spans = remember(text, maxSeconds) { findCommentTimestamps(text, maxSeconds) }
+    val annotated = remember(text, spans) {
+        buildAnnotatedString {
+            append(text)
+            spans.forEach { span ->
+                addLink(
+                    LinkAnnotation.Clickable(
+                        tag = "comment-ts-${span.start}-${span.seconds}",
+                        styles = TextLinkStyles(style = SpanStyle(color = YtBlue)),
+                    ) {
+                        seekNow.value?.invoke(span.seconds)
+                    },
+                    span.start,
+                    span.end,
+                )
+            }
+        }
+    }
+    Text(
+        annotated,
+        style = MaterialTheme.typography.bodyMedium,
+        color = YtText,
+        lineHeight = if (nested) 17.sp else 19.sp,
+        maxLines = maxLines,
+        overflow = TextOverflow.Ellipsis,
+        onTextLayout = { result ->
+            if (maxLines != Int.MAX_VALUE) onOverflow(result.hasVisualOverflow)
+        },
+    )
+}
+
 // Shimmer-free placeholders shaped like real comment rows. Three of them fill
 // the gap while the first page loads, instead of one anonymous grey block.
 @Composable
@@ -1956,6 +2030,8 @@ private fun CommentRow(
     onToggleReplies: (() -> Unit)? = null,
     onLoadMoreReplies: (() -> Unit)? = null,
     nested: Boolean = false,
+    maxSeconds: Long = 0,
+    onSeek: ((Long) -> Unit)? = null,
 ) {
     // Long comments collapse to six lines with a Read more link, the way the
     // YouTube app does, instead of pushing every other comment off screen.
@@ -1992,16 +2068,13 @@ private fun CommentRow(
                 }
             }
             Spacer(Modifier.height(3.dp))
-            Text(
-                c.text,
-                style = MaterialTheme.typography.bodyMedium,
-                color = YtText,
-                lineHeight = if (nested) 17.sp else 19.sp,
+            CommentText(
+                text = c.text,
+                nested = nested,
                 maxLines = if (expanded) Int.MAX_VALUE else if (nested) 4 else 6,
-                overflow = TextOverflow.Ellipsis,
-                onTextLayout = { result ->
-                    if (!expanded) overflows = result.hasVisualOverflow
-                },
+                maxSeconds = maxSeconds,
+                onOverflow = { if (!expanded) overflows = it },
+                onSeek = onSeek,
             )
             if (overflows) {
                 Text(
@@ -2063,7 +2136,12 @@ private fun CommentRow(
                         )
                     else -> {
                         replies.replies.forEach { reply ->
-                            CommentRow(reply, nested = true)
+                            CommentRow(
+                                reply,
+                                nested = true,
+                                maxSeconds = maxSeconds,
+                                onSeek = onSeek,
+                            )
                         }
                         if (replies.continuation != null) {
                             Box(

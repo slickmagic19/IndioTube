@@ -13,12 +13,15 @@ import com.indiotube.app.ui.IndioTubeTheme
 
 class MainActivity : ComponentActivity() {
 
+    private var player: PlaybackController? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         val container = (application as IndioTubeApplication).container
         val player = PlaybackController(this, container.library, container.playbackPrefs, container)
+        this.player = player
 
         if (
             Build.VERSION.SDK_INT >= 33 &&
@@ -32,5 +35,14 @@ class MainActivity : ComponentActivity() {
                 IndioTubeApp(container, player)
             }
         }
+    }
+
+    override fun onDestroy() {
+        // The player lives in PlaybackService; this connection is per-activity.
+        // Releasing it stops the old polling/countdown when the activity is
+        // recreated, so a rotation cannot leave two controllers racing.
+        player?.release()
+        player = null
+        super.onDestroy()
     }
 }

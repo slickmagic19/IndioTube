@@ -19,7 +19,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -48,13 +50,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indiotube.app.Container
 import com.indiotube.app.data.ContinueWatchingItem
+import com.indiotube.app.data.HomeConnection
 import com.indiotube.app.data.HomeFeed
 import com.indiotube.app.data.HomeSnapshot
 import com.indiotube.app.data.SearchEntry
 import com.indiotube.app.data.SearchFilter
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.continueWatching
+import com.indiotube.app.data.homeConnection
 import com.indiotube.app.data.recommendableVideos
+import com.indiotube.app.data.shouldRefreshFeed
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -68,6 +73,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     val hiddenIds by container.library.notInterestedIds.collectAsState()
     val blockedChannels by container.library.blockedChannelIds.collectAsState()
     val history by container.library.history.collectAsState()
+    val online by container.net.online.collectAsState()
 
     // Paint the last successful Home render immediately on app start / tab
     // return instead of showing a skeleton while the first request is in
@@ -92,6 +98,20 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     val localFeeds = remember(accountId) { mutableStateMapOf<String, LocalCategoryFeed>() }
 
     suspend fun load(force: Boolean = false, params: String? = null, token: String? = null) {
+        // Offline: never touch the network. Keep the feed that is already on
+        // screen and only seed from the local library when there is nothing to
+        // keep, so a first visit while offline isn't a blank page.
+        if (!shouldRefreshFeed(container.net.online.value)) {
+            if (feed == null && localVideos.isEmpty()) {
+                val seed = withContext(Dispatchers.Default) { container.localSeedRecommendations() }
+                if (seed.isNotEmpty()) localVideos = seed
+            }
+            localLoading = false
+            loading = false
+            error = null
+            return
+        }
+
         // Returning to an old feed shouldn't show yesterday's picks — rebuild
         // against fresh channel data when the last build is stale.
         val stale = container.lastHomeRefreshAt > 0 &&
@@ -182,6 +202,10 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     // Local-mode filter tab: pull one page of search results for the category
     // and cache it, so returning to a tab doesn't refetch.
     suspend fun loadLocalCategory(label: String, force: Boolean = false) {
+        if (!shouldRefreshFeed(container.net.online.value)) {
+            localFeeds[label] = LocalCategoryFeed(error = true)
+            return
+        }
         val existing = localFeeds[label]
         if (!force && existing != null && (existing.loading || existing.videos.isNotEmpty())) return
         localFeeds[label] = LocalCategoryFeed(loading = true)
@@ -211,6 +235,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     LaunchedEffect(refreshTick) {
         if (refreshTick == handledRefreshTick) return@LaunchedEffect
         handledRefreshTick = refreshTick
+        if (!shouldRefreshFeed(container.net.online.value)) return@LaunchedEffect
         loading = true
         localChip = 0
         localFeeds.clear()
@@ -222,6 +247,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     LaunchedEffect(listState, feed, localChip, localVideos) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .collect { last ->
+                if (!shouldRefreshFeed(container.net.online.value)) return@collect
                 if (last < 0 || loadingMore) return@collect
                 val f = feed
                 val usingLocalNow = f != null && f.videos.isEmpty() && localVideos.isNotEmpty()
@@ -322,19 +348,40 @@ fun HomeScreen(container: Container, ui: UiRefs) {
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = {
-                scope.launch {
-                    refreshing = true
-                    localChip = 0
-                    localFeeds.clear()
-                    load(force = true)
-                    refreshing = false
-                    // a refreshed feed is a new mix — start it from the top
-                    listState.animateScrollToItem(0)
+                if (!shouldRefreshFeed(container.net.online.value)) {
+                    ui.toast("You're offline")
+                } else {
+                    scope.launch {
+                        refreshing = true
+                        localChip = 0
+                        localFeeds.clear()
+                        load(force = true)
+                        refreshing = false
+                        // a refreshed feed is a new mix — start it from the top
+                        listState.animateScrollToItem(0)
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize(),
         ) {
+            val hasContent = feed?.videos.orEmpty().isNotEmpty() || localVideos.isNotEmpty()
+            val connection = homeConnection(online, hasContent)
             when {
+                connection == HomeConnection.OFFLINE_EMPTY && !loading -> EmptyState(
+                    title = "You're offline",
+                    subtitle = "Your downloads are ready to watch without a connection.",
+                    icon = {
+                        Icon(
+                            Icons.Outlined.CloudOff,
+                            null,
+                            tint = YtMuted,
+                            modifier = Modifier.size(42.dp),
+                        )
+                    },
+                    actionLabel = "Open downloads",
+                    onAction = { ui.open(Screen.Downloads) },
+                    modifier = Modifier.fillMaxSize(),
+                )
                 loading && feed == null -> SkeletonFeed(Modifier.fillMaxSize(), showChips = true, scrollable = true)
                 error != null && feed == null -> ErrorState(error!!, onRetry = {
                     scope.launch {
@@ -361,7 +408,12 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                     }
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         val chips = f?.chips.orEmpty()
-                        if (usingLocal) {
+                        if (connection == HomeConnection.OFFLINE_WITH_CONTENT) {
+                            item(key = "offline-banner") {
+                                OfflineBanner(onOpenDownloads = { ui.open(Screen.Downloads) })
+                            }
+                        }
+                        if (online && usingLocal) {
                             // Local feed: YouTube-style category tabs, filled
                             // from search since a signed-out home has no chips.
                             item(key = "local-chips") {
@@ -382,7 +434,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                     }
                                 }
                             }
-                        } else if (chips.isNotEmpty()) {
+                        } else if (online && chips.isNotEmpty()) {
                             item(key = "chips") {
                                 LazyRow(
                                     Modifier.padding(vertical = 2.dp),
@@ -412,6 +464,9 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                     items = continueItems,
                                     onClick = { item ->
                                         ui.openWatch(item.video, continueItems.map { it.video })
+                                    },
+                                    onRemove = { item ->
+                                        ui.removeFromContinueWatching(item.video)
                                     },
                                 )
                             }
@@ -489,10 +544,50 @@ fun HomeScreen(container: Container, ui: UiRefs) {
     }
 }
 
+// Compact "you're offline" strip above a cached feed, with a shortcut to the
+// downloads that still work without a connection.
+@Composable
+private fun OfflineBanner(onOpenDownloads: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(YtSurfaceHi)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Outlined.CloudOff,
+            null,
+            tint = YtMuted,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            "You're offline \u2014 feeds won't refresh.",
+            color = YtMuted,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            "Downloads",
+            color = YtBlue,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .clickable(onClick = onOpenDownloads)
+                .padding(horizontal = 6.dp, vertical = 3.dp),
+        )
+    }
+}
+
 @Composable
 internal fun ContinueWatchingRail(
     items: List<ContinueWatchingItem>,
     onClick: (ContinueWatchingItem) -> Unit,
+    onRemove: (ContinueWatchingItem) -> Unit,
 ) {
     Column {
         SectionHeader("Continue watching")
@@ -506,14 +601,35 @@ internal fun ContinueWatchingRail(
                         .clickable { onClick(item) }
                         .padding(end = 10.dp, bottom = 8.dp),
                 ) {
-                    Thumb(
-                        model = item.video.thumbnail,
-                        badge = item.remainingText,
-                        live = item.video.isLive,
-                        membersOnly = item.video.membersOnly,
-                        progress = item.fraction,
-                        modifier = Modifier.fillMaxWidth().height(127.dp),
-                    )
+                    Box(Modifier.fillMaxWidth()) {
+                        Thumb(
+                            model = item.video.thumbnail,
+                            badge = item.remainingText,
+                            live = item.video.isLive,
+                            membersOnly = item.video.membersOnly,
+                            progress = item.fraction,
+                            modifier = Modifier.fillMaxWidth().height(127.dp),
+                        )
+                        // Remove this card without opening it or deleting the
+                        // matching Watch history row.
+                        Box(
+                            Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(5.dp)
+                                .size(26.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0xB3000000))
+                                .clickable { onRemove(item) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Filled.Close,
+                                "Remove ${item.video.title} from Continue watching",
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp),
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(7.dp))
                     Text(
                         item.video.title,

@@ -6,6 +6,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.indiotube.app.data.ContinueWatchingItem
@@ -114,7 +115,11 @@ class ContinueWatchingTest {
         compose.setContent {
             MaterialTheme {
                 Box(Modifier.fillMaxSize()) {
-                    ContinueWatchingRail(items = items, onClick = { tapped = it })
+                    ContinueWatchingRail(
+                        items = items,
+                        onClick = { tapped = it },
+                        onRemove = {},
+                    )
                 }
             }
         }
@@ -124,5 +129,33 @@ class ContinueWatchingTest {
         compose.onNodeWithText("Second video").performClick()
         assertEquals("b", tapped?.video?.videoId)
         assertTrue(items.isEmpty().not())
+    }
+
+    @Test
+    fun removingACardReportsOnlyThatItem() {
+        val items = listOf(
+            ContinueWatchingItem(VideoItem("a", "First video"), 0.25f, 60_000),
+            ContinueWatchingItem(VideoItem("b", "Second video"), 0.75f, 15_000),
+        )
+        var removed: ContinueWatchingItem? = null
+        var tapped: ContinueWatchingItem? = null
+
+        compose.setContent {
+            MaterialTheme {
+                Box(Modifier.fillMaxSize()) {
+                    ContinueWatchingRail(
+                        items = items,
+                        onClick = { tapped = it },
+                        onRemove = { removed = it },
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithContentDescription("Remove First video from Continue watching")
+            .performClick()
+
+        assertEquals("a", removed?.video?.videoId)
+        assertEquals("removing must not open the video", null, tapped)
     }
 }

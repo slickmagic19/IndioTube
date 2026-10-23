@@ -226,6 +226,13 @@ class LibraryStore(
         persist()
     }
 
+    // "Remove from Continue watching" only stops offering the progress; the
+    // history row stays (with no progress) so the video can still be found in
+    // Watch history, exactly like removing a YouTube home card.
+    fun dismissContinueWatching(videoId: String) {
+        markUnwatched(videoId)
+    }
+
     // Puts a saved history entry back exactly as it was, used by the Undo
     // action so marking a half-watched video as watched really is reversible.
     fun restoreHistory(entry: HistoryEntry) {
