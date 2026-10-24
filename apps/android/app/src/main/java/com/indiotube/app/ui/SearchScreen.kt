@@ -16,8 +16,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -105,7 +108,10 @@ class SearchState {
 @Composable
 fun SearchScreen(container: Container, ui: UiRefs) {
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState(
+    val layout = rememberWindowLayout()
+    // Search result videos use the same adaptive grid as the feeds; channels
+    // and playlists stay full-width rows, the way YouTube lays them out.
+    val listState = rememberLazyGridState(
         initialFirstVisibleItemIndex = ui.search.scrollIndex,
         initialFirstVisibleItemScrollOffset = ui.search.scrollOffset,
     )
@@ -490,7 +496,8 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                         modifier = Modifier.fillMaxSize(),
                     )
                 } else {
-                    LazyColumn(
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(layout.feedColumns),
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         // One uniform gap for every entry type: video cards,
@@ -499,7 +506,16 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                         contentPadding = PaddingValues(top = 6.dp, bottom = 10.dp),
                     ) {
-                        items(list.size + if (loadingMore) 1 else 0) { idx ->
+                        items(
+                            count = list.size + if (loadingMore) 1 else 0,
+                            span = { idx ->
+                                if (idx < list.size && list[idx] is SearchEntry.Video) {
+                                    GridItemSpan(1)
+                                } else {
+                                    GridItemSpan(maxLineSpan)
+                                }
+                            },
+                        ) { idx ->
                             if (idx >= list.size) {
                                 LoadingBox(Modifier.height(70.dp))
                                 return@items
@@ -516,6 +532,7 @@ fun SearchScreen(container: Container, ui: UiRefs) {
                                     onPlayNext = { ui.playNext(e.video) },
                                     onAddToQueue = { ui.addToQueue(e.video) },
                                     bottomPadding = 0.dp,
+                                    horizontalInset = layout.videoCardInset,
                                 )
                                 is SearchEntry.Channel -> ChannelResultRow(e.channel, ui)
                                 is SearchEntry.Playlist -> PlaylistResultRow(e.playlist, ui)

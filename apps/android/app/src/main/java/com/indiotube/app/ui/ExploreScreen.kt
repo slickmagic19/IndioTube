@@ -10,11 +10,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -73,7 +75,8 @@ private data class ExploreFeed(
 @Composable
 fun ExploreScreen(container: Container, ui: UiRefs) {
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
+    val layout = rememberWindowLayout()
+    val listState = rememberLazyGridState()
     val account by container.accounts.active.collectAsState()
     val hiddenIds by container.library.notInterestedIds.collectAsState()
     val blockedChannels by container.library.blockedChannelIds.collectAsState()
@@ -219,18 +222,24 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
                         v.videoId !in hiddenIds &&
                             (v.channelId == null || v.channelId !in blockedChannels)
                     }
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                        item(key = "section") { SectionHeader(sectionTitle) }
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(layout.feedColumns),
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        item(key = "section", span = { GridItemSpan(maxLineSpan) }) {
+                            SectionHeader(sectionTitle)
+                        }
                         if (videos.isEmpty()) {
-                            item(key = "empty") {
+                            item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
                                 EmptyState(
                                     title = "Nothing here right now",
                                     subtitle = "Pull down to refresh, or try another category.",
-                                    modifier = Modifier.fillParentMaxSize(),
+                                    modifier = Modifier.fillMaxWidth(),
                                 )
                             }
                         }
-                        items(videos, key = { it.videoId }) { video ->
+                        gridItems(videos, key = { it.videoId }) { video ->
                             VideoCard(
                                 video,
                                 onClick = { ui.openWatch(video, videos) },
@@ -239,12 +248,16 @@ fun ExploreScreen(container: Container, ui: UiRefs) {
                                 onDownload = { ui.download(video) },
                                 onPlayNext = { ui.playNext(video) },
                                 onAddToQueue = { ui.addToQueue(video) },
+                                horizontalInset = layout.videoCardInset,
+                                bottomPadding = layout.videoCardGap,
                             )
                         }
                         if (loadingMore) {
-                            item(key = "loading-more") { LoadingBox() }
+                            item(key = "loading-more", span = { GridItemSpan(maxLineSpan) }) { LoadingBox() }
                         }
-                        item(key = "bottom-spacer") { Spacer(Modifier.height(8.dp)) }
+                        item(key = "bottom-spacer", span = { GridItemSpan(maxLineSpan) }) {
+                            Spacer(Modifier.height(8.dp))
+                        }
                     }
                 }
             }

@@ -12,11 +12,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -68,7 +71,10 @@ import kotlinx.coroutines.withContext
 @Composable
 fun HomeScreen(container: Container, ui: UiRefs) {
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
+    // Phones get one column; a tablet gets two or three 16:9 cards across.
+    val layout = rememberWindowLayout()
+    val columns = layout.feedColumns
+    val listState = rememberLazyGridState()
     val account by container.accounts.active.collectAsState()
     val hiddenIds by container.library.notInterestedIds.collectAsState()
     val blockedChannels by container.library.blockedChannelIds.collectAsState()
@@ -406,17 +412,21 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                         v.videoId !in hiddenIds &&
                             (v.channelId == null || v.channelId !in blockedChannels)
                     }
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(columns),
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
                         val chips = f?.chips.orEmpty()
                         if (connection == HomeConnection.OFFLINE_WITH_CONTENT) {
-                            item(key = "offline-banner") {
+                            item(key = "offline-banner", span = { GridItemSpan(maxLineSpan) }) {
                                 OfflineBanner(onOpenDownloads = { ui.open(Screen.Downloads) })
                             }
                         }
                         if (online && usingLocal) {
                             // Local feed: YouTube-style category tabs, filled
                             // from search since a signed-out home has no chips.
-                            item(key = "local-chips") {
+                            item(key = "local-chips", span = { GridItemSpan(maxLineSpan) }) {
                                 LazyRow(
                                     Modifier.padding(vertical = 2.dp),
                                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
@@ -435,7 +445,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                 }
                             }
                         } else if (online && chips.isNotEmpty()) {
-                            item(key = "chips") {
+                            item(key = "chips", span = { GridItemSpan(maxLineSpan) }) {
                                 LazyRow(
                                     Modifier.padding(vertical = 2.dp),
                                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
@@ -459,7 +469,7 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                             }
                         }
                         if (!categoryMode && continueItems.isNotEmpty()) {
-                            item(key = "continue-watching") {
+                            item(key = "continue-watching", span = { GridItemSpan(maxLineSpan) }) {
                                 ContinueWatchingRail(
                                     items = continueItems,
                                     onClick = { item ->
@@ -475,15 +485,19 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                         // visible, replace the old list with skeletons.
                         val categoryLoading = categoryMode && categoryFeed == null
                         when {
-                            chipLoading -> item(key = "chip-loading") { SkeletonFeed(rows = 3) }
-                            categoryLoading -> item(key = "category-loading") { SkeletonFeed(rows = 3) }
+                            chipLoading -> item(key = "chip-loading", span = { GridItemSpan(maxLineSpan) }) {
+                                SkeletonFeed(rows = 3)
+                            }
+                            categoryLoading -> item(key = "category-loading", span = { GridItemSpan(maxLineSpan) }) {
+                                SkeletonFeed(rows = 3)
+                            }
                             else -> {
                                 if (usingLocal) {
-                                    item(key = "recommended") {
+                                    item(key = "recommended", span = { GridItemSpan(maxLineSpan) }) {
                                         SectionHeader(if (categoryMode) localLabel.orEmpty() else "Recommended for you")
                                     }
                                 }
-                                items(shown, key = { it.videoId }) { video ->
+                                gridItems(shown, key = { it.videoId }) { video ->
                                     VideoCard(
                                         video,
                                         onClick = { ui.openWatch(video, shown) },
@@ -493,10 +507,12 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                         onPlayNext = { ui.playNext(video) },
                                         onAddToQueue = { ui.addToQueue(video) },
                                         onToggleWatched = { ui.toggleWatched(video) },
+                                        horizontalInset = layout.videoCardInset,
+                                        bottomPadding = layout.videoCardGap,
                                     )
                                 }
                                 if (categoryMode && categoryFeed?.error == true && shown.isEmpty()) {
-                                    item(key = "category-error") {
+                                    item(key = "category-error", span = { GridItemSpan(maxLineSpan) }) {
                                         ErrorState(
                                             "Couldn't load ${localLabel.orEmpty()} right now",
                                             onRetry = {
@@ -507,14 +523,16 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                                     }
                                 }
                                 if (localLoading && shown.isEmpty() && !categoryMode) {
-                                    item(key = "local-loading") { SkeletonFeed(rows = 3) }
+                                    item(key = "local-loading", span = { GridItemSpan(maxLineSpan) }) {
+                                        SkeletonFeed(rows = 3)
+                                    }
                                 }
                                 // Only show the signed-out prompt when neither YouTube
                                 // nor the local fallback feed had anything to offer.
                                 if (f != null && shown.isEmpty() && !loadingMore && !localLoading &&
                                     !categoryMode && !loading && !refreshing
                                 ) {
-                                    item(key = "empty") {
+                                    item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
                                         EmptyState(
                                             title = "Try searching to get started",
                                             subtitle = "Start watching videos to help us build a feed of videos you'll love.",
@@ -534,9 +552,9 @@ fun HomeScreen(container: Container, ui: UiRefs) {
                             }
                         }
                         if (loadingMore) {
-                            item { LoadingBox(Modifier.height(80.dp)) }
+                            item(span = { GridItemSpan(maxLineSpan) }) { LoadingBox(Modifier.height(80.dp)) }
                         }
-                        item { Spacer(Modifier.height(8.dp)) }
+                        item(span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(8.dp)) }
                     }
                 }
             }
@@ -697,16 +715,20 @@ fun FeedChip(title: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-// shared by subscriptions/channel screens: full-width list of feed cards
+// shared by subscriptions/channel screens: full-width list of feed cards,
+// laid out in the same adaptive columns as Home
 @Composable
 fun VideoFeedList(
     videos: List<VideoItem>,
     ui: UiRefs,
-    listState: androidx.compose.foundation.lazy.LazyListState = rememberLazyListState(),
     footer: (@Composable () -> Unit)? = null,
 ) {
-    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-        items(videos, key = { it.videoId + it.title.hashCode() }) { video ->
+    val layout = rememberWindowLayout()
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(layout.feedColumns),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        gridItems(videos, key = { it.videoId + it.title.hashCode() }) { video ->
             VideoCard(
                 video,
                 onClick = { ui.openWatch(video, videos) },
@@ -715,11 +737,13 @@ fun VideoFeedList(
                 onPlayNext = { ui.playNext(video) },
                 onAddToQueue = { ui.addToQueue(video) },
                 onToggleWatched = { ui.toggleWatched(video) },
+                horizontalInset = layout.videoCardInset,
+                bottomPadding = layout.videoCardGap,
             )
         }
         if (footer != null) {
-            item { footer() }
+            item(span = { GridItemSpan(maxLineSpan) }) { footer() }
         }
-        item { Spacer(Modifier.height(8.dp)) }
+        item(span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(8.dp)) }
     }
 }

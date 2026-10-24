@@ -24,6 +24,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -218,6 +221,9 @@ fun VideoCard(
     // Search result lists supply their own uniform gap between entries, so
     // they zero this out; every other list keeps the Home-card rhythm.
     bottomPadding: Dp = 14.dp,
+    // Grid cells come with their own gaps, so the card drops the phone's side
+    // padding instead of stacking it on top of the cell spacing.
+    horizontalInset: Dp = 12.dp,
 ) {
     Column(
         Modifier
@@ -234,9 +240,9 @@ fun VideoCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = horizontalInset),
         )
-        Row(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp)) {
+        Row(Modifier.padding(start = horizontalInset, end = horizontalInset, top = 10.dp)) {
             ChannelAvatar(
                 name = video.channelName,
                 url = video.channelAvatar,
@@ -383,7 +389,8 @@ private fun CardFeedbackMenu(
 // skeleton in sync and the layout calm while the network catches up. With
 // showChips it also covers the filter-tag row, so the first paint matches the
 // Home layout before the chips arrive; showHeader adds the section title bone
-// used by pages with a category header above the list.
+// used by pages with a category header above the list. On a tablet it uses the
+// feed's column count, so loading doesn't flash one giant card before the grid.
 @Composable
 fun SkeletonFeed(
     modifier: Modifier = Modifier,
@@ -393,10 +400,26 @@ fun SkeletonFeed(
     scrollable: Boolean = false,
 ) {
     val bone = rememberSkeletonBone()
-    // Full-screen loading states use a LazyColumn: unlike a plain Column it
+    val columns = rememberWindowLayout().feedColumns
+    // Full-screen loading states use a lazy list: unlike a plain Column it
     // measures every card with unbounded height and clips the list, so tall
     // 16:9 placeholders can't collide with the next row or bleed under the
     // bottom bar.
+    if (scrollable && columns > 1) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            modifier = modifier.fillMaxSize(),
+        ) {
+            if (showChips) {
+                item(key = "skeleton-chips", span = { GridItemSpan(maxLineSpan) }) { SkeletonChips(bone) }
+            }
+            if (showHeader) {
+                item(key = "skeleton-header", span = { GridItemSpan(maxLineSpan) }) { SkeletonHeader(bone) }
+            }
+            repeat(rows.coerceAtLeast(1)) { item(key = "skeleton-row-$it") { SkeletonCard(bone, inset = 8.dp) } }
+        }
+        return
+    }
     if (scrollable) {
         LazyColumn(modifier.fillMaxSize()) {
             if (showChips) item(key = "skeleton-chips") { SkeletonChips(bone) }
@@ -407,7 +430,20 @@ fun SkeletonFeed(
         Column(modifier.fillMaxWidth()) {
             if (showChips) SkeletonChips(bone)
             if (showHeader) SkeletonHeader(bone)
-            repeat(rows.coerceAtLeast(1)) { SkeletonCard(bone) }
+            val count = rows.coerceAtLeast(1)
+            if (columns > 1) {
+                // A chip switch on a tablet: keep the grid shape while the
+                // new page loads instead of flashing one full-width card.
+                repeat(count) {
+                    Row(Modifier.fillMaxWidth()) {
+                        repeat(columns) {
+                            Box(Modifier.weight(1f)) { SkeletonCard(bone, inset = 8.dp) }
+                        }
+                    }
+                }
+            } else {
+                repeat(count) { SkeletonCard(bone) }
+            }
         }
     }
 }
@@ -460,17 +496,17 @@ private fun SkeletonHeader(bone: Color) {
 }
 
 @Composable
-private fun SkeletonCard(bone: Color) {
+private fun SkeletonCard(bone: Color, inset: Dp = 12.dp) {
     Column(Modifier.fillMaxWidth().padding(bottom = 14.dp)) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = inset)
                 .clip(RoundedCornerShape(12.dp))
                 .background(bone),
         )
-        Row(Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp)) {
+        Row(Modifier.padding(start = inset, end = inset, top = 10.dp)) {
             Box(
                 Modifier
                     .size(36.dp)

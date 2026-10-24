@@ -14,10 +14,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -61,7 +63,8 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
     val name = screen.name
     val avatar = screen.avatar
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
+    val layout = rememberWindowLayout()
+    val listState = rememberLazyGridState()
     val active by container.accounts.active.collectAsState()
     val context = LocalContext.current
 
@@ -247,8 +250,12 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                         loading = false
                     }
                 }, modifier = Modifier.fillMaxSize())
-                else -> LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                    item(key = "header") {
+                else -> LazyVerticalGrid(
+                    columns = GridCells.Fixed(layout.feedColumns),
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    item(key = "header", span = { GridItemSpan(maxLineSpan) }) {
                         Column(
                             Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 4.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -297,14 +304,14 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                             }
                         }
                     }
-                    item(key = "tabs") {
+                    item(key = "tabs", span = { GridItemSpan(maxLineSpan) }) {
                         ChannelTabRow(screen)
                     }
                     when (tabIdx) {
                         0 -> {
                             val videos = page?.videos.orEmpty()
                             if (videos.isEmpty() && !loading) {
-                                item {
+                                item(span = { GridItemSpan(maxLineSpan) }) {
                                     EmptyState(
                                         title = "No videos yet",
                                         subtitle = "This channel hasn't posted anything we can show.",
@@ -312,7 +319,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                                     )
                                 }
                             }
-                            items(videos, key = { it.videoId }) { video ->
+                            gridItems(videos, key = { it.videoId }) { video ->
                                 VideoCard(
                                     video,
                                     onClick = { ui.openWatch(video, videos) },
@@ -320,34 +327,36 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                                     onDownload = { ui.download(video) },
                                     onPlayNext = { ui.playNext(video) },
                                     onAddToQueue = { ui.addToQueue(video) },
+                                    horizontalInset = layout.videoCardInset,
+                                    bottomPadding = layout.videoCardGap,
                                 )
                             }
                             if (loadingMore) {
-                                item { LoadingBox(Modifier.height(70.dp)) }
+                                item(span = { GridItemSpan(maxLineSpan) }) { LoadingBox(Modifier.height(70.dp)) }
                             }
                         }
 
                     CHANNEL_TAB_LIVE -> {
                         val videos = livePage?.videos.orEmpty()
                             when {
-                                livePage == null && liveError == null -> item(key = "live-loading") {
+                                livePage == null && liveError == null -> item(key = "live-loading", span = { GridItemSpan(maxLineSpan) }) {
                                     LoadingBox(Modifier.height(120.dp))
                                 }
-                                liveError != null && livePage == null -> item(key = "live-error") {
+                                liveError != null && livePage == null -> item(key = "live-error", span = { GridItemSpan(maxLineSpan) }) {
                                     ErrorState(
                                         liveError!!,
                                         onRetry = { scope.launch { loadLive(true) } },
                                         modifier = Modifier.fillMaxWidth(),
                                     )
                                 }
-                                videos.isEmpty() -> item(key = "live-empty") {
+                                videos.isEmpty() -> item(key = "live-empty", span = { GridItemSpan(maxLineSpan) }) {
                                     EmptyState(
                                         title = "No live videos",
                                         subtitle = "This channel isn't live right now and has no recent streams.",
                                         modifier = Modifier.fillMaxWidth(),
                                     )
                                 }
-                                else -> items(videos, key = { "live-" + it.videoId }) { video ->
+                                else -> gridItems(videos, key = { "live-" + it.videoId }) { video ->
                                     VideoCard(
                                         video,
                                         onClick = { ui.openWatch(video, videos) },
@@ -355,6 +364,8 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                                         onDownload = { ui.download(video) },
                                         onPlayNext = { ui.playNext(video) },
                                         onAddToQueue = { ui.addToQueue(video) },
+                                        horizontalInset = layout.videoCardInset,
+                                        bottomPadding = layout.videoCardGap,
                                     )
                                 }
                             }
@@ -362,11 +373,11 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
 
                     CHANNEL_TAB_PLAYLISTS -> {
                         when {
-                            !playlistsLoaded && playlistsLoading -> item(key = "pl-loading") {
+                            !playlistsLoaded && playlistsLoading -> item(key = "pl-loading", span = { GridItemSpan(maxLineSpan) }) {
                                     LoadingBox(Modifier.height(120.dp))
                                 }
 
-                                playlistsError != null && playlists.isEmpty() -> item(key = "pl-error") {
+                                playlistsError != null && playlists.isEmpty() -> item(key = "pl-error", span = { GridItemSpan(maxLineSpan) }) {
                                     ErrorState(
                                         playlistsError!!,
                                         onRetry = { scope.launch { loadPlaylists(true) } },
@@ -374,7 +385,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                                     )
                                 }
 
-                                !hasPlaylistsTab -> item(key = "pl-no-tab") {
+                                !hasPlaylistsTab -> item(key = "pl-no-tab", span = { GridItemSpan(maxLineSpan) }) {
                                     EmptyState(
                                         title = "No playlists",
                                         subtitle = "This channel doesn't have a playlists section.",
@@ -382,7 +393,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                                     )
                                 }
 
-                                playlists.isEmpty() -> item(key = "pl-empty") {
+                                playlists.isEmpty() -> item(key = "pl-empty", span = { GridItemSpan(maxLineSpan) }) {
                                     EmptyState(
                                         title = "No playlists",
                                         subtitle = "This channel has no public playlists.",
@@ -391,22 +402,25 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                                 }
 
                                 else -> {
-                                    itemsIndexed(
+                                    gridItemsIndexed(
                                         playlistRows,
                                         key = { _, row -> "pl-row-" + row.first().playlistId },
+                                        span = { _, _ -> GridItemSpan(maxLineSpan) },
                                     ) { _, row ->
                                         ChannelPlaylistRow(row, columns) { pl ->
                                             ui.open(Screen.YtPlaylist(pl.playlistId, pl.title))
                                         }
                                     }
                                     if (loadingMorePlaylists) {
-                                        item(key = "pl-loading-more") { LoadingBox(Modifier.height(70.dp)) }
+                                        item(key = "pl-loading-more", span = { GridItemSpan(maxLineSpan) }) {
+                                            LoadingBox(Modifier.height(70.dp))
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        else -> item(key = "about") {
+                        else -> item(key = "about", span = { GridItemSpan(maxLineSpan) }) {
                             ChannelAboutTab(
                                 about = about,
                                 loading = aboutLoading,
@@ -422,7 +436,7 @@ fun ChannelScreen(container: Container, ui: UiRefs, screen: Screen.Channel) {
                             )
                         }
                     }
-                    item { Spacer(Modifier.height(10.dp)) }
+                    item(span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(10.dp)) }
                 }
             }
         }

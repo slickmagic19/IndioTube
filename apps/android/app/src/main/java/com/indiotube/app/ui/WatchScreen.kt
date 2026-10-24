@@ -38,6 +38,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -480,7 +482,11 @@ fun WatchScreen(
 
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val effectiveFullscreen = fullscreen || isLandscape
+    // Tablets keep the page visible in landscape: rotating no longer means
+    // fullscreen, it reveals the two-pane watch page. Phones keep YouTube's
+    // rotate-to-fullscreen gesture.
+    val layout = rememberWindowLayout()
+    val effectiveFullscreen = fullscreen || layout.autoFullscreenInLandscape
 
     // the bottom navigation stays everywhere except real fullscreen playback
     LaunchedEffect(effectiveFullscreen) { ui.playerFullscreen = effectiveFullscreen }
@@ -542,6 +548,22 @@ fun WatchScreen(
     }
 
     fun toggleFullscreen() {
+        // A tablet has room for a real fullscreen watch page, so the landscape
+        // layout is not one. Entering from portrait still rotates so the video
+        // gets the whole width; leaving hands rotation back to the device.
+        if (layout.isTablet) {
+            if (fullscreen) {
+                fullscreen = false
+                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            } else {
+                fullscreen = true
+                if (!isLandscape) {
+                    activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                }
+                controlsVisible = true
+            }
+            return
+        }
         val target = !fullscreen && !isLandscape
         fullscreen = target
         // A single, deterministic rotation: the plain landscape lock always
@@ -642,7 +664,455 @@ fun WatchScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    // YouTube's tablet watch page: the video and its page share the left
+    // column while Up next becomes an independent rail on the right. On a
+    // phone, or a portrait tablet, the same content is one scrolling column.
+    val twoPane = layout.watchTwoPane
+
+    fun LazyListScope.watchDetails() {
+        item {
+
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = YtText,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 22.sp,
+                )
+                Spacer(Modifier.height(4.dp))
+                val meta = listOfNotNull(
+                    viewsText?.takeIf { it.isNotBlank() },
+                    publishedText?.takeIf { it.isNotBlank() },
+                ).joinToString(" • ")
+                if (meta.isNotBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isLiveStream) {
+                            LiveBadge()
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(meta, style = MaterialTheme.typography.bodySmall, color = YtMuted)
+                    }
+                }
+            }
+        }
+
+        item {
+            Row(
+                Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 6.dp),
+            ) {
+                ActionButton(
+                    icon = {
+                        Icon(
+                            if (liked) Icons.Filled.ThumbUp else Icons.Outlined.ThumbUp,
+                            null,
+                            tint = if (liked) YtBlue else YtText,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    },
+                    label = if (liked) "Liked" else (likesText ?: "Like"),
+                    active = liked,
+                ) {
+                    liked = container.library.toggleLike(merged)
+                    if (liked) disliked = false
+                }
+                ActionButton(
+                    icon = {
+                        Icon(
+                            Icons.Outlined.ThumbDown,
+                            null,
+                            tint = if (disliked) YtBlue else YtText,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    },
+                    label = "Dislike",
+                    active = disliked,
+                ) {
+                    disliked = !disliked
+                    if (disliked && liked) liked = container.library.toggleLike(merged)
+                }
+                ActionButton(
+                    icon = { Icon(Icons.Outlined.Share, null, tint = YtText, modifier = Modifier.size(24.dp)) },
+                    label = "Share",
+                ) {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, "https://youtu.be/${video.videoId}")
+                    }
+                    try {
+                        ctx.startActivity(Intent.createChooser(send, "Share video"))
+                    } catch (_: Exception) {
+                        ui.toast("Nothing to share with")
+                    }
+                }
+                ActionButton(
+                    icon = {
+                        when {
+                            membersOnly -> Icon(
+                                Icons.Filled.Lock,
+                                null,
+                                tint = YtMuted,
+                                modifier = Modifier.size(24.dp),
+                            )
+                            downloaded -> Icon(
+                                Icons.Filled.DownloadDone,
+                                null,
+                                tint = YtBlue,
+                                modifier = Modifier.size(24.dp),
+                            )
+                            dlTask != null && dlTask.status == DlStatus.ACTIVE -> {
+                                if (dlTask.indeterminate) {
+                                    CircularProgressIndicator(
+                                        color = YtBlue,
+                                        strokeWidth = 2.5.dp,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                } else {
+                                    CircularProgressIndicator(
+                                        progress = { dlTask.progress },
+                                        color = YtBlue,
+                                        strokeWidth = 2.5.dp,
+                                        modifier = Modifier.size(22.dp),
+                                    )
+                                }
+                            }
+                            else -> Icon(Icons.Outlined.Download, null, tint = YtText, modifier = Modifier.size(24.dp))
+                        }
+                    },
+                    label = when {
+                        membersOnly -> "Members"
+                        downloaded -> "Downloaded"
+                        dlTask?.status == DlStatus.ACTIVE -> {
+                            val task = dlTask
+                            if (!task.indeterminate) {
+                                "${(task.progress * 100).toInt()}%"
+                            } else {
+                                "Downloading"
+                            }
+                        }
+                        dlTask?.status == DlStatus.PAUSED -> "Resume"
+                        dlTask?.status == DlStatus.FAILED -> "Retry"
+                        else -> "Download"
+                    },
+                ) {
+                    when {
+                        membersOnly -> ui.toast("Members-only video — can't download")
+                        downloaded -> ui.toast("Saved in Downloads — watch it offline anytime")
+                        dlTask?.status == DlStatus.ACTIVE -> container.downloads.pause(video.videoId)
+                        dlTask?.status == DlStatus.PAUSED || dlTask?.status == DlStatus.FAILED ->
+                            container.downloads.resume(video.videoId)
+                        else -> downloadSheet = true
+                    }
+                }
+                ActionButton(
+                    icon = { Icon(Icons.AutoMirrored.Outlined.PlaylistAdd, null, tint = YtText, modifier = Modifier.size(24.dp)) },
+                    label = "Save",
+                ) {
+                    saveSheet = true
+                }
+                // Overflow menu, like the app's "..." next to Save: the
+                // remainder actions live here instead of stretching the
+                // row any further.
+                Box {
+                    var moreOpen by remember { mutableStateOf(false) }
+                    ActionButton(
+                        icon = { Icon(Icons.Filled.MoreVert, null, tint = YtText, modifier = Modifier.size(24.dp)) },
+                        label = "More",
+                    ) {
+                        moreOpen = true
+                    }
+                    DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (videoWatched) "Mark as unwatched" else "Mark as watched")
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    if (videoWatched) Icons.Outlined.Refresh else Icons.Filled.CheckCircle,
+                                    null,
+                                    tint = YtText,
+                                )
+                            },
+                            onClick = {
+                                moreOpen = false
+                                ui.toggleWatched(merged)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Play next") },
+                            leadingIcon = {
+                                Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, null, tint = YtText)
+                            },
+                            onClick = {
+                                moreOpen = false
+                                ui.playNext(merged)
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Add to queue") },
+                            leadingIcon = {
+                                Icon(Icons.AutoMirrored.Filled.QueueMusic, null, tint = YtText)
+                            },
+                            onClick = {
+                                moreOpen = false
+                                ui.addToQueue(merged)
+                            },
+                        )
+                    }
+                }
+                Spacer(Modifier.width(6.dp))
+            }
+        }
+
+        item {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { ui.openChannel(channelId, channelName, channelAvatar) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ChannelAvatar(channelName, channelAvatar, 40.dp)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        channelName ?: "Unknown channel",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = YtText,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!subscribersText.isNullOrBlank()) {
+                        Text(subscribersText, style = MaterialTheme.typography.bodySmall, color = YtMuted, maxLines = 1)
+                    }
+                }
+                if (!channelId.isNullOrBlank()) {
+                    SubscribeButton(subscribed) {
+                        ui.toggleSubscribe(
+                            ChannelItem(
+                                channelId = channelId,
+                                name = channelName.orEmpty(),
+                                avatar = channelAvatar,
+                                subscribersText = subscribersText,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+
+        if (!description.isNullOrBlank() || chapters.isNotEmpty()) {
+            item {
+                Column(
+                    Modifier
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(YtSurfaceHi)
+                        .clickable { descExpanded = !descExpanded }
+                        .padding(12.dp),
+                ) {
+                    val meta = listOfNotNull(
+                        viewsText?.takeIf { it.isNotBlank() },
+                        publishedText?.takeIf { it.isNotBlank() },
+                    ).joinToString(" • ")
+                    if (meta.isNotBlank() && descExpanded) {
+                        Text(
+                            meta,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = YtText,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (descExpanded && chapters.isNotEmpty()) {
+                        // Chapter rows seek straight to the marker. The
+                        // inner clickable consumes the tap so the card
+                        // doesn't collapse under the user's finger.
+                        chapters.forEach { chapter ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { player.seekTo(chapter.startMs) }
+                                    .padding(horizontal = 2.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    chapterTimestamp(chapter.startMs),
+                                    color = YtBlue,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    chapter.title,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = YtText,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
+                        if (descriptionText.isNotBlank()) Spacer(Modifier.height(8.dp))
+                    }
+                    if (descriptionText.isNotBlank()) {
+                        Text(
+                            if (descExpanded) descriptionText else descriptionPreview,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = YtText,
+                            maxLines = if (descExpanded) Int.MAX_VALUE else 2,
+                            overflow = TextOverflow.Ellipsis,
+                            lineHeight = 19.sp,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                    }
+
+                    Text(
+                        if (descExpanded) "Show less" else "Show more",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = YtText,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+        }
+
+        // ---- live chat -------------------------------------------------
+        val chatInfo = watch?.liveChat
+        if (chatInfo != null) {
+            item {
+                LiveChatSection(
+                    messages = chatMessages,
+                    replay = chatInfo.replay,
+                    viewersText = if (isLiveStream) viewsText else null,
+                    expanded = chatExpanded,
+                    loading = chatConnecting,
+                    onToggle = { chatExpanded = !chatExpanded },
+                )
+            }
+        }
+
+        // ---- comments -------------------------------------------------
+        item {
+            SectionHeader(
+                listOfNotNull("Comments", watch?.commentsCountText).joinToString(" "),
+            )
+        }
+        if (loadingComments && comments.isEmpty()) {
+            items(3) { CommentSkeleton() }
+        } else if (comments.isEmpty()) {
+            item {
+                Text(
+                    when {
+                        watch == null -> "Loading comments…"
+                        watch?.commentsToken == null -> "Comments are turned off."
+                        else -> "No comments yet. Be the first to react?"
+                    },
+                    color = YtMuted,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            }
+        }
+        items(comments, key = { it.id }) { c ->
+            val replies = replyStates[c.id]
+            CommentRow(
+                c = c,
+                replies = replies,
+                onToggleReplies = if (c.repliesToken != null) {
+                    { toggleReplies(c) }
+                } else {
+                    null
+                },
+                onLoadMoreReplies = if (replies?.continuation != null) {
+                    { loadMoreReplies(c) }
+                } else {
+                    null
+                },
+                maxSeconds = if (duration > 0) duration / 1000 else 0,
+                onSeek = { seconds ->
+                    controlsVisible = true
+                    player.seekTo(seconds * 1000)
+                },
+            )
+        }
+        if (commentsToken != null) {
+            item {
+                if (loadingMoreComments) {
+                    LoadingBox(Modifier.height(60.dp))
+                } else {
+                    FillRowButton("Load more comments") {
+                        val token = commentsToken ?: return@FillRowButton
+                        scope.launch {
+                            loadingMoreComments = true
+                            try {
+                                val page = container.innerTube.comments(token)
+                                comments = comments + page.comments
+                                commentsToken = page.continuation
+                            } catch (_: Exception) {
+                                ui.toast("Couldn't load more comments")
+                            }
+                            loadingMoreComments = false
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(10.dp)) }
+    }
+
+    fun LazyListScope.upNextSection() {
+        // ---- up next ---------------------------------------------------
+        val related = watch?.related.orEmpty().recommendableVideos()
+        val hasNext = queue.size > 1
+        if (hasNext || related.isNotEmpty()) {
+            item {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Up next",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = YtText,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "Autoplay",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = YtMuted,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    AutoplaySwitch(
+                        checked = autoplayNext,
+                        onCheckedChange = { player.setAutoplayNext(it) },
+                    )
+                }
+                HorizontalDivider(color = YtDivider)
+            }
+            items(related, key = { "rel-" + it.videoId }) { v ->
+                VideoRow(
+                    v,
+                    onClick = { ui.openWatch(v, related) },
+                    onChannelClick = { ui.openChannelOf(v) },
+                    trailing = {
+                        VideoActionsMenu(
+                            onPlayNext = { ui.playNext(v) },
+                            onAddToQueue = { ui.addToQueue(v) },
+                        )
+                    },
+                )
+            }
+        }
+        item { Spacer(Modifier.height(10.dp)) }
+    }
+
+    val playerSurface: @Composable () -> Unit = {
         // ---- player surface -------------------------------------------------
         Box(
             Modifier
@@ -942,448 +1412,39 @@ fun WatchScreen(
                 }
             }
         }
+    }
 
-        // ---- page below the player -------------------------------------------
-        if (!effectiveFullscreen) {
-            LazyColumn(state = pageState, modifier = Modifier.fillMaxSize()) {
-                item {
-
-                    Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
-                        Text(
-                            title,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                            color = YtText,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            lineHeight = 22.sp,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        val meta = listOfNotNull(
-                            viewsText?.takeIf { it.isNotBlank() },
-                            publishedText?.takeIf { it.isNotBlank() },
-                        ).joinToString(" • ")
-                        if (meta.isNotBlank()) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (isLiveStream) {
-                                    LiveBadge()
-                                    Spacer(Modifier.width(6.dp))
-                                }
-                                Text(meta, style = MaterialTheme.typography.bodySmall, color = YtMuted)
-                            }
-                        }
-                    }
-                }
-
-                item {
-                    Row(
-                        Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 6.dp),
+    Column(Modifier.fillMaxSize()) {
+        if (twoPane && !effectiveFullscreen) {
+            Row(Modifier.fillMaxSize()) {
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    playerSurface()
+                    LazyColumn(
+                        state = pageState,
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
                     ) {
-                        ActionButton(
-                            icon = {
-                                Icon(
-                                    if (liked) Icons.Filled.ThumbUp else Icons.Outlined.ThumbUp,
-                                    null,
-                                    tint = if (liked) YtBlue else YtText,
-                                    modifier = Modifier.size(24.dp),
-                                )
-                            },
-                            label = if (liked) "Liked" else (likesText ?: "Like"),
-                            active = liked,
-                        ) {
-                            liked = container.library.toggleLike(merged)
-                            if (liked) disliked = false
-                        }
-                        ActionButton(
-                            icon = {
-                                Icon(
-                                    Icons.Outlined.ThumbDown,
-                                    null,
-                                    tint = if (disliked) YtBlue else YtText,
-                                    modifier = Modifier.size(24.dp),
-                                )
-                            },
-                            label = "Dislike",
-                            active = disliked,
-                        ) {
-                            disliked = !disliked
-                            if (disliked && liked) liked = container.library.toggleLike(merged)
-                        }
-                        ActionButton(
-                            icon = { Icon(Icons.Outlined.Share, null, tint = YtText, modifier = Modifier.size(24.dp)) },
-                            label = "Share",
-                        ) {
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, "https://youtu.be/${video.videoId}")
-                            }
-                            try {
-                                ctx.startActivity(Intent.createChooser(send, "Share video"))
-                            } catch (_: Exception) {
-                                ui.toast("Nothing to share with")
-                            }
-                        }
-                        ActionButton(
-                            icon = {
-                                when {
-                                    membersOnly -> Icon(
-                                        Icons.Filled.Lock,
-                                        null,
-                                        tint = YtMuted,
-                                        modifier = Modifier.size(24.dp),
-                                    )
-                                    downloaded -> Icon(
-                                        Icons.Filled.DownloadDone,
-                                        null,
-                                        tint = YtBlue,
-                                        modifier = Modifier.size(24.dp),
-                                    )
-                                    dlTask != null && dlTask.status == DlStatus.ACTIVE -> {
-                                        if (dlTask.indeterminate) {
-                                            CircularProgressIndicator(
-                                                color = YtBlue,
-                                                strokeWidth = 2.5.dp,
-                                                modifier = Modifier.size(22.dp),
-                                            )
-                                        } else {
-                                            CircularProgressIndicator(
-                                                progress = { dlTask.progress },
-                                                color = YtBlue,
-                                                strokeWidth = 2.5.dp,
-                                                modifier = Modifier.size(22.dp),
-                                            )
-                                        }
-                                    }
-                                    else -> Icon(Icons.Outlined.Download, null, tint = YtText, modifier = Modifier.size(24.dp))
-                                }
-                            },
-                            label = when {
-                                membersOnly -> "Members"
-                                downloaded -> "Downloaded"
-                                dlTask?.status == DlStatus.ACTIVE -> {
-                                    val task = dlTask
-                                    if (!task.indeterminate) {
-                                        "${(task.progress * 100).toInt()}%"
-                                    } else {
-                                        "Downloading"
-                                    }
-                                }
-                                dlTask?.status == DlStatus.PAUSED -> "Resume"
-                                dlTask?.status == DlStatus.FAILED -> "Retry"
-                                else -> "Download"
-                            },
-                        ) {
-                            when {
-                                membersOnly -> ui.toast("Members-only video — can't download")
-                                downloaded -> ui.toast("Saved in Downloads — watch it offline anytime")
-                                dlTask?.status == DlStatus.ACTIVE -> container.downloads.pause(video.videoId)
-                                dlTask?.status == DlStatus.PAUSED || dlTask?.status == DlStatus.FAILED ->
-                                    container.downloads.resume(video.videoId)
-                                else -> downloadSheet = true
-                            }
-                        }
-                        ActionButton(
-                            icon = { Icon(Icons.AutoMirrored.Outlined.PlaylistAdd, null, tint = YtText, modifier = Modifier.size(24.dp)) },
-                            label = "Save",
-                        ) {
-                            saveSheet = true
-                        }
-                        // Overflow menu, like the app's "..." next to Save: the
-                        // remainder actions live here instead of stretching the
-                        // row any further.
-                        Box {
-                            var moreOpen by remember { mutableStateOf(false) }
-                            ActionButton(
-                                icon = { Icon(Icons.Filled.MoreVert, null, tint = YtText, modifier = Modifier.size(24.dp)) },
-                                label = "More",
-                            ) {
-                                moreOpen = true
-                            }
-                            DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(if (videoWatched) "Mark as unwatched" else "Mark as watched")
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            if (videoWatched) Icons.Outlined.Refresh else Icons.Filled.CheckCircle,
-                                            null,
-                                            tint = YtText,
-                                        )
-                                    },
-                                    onClick = {
-                                        moreOpen = false
-                                        ui.toggleWatched(merged)
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Play next") },
-                                    leadingIcon = {
-                                        Icon(Icons.AutoMirrored.Outlined.PlaylistPlay, null, tint = YtText)
-                                    },
-                                    onClick = {
-                                        moreOpen = false
-                                        ui.playNext(merged)
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Add to queue") },
-                                    leadingIcon = {
-                                        Icon(Icons.AutoMirrored.Filled.QueueMusic, null, tint = YtText)
-                                    },
-                                    onClick = {
-                                        moreOpen = false
-                                        ui.addToQueue(merged)
-                                    },
-                                )
-                            }
-                        }
-                        Spacer(Modifier.width(6.dp))
+                        watchDetails()
                     }
                 }
-
-                item {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { ui.openChannel(channelId, channelName, channelAvatar) }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        ChannelAvatar(channelName, channelAvatar, 40.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                channelName ?: "Unknown channel",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = YtText,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (!subscribersText.isNullOrBlank()) {
-                                Text(subscribersText, style = MaterialTheme.typography.bodySmall, color = YtMuted, maxLines = 1)
-                            }
-                        }
-                        if (!channelId.isNullOrBlank()) {
-                            SubscribeButton(subscribed) {
-                                ui.toggleSubscribe(
-                                    ChannelItem(
-                                        channelId = channelId,
-                                        name = channelName.orEmpty(),
-                                        avatar = channelAvatar,
-                                        subscribersText = subscribersText,
-                                    ),
-                                )
-                            }
-                        }
-                    }
+                Box(Modifier.fillMaxHeight().width(1.dp).background(YtDivider))
+                UpNextRail(
+                    videos = watch?.related.orEmpty().recommendableVideos(),
+                    autoplay = autoplayNext,
+                    onToggleAutoplay = { player.setAutoplayNext(it) },
+                    onOpen = { v -> ui.openWatch(v, watch?.related.orEmpty().recommendableVideos()) },
+                    onChannelClick = { v -> ui.openChannelOf(v) },
+                    onPlayNext = { v -> ui.playNext(v) },
+                    onAddToQueue = { v -> ui.addToQueue(v) },
+                    modifier = Modifier.width(layout.upNextRailWidth).fillMaxHeight(),
+                )
+            }
+        } else {
+            playerSurface()
+            if (!effectiveFullscreen) {
+                LazyColumn(state = pageState, modifier = Modifier.fillMaxSize()) {
+                    watchDetails()
+                    upNextSection()
                 }
-
-                if (!description.isNullOrBlank() || chapters.isNotEmpty()) {
-                    item {
-                        Column(
-                            Modifier
-                                .padding(horizontal = 12.dp, vertical = 4.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(YtSurfaceHi)
-                                .clickable { descExpanded = !descExpanded }
-                                .padding(12.dp),
-                        ) {
-                            val meta = listOfNotNull(
-                                viewsText?.takeIf { it.isNotBlank() },
-                                publishedText?.takeIf { it.isNotBlank() },
-                            ).joinToString(" • ")
-                            if (meta.isNotBlank() && descExpanded) {
-                                Text(
-                                    meta,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = YtText,
-                                )
-                                Spacer(Modifier.height(8.dp))
-                            }
-                            if (descExpanded && chapters.isNotEmpty()) {
-                                // Chapter rows seek straight to the marker. The
-                                // inner clickable consumes the tap so the card
-                                // doesn't collapse under the user's finger.
-                                chapters.forEach { chapter ->
-                                    Row(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .clickable { player.seekTo(chapter.startMs) }
-                                            .padding(horizontal = 2.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Text(
-                                            chapterTimestamp(chapter.startMs),
-                                            color = YtBlue,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium,
-                                        )
-                                        Spacer(Modifier.width(10.dp))
-                                        Text(
-                                            chapter.title,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = YtText,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f),
-                                        )
-                                    }
-                                }
-                                if (descriptionText.isNotBlank()) Spacer(Modifier.height(8.dp))
-                            }
-                            if (descriptionText.isNotBlank()) {
-                                Text(
-                                    if (descExpanded) descriptionText else descriptionPreview,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = YtText,
-                                    maxLines = if (descExpanded) Int.MAX_VALUE else 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    lineHeight = 19.sp,
-                                )
-                                Spacer(Modifier.height(6.dp))
-                            }
-
-                            Text(
-                                if (descExpanded) "Show less" else "Show more",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = YtText,
-                                fontWeight = FontWeight.Medium,
-                            )
-                        }
-                    }
-                }
-
-                // ---- live chat -------------------------------------------------
-                val chatInfo = watch?.liveChat
-                if (chatInfo != null) {
-                    item {
-                        LiveChatSection(
-                            messages = chatMessages,
-                            replay = chatInfo.replay,
-                            viewersText = if (isLiveStream) viewsText else null,
-                            expanded = chatExpanded,
-                            loading = chatConnecting,
-                            onToggle = { chatExpanded = !chatExpanded },
-                        )
-                    }
-                }
-
-                // ---- comments -------------------------------------------------
-                item {
-                    SectionHeader(
-                        listOfNotNull("Comments", watch?.commentsCountText).joinToString(" "),
-                    )
-                }
-                if (loadingComments && comments.isEmpty()) {
-                    items(3) { CommentSkeleton() }
-                } else if (comments.isEmpty()) {
-                    item {
-                        Text(
-                            when {
-                                watch == null -> "Loading comments…"
-                                watch?.commentsToken == null -> "Comments are turned off."
-                                else -> "No comments yet. Be the first to react?"
-                            },
-                            color = YtMuted,
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        )
-                    }
-                }
-                items(comments, key = { it.id }) { c ->
-                    val replies = replyStates[c.id]
-                    CommentRow(
-                        c = c,
-                        replies = replies,
-                        onToggleReplies = if (c.repliesToken != null) {
-                            { toggleReplies(c) }
-                        } else {
-                            null
-                        },
-                        onLoadMoreReplies = if (replies?.continuation != null) {
-                            { loadMoreReplies(c) }
-                        } else {
-                            null
-                        },
-                        maxSeconds = if (duration > 0) duration / 1000 else 0,
-                        onSeek = { seconds ->
-                            controlsVisible = true
-                            player.seekTo(seconds * 1000)
-                        },
-                    )
-                }
-                if (commentsToken != null) {
-                    item {
-                        if (loadingMoreComments) {
-                            LoadingBox(Modifier.height(60.dp))
-                        } else {
-                            FillRowButton("Load more comments") {
-                                val token = commentsToken ?: return@FillRowButton
-                                scope.launch {
-                                    loadingMoreComments = true
-                                    try {
-                                        val page = container.innerTube.comments(token)
-                                        comments = comments + page.comments
-                                        commentsToken = page.continuation
-                                    } catch (_: Exception) {
-                                        ui.toast("Couldn't load more comments")
-                                    }
-                                    loadingMoreComments = false
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ---- up next ---------------------------------------------------
-                val related = watch?.related.orEmpty().recommendableVideos()
-                val hasNext = queue.size > 1
-                if (hasNext || related.isNotEmpty()) {
-                    item {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                "Up next",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                                color = YtText,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                "Autoplay",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = YtMuted,
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            AutoplaySwitch(
-                                checked = autoplayNext,
-                                onCheckedChange = { player.setAutoplayNext(it) },
-                            )
-                        }
-                        HorizontalDivider(color = YtDivider)
-                    }
-                    items(related, key = { "rel-" + it.videoId }) { v ->
-                        VideoRow(
-                            v,
-                            onClick = { ui.openWatch(v, related) },
-                            onChannelClick = { ui.openChannelOf(v) },
-                            trailing = {
-                                VideoActionsMenu(
-                                    onPlayNext = { ui.playNext(v) },
-                                    onAddToQueue = { ui.addToQueue(v) },
-                                )
-                            },
-                        )
-                    }
-                }
-
-                item { Spacer(Modifier.height(10.dp)) }
             }
         }
     }
@@ -1567,6 +1628,75 @@ private fun AutoplaySwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit)
                 center = Offset(centerX, centerY),
             )
         }
+    }
+}
+
+// YouTube's tablet watch page keeps recommendations in a rail beside the
+// video. It scrolls independently of the page on the left and carries the
+// same Autoplay switch as the inline Up next section.
+@Composable
+internal fun UpNextRail(
+    videos: List<VideoItem>,
+    autoplay: Boolean,
+    onToggleAutoplay: (Boolean) -> Unit,
+    onOpen: (VideoItem) -> Unit,
+    onChannelClick: (VideoItem) -> Unit,
+    onPlayNext: (VideoItem) -> Unit,
+    onAddToQueue: (VideoItem) -> Unit,
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+) {
+    LazyColumn(modifier, state = listState) {
+        item(key = "up-next-header") {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Up next",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = YtText,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "Autoplay",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = YtMuted,
+                )
+                Spacer(Modifier.width(4.dp))
+                AutoplaySwitch(checked = autoplay, onCheckedChange = onToggleAutoplay)
+            }
+            HorizontalDivider(color = YtDivider)
+        }
+        if (videos.isEmpty()) {
+            item(key = "up-next-empty") {
+                Text(
+                    "No recommendations right now",
+                    color = YtMuted,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+                )
+            }
+        }
+        items(videos, key = { "rail-" + it.videoId }) { v ->
+            // Slightly denser than the inline list so the title keeps room
+            // next to the thumbnail in the narrower rail.
+            VideoRow(
+                v,
+                height = 84.dp,
+                onClick = { onOpen(v) },
+                onChannelClick = { onChannelClick(v) },
+                trailing = {
+                    VideoActionsMenu(
+                        onPlayNext = { onPlayNext(v) },
+                        onAddToQueue = { onAddToQueue(v) },
+                    )
+                },
+            )
+        }
+        item { Spacer(Modifier.height(10.dp)) }
     }
 }
 

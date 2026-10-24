@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,6 +40,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -376,6 +380,20 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
         }
     }
 
+    // Tablets browse from a left navigation rail and lay their feeds out in
+    // columns; phones keep the bottom bar. The choice is a pure function of
+    // the window so every screen below it can share one policy.
+    val layout = rememberWindowLayout()
+    val useRail = layout.useNavigationRail
+    val goTab: (Int) -> Unit = { i ->
+        // Tapping Home returns to the feed and refreshes it, the way
+        // YouTube's home tab behaves.
+        if (i == 0) ui.refreshHome()
+        tab = i
+        stack.clear()
+        searchState.reset()
+    }
+
     val current by player.current.collectAsState()
     val playerError by player.error.collectAsState()
     LaunchedEffect(playerError) {
@@ -439,45 +457,53 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
         Scaffold(
             containerColor = YtBg,
             bottomBar = {
-                Column {
-                    if (current != null && !watchOpen) {
-                        MiniPlayer(container, ui, player)
-                    }
-                    // The bottom navigation never disappears: it stays put on
-                    // watch, search, channel and every other screen. It only
-                    // yields during fullscreen playback.
-                    if (!ui.playerFullscreen) {
-                        BottomBar(if (stack.isEmpty) tab else -1) { i ->
-                            // Tapping Home returns to the feed and refreshes
-                            // it, the way YouTube's home tab behaves.
-                            if (i == 0) ui.refreshHome()
-                            tab = i
-                            stack.clear()
-                            searchState.reset()
+                // The bottom navigation and the mini player belong to the
+                // phone layout only; a tablet gets the rail and a mini player
+                // docked at the bottom of the content area instead.
+                if (!useRail) {
+                    Column {
+                        if (current != null && !watchOpen) {
+                            MiniPlayer(container, ui, player)
+                        }
+                        // The bottom navigation never disappears: it stays put
+                        // on watch, search, channel and every other screen. It
+                        // only yields during fullscreen playback.
+                        if (!ui.playerFullscreen) {
+                            BottomBar(if (stack.isEmpty) tab else -1, goTab)
                         }
                     }
                 }
             },
         ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding)) {
-                if (stack.isEmpty) {
-                    when (tab) {
-                        0 -> HomeScreen(container, ui)
-                        1 -> ExploreScreen(container, ui)
-                        2 -> SubscriptionsScreen(container, ui)
-                        else -> YouScreen(container, ui)
+            Row(Modifier.fillMaxSize().padding(padding)) {
+                if (useRail && !ui.playerFullscreen) {
+                    TabletNavRail(if (stack.isEmpty) tab else -1, goTab)
+                }
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        if (stack.isEmpty) {
+                            when (tab) {
+                                0 -> HomeScreen(container, ui)
+                                1 -> ExploreScreen(container, ui)
+                                2 -> SubscriptionsScreen(container, ui)
+                                else -> YouScreen(container, ui)
+                            }
+                        } else {
+                            when (val s = stack.top) {
+                                is Screen.Watch -> WatchScreen(container, player, ui, s.video, s.context ?: listOf(s.video))
+                                is Screen.Channel -> ChannelScreen(container, ui, s)
+                                is Screen.YtPlaylist -> YtPlaylistScreen(container, ui, s.playlistId, s.title)
+                                is Screen.LocalPlaylist -> LocalPlaylistScreen(container, ui, s.id)
+                                is Screen.LibraryList -> LibraryListScreen(container, ui, s.kind)
+                                Screen.Search -> SearchScreen(container, ui)
+                                Screen.Downloads -> DownloadsScreen(container, ui, player)
+                                Screen.ManageSubscriptions -> ManageSubsScreen(container, ui)
+                                Screen.Settings -> SettingsScreen(container, ui)
+                            }
+                        }
                     }
-                } else {
-                    when (val s = stack.top) {
-                        is Screen.Watch -> WatchScreen(container, player, ui, s.video, s.context ?: listOf(s.video))
-                        is Screen.Channel -> ChannelScreen(container, ui, s)
-                        is Screen.YtPlaylist -> YtPlaylistScreen(container, ui, s.playlistId, s.title)
-                        is Screen.LocalPlaylist -> LocalPlaylistScreen(container, ui, s.id)
-                        is Screen.LibraryList -> LibraryListScreen(container, ui, s.kind)
-                        Screen.Search -> SearchScreen(container, ui)
-                        Screen.Downloads -> DownloadsScreen(container, ui, player)
-                        Screen.ManageSubscriptions -> ManageSubsScreen(container, ui)
-                        Screen.Settings -> SettingsScreen(container, ui)
+                    if (useRail && current != null && !watchOpen) {
+                        MiniPlayer(container, ui, player)
                     }
                 }
             }
@@ -493,6 +519,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                 bottom = when {
                     ui.playerFullscreen -> 24.dp
                     current != null && !watchOpen -> 180.dp
+                    useRail -> 24.dp
                     else -> 92.dp
                 },
             ),
@@ -501,16 +528,18 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
     }
 }
 
+// The four destinations, shared by the phone bottom bar and the tablet rail.
+private val NavDestinations = listOf(
+    Triple("Home", Icons.Outlined.Home, Icons.Filled.Home),
+    Triple("Explore", Icons.Outlined.Explore, Icons.Filled.Explore),
+    Triple("Subscriptions", Icons.Outlined.Subscriptions, Icons.Filled.Subscriptions),
+    Triple("You", Icons.Outlined.AccountCircle, Icons.Filled.AccountCircle),
+)
+
 @Composable
 private fun BottomBar(tab: Int, onTab: (Int) -> Unit) {
     NavigationBar(containerColor = YtBg, tonalElevation = 0.dp) {
-        val items = listOf(
-            Triple("Home", Icons.Outlined.Home, Icons.Filled.Home),
-            Triple("Explore", Icons.Outlined.Explore, Icons.Filled.Explore),
-            Triple("Subscriptions", Icons.Outlined.Subscriptions, Icons.Filled.Subscriptions),
-            Triple("You", Icons.Outlined.AccountCircle, Icons.Filled.AccountCircle),
-        )
-        items.forEachIndexed { i, (label, outlined, filled) ->
+        NavDestinations.forEachIndexed { i, (label, outlined, filled) ->
             NavigationBarItem(
                 selected = tab == i,
                 onClick = { onTab(i) },
@@ -525,6 +554,44 @@ private fun BottomBar(tab: Int, onTab: (Int) -> Unit) {
                     Text(label, fontSize = 10.sp, maxLines = 1)
                 },
                 colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = YtText,
+                    selectedTextColor = YtText,
+                    unselectedIconColor = YtMuted,
+                    unselectedTextColor = YtMuted,
+                    indicatorColor = Color.Transparent,
+                ),
+            )
+        }
+    }
+}
+
+// YouTube's tablet rail: icons with a label underneath, always visible on the
+// left edge, so the bottom of the screen is free for content and the mini
+// player.
+@Composable
+internal fun TabletNavRail(tab: Int, onTab: (Int) -> Unit) {
+    NavigationRail(
+        containerColor = YtBg,
+        // A little wider than Material's 80dp so "Subscriptions" fits its
+        // label without clipping at 11sp.
+        modifier = Modifier.fillMaxHeight().width(88.dp),
+        header = { Spacer(Modifier.height(8.dp)) },
+    ) {
+        NavDestinations.forEachIndexed { i, (label, outlined, filled) ->
+            NavigationRailItem(
+                selected = tab == i,
+                onClick = { onTab(i) },
+                icon = {
+                    Icon(
+                        if (tab == i) filled else outlined,
+                        contentDescription = label,
+                        modifier = Modifier.size(24.dp),
+                    )
+                },
+                label = {
+                    Text(label, fontSize = 11.sp, maxLines = 1)
+                },
+                colors = NavigationRailItemDefaults.colors(
                     selectedIconColor = YtText,
                     selectedTextColor = YtText,
                     unselectedIconColor = YtMuted,
