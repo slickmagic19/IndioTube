@@ -7,6 +7,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
@@ -74,6 +76,49 @@ class TabletNavigationRailTest {
         assertTrue("Home sits above Explore", home.bottom <= explore.top)
         assertTrue("the rail hugs the left edge", home.left < 120.dp)
         assertTrue("the rail stays narrow", home.right < 200.dp)
+    }
+
+    // The clip this rail replaces was a fixed 88dp column: once the system font
+    // scale grew, "Subscriptions" ran past the edge and lost its last letters.
+    // The rail now takes its width from its widest label, so every label has to
+    // land inside it - and it still has to stay a rail, not a drawer.
+    @Test
+    fun everyLabelFitsInsideTheRail() {
+        compose.setContent {
+            MaterialTheme {
+                Box(Modifier.fillMaxSize()) {
+                    TabletNavRail(tab = 0) {}
+                }
+            }
+        }
+
+        val rail = compose.onNodeWithTag("tablet-nav-rail").getBoundsInRoot()
+        val railWidth = rail.right - rail.left
+        assertTrue("the rail is at least the minimum width", railWidth >= 88.dp)
+        assertTrue("the rail is still a rail, not a drawer", railWidth <= 136.dp)
+
+        listOf("Home", "Explore", "Subscriptions", "You").forEach { label ->
+            val text = compose.onNodeWithText(label).getBoundsInRoot()
+            assertTrue(
+                "$label overflows the rail: ${text.right} > ${rail.right}",
+                text.right <= rail.right + 1.dp,
+            )
+            assertTrue("$label starts inside the rail", text.left >= rail.left - 1.dp)
+        }
+    }
+
+    // A selected destination is the only one that reads as picked, so the rail
+    // has to mark it without moving the icons.
+    @Test
+    fun theSelectedDestinationKeepsItsLabel() {
+        compose.setContent {
+            MaterialTheme {
+                TabletNavRail(tab = 2) {}
+            }
+        }
+
+        compose.onNodeWithText("Subscriptions").assertExists()
+        compose.onNodeWithContentDescription("Subscriptions").assertExists()
     }
 
     @Test

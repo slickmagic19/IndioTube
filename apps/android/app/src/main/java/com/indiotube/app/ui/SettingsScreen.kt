@@ -19,12 +19,15 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FastForward
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.HighQuality
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Subtitles
+import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
@@ -113,6 +116,7 @@ fun SettingsScreen(container: Container, ui: UiRefs) {
             }
             item {
                 SettingsRow(
+                    icon = Icons.Outlined.HighQuality,
                     title = "Default video quality",
                     subtitle = defaultQuality?.let { "${it}p" } ?: "Auto",
                     onClick = { qualitySheet = true },
@@ -142,6 +146,7 @@ fun SettingsScreen(container: Container, ui: UiRefs) {
             }
             item {
                 SettingsToggleRow(
+                    icon = Icons.Outlined.Wifi,
                     title = "Download over Wi-Fi only",
                     subtitle = "Wait for Wi-Fi before starting downloads",
                     checked = downloadSettings.wifiOnly,
@@ -150,6 +155,7 @@ fun SettingsScreen(container: Container, ui: UiRefs) {
             }
             item {
                 SettingsRow(
+                    icon = Icons.Outlined.Folder,
                     title = "Manage downloads",
                     subtitle = "${downloads.size} saved",
                     onClick = { ui.open(Screen.Downloads) },
@@ -455,6 +461,7 @@ private fun QualityDialog(
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
+        modifier = tabletDialogWidth(),
         onDismissRequest = onDismiss,
         containerColor = YtSurface,
         titleContentColor = YtText,
@@ -498,6 +505,7 @@ private fun SpeedDialog(
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
+        modifier = tabletDialogWidth(),
         onDismissRequest = onDismiss,
         containerColor = YtSurface,
         titleContentColor = YtText,
@@ -548,6 +556,7 @@ private fun ConfirmDialog(
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
+        modifier = tabletDialogWidth(),
         onDismissRequest = onDismiss,
         containerColor = YtSurface,
         titleContentColor = YtText,

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -607,6 +608,9 @@ internal fun ContinueWatchingRail(
     onClick: (ContinueWatchingItem) -> Unit,
     onRemove: (ContinueWatchingItem) -> Unit,
 ) {
+    // A tablet has room for a bigger card than the phone's fixed 226dp, and a
+    // fixed card just leaves the rest of the row empty.
+    val layout = rememberWindowLayout()
     Column {
         SectionHeader("Continue watching")
         LazyRow(
@@ -615,7 +619,7 @@ internal fun ContinueWatchingRail(
             items(items, key = { it.video.videoId }) { item ->
                 Column(
                     Modifier
-                        .width(226.dp)
+                        .width(layout.continueCardWidth)
                         .clickable { onClick(item) }
                         .padding(end = 10.dp, bottom = 8.dp),
                 ) {
@@ -626,7 +630,7 @@ internal fun ContinueWatchingRail(
                             live = item.video.isLive,
                             membersOnly = item.video.membersOnly,
                             progress = item.fraction,
-                            modifier = Modifier.fillMaxWidth().height(127.dp),
+                            modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
                         )
                         // Remove this card without opening it or deleting the
                         // matching Watch history row.

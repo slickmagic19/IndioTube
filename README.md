@@ -11,9 +11,7 @@ Unofficial YouTube client. No ads, no Shorts, no sign-in required. Dark theme on
 - Subscribe to channels and get a merged "Latest from your subscriptions" feed
 - Download videos for offline playback (resumable)
 - YouTube-style dark UI (home feed with chips, watch page with action row, comments, mini player)
-- Tablet layouts like YouTube's: a left navigation rail, two to four columns of feed cards, and a
-  two-pane watch page on landscape tablets — video and its details on the left, "Up next" in a
-  separate rail on the right — while rotating a phone still goes straight into fullscreen
+- Tablet layouts like YouTube's: a left navigation rail that sizes itself to its widest label (so nothing clips at large system font scales), two to four columns of feed cards, continue-watching cards that grow with the window, and a two-pane watch page on landscape tablets — video and its details on the left, "Up next" in a separate rail on the right — while the single-column pages (you, settings, statistics, search, downloads, playlists) are capped and centred rather than stretched edge to edge, and dialogs and the mini player stay card-sized. Rotating a phone still goes straight into fullscreen
 - Thumbnails carry the video length in the corner (LIVE badge for live streams), like the real app
 - Search with YouTube's own type-ahead suggestions as you type
 - The bottom navigation never disappears while you browse: it stays on search, channel, playlist and watch screens (it only steps aside for fullscreen playback), with the mini player docked above it

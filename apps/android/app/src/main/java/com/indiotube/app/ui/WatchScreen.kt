@@ -3404,6 +3404,7 @@ private fun QueueSheet(
 
     if (saveOpen) {
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { saveOpen = false },
             containerColor = YtSurface,
             titleContentColor = YtText,
@@ -3444,6 +3445,7 @@ private fun QueueSheet(
 
     if (confirmClear) {
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { confirmClear = false },
             containerColor = YtSurface,
             titleContentColor = YtText,

@@ -270,6 +270,7 @@ fun LibraryListScreen(container: Container, ui: UiRefs, kind: LibKind) {
 
     if (confirmClear) {
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { confirmClear = false },
             containerColor = YtSurface,
             titleContentColor = YtText,

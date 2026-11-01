@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
@@ -40,9 +42,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -62,10 +61,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -386,6 +389,19 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
     // the window so every screen below it can share one policy.
     val layout = rememberWindowLayout()
     val useRail = layout.useNavigationRail
+    // A single column of text rows stretched across a landscape tablet reads as
+    // a banner, not a page, so those pages are capped and centred. Feeds and
+    // the watch page keep the whole window - they are the screens that want it.
+    val pageCap: Dp? = when {
+        !useRail -> null
+        stack.isEmpty -> if (tab == 3) layout.listPageWidth else null
+        else -> when (stack.top) {
+            Screen.Settings, Screen.Stats, Screen.ManageSubscriptions -> layout.listPageWidth
+            Screen.Search, Screen.Downloads, is Screen.LibraryList,
+            is Screen.YtPlaylist, is Screen.LocalPlaylist -> layout.rowPageWidth
+            is Screen.Watch, is Screen.Channel -> null
+        }
+    }
     val goTab: (Int) -> Unit = { i ->
         // Tapping Home returns to the feed and refreshes it, the way
         // YouTube's home tab behaves.
@@ -481,26 +497,28 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                     TabletNavRail(if (stack.isEmpty) tab else -1, goTab)
                 }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        if (stack.isEmpty) {
-                            when (tab) {
-                                0 -> HomeScreen(container, ui)
-                                1 -> ExploreScreen(container, ui)
-                                2 -> SubscriptionsScreen(container, ui)
-                                else -> YouScreen(container, ui)
-                            }
-                        } else {
-                            when (val s = stack.top) {
-                                is Screen.Watch -> WatchScreen(container, player, ui, s.video, s.context ?: listOf(s.video))
-                                is Screen.Channel -> ChannelScreen(container, ui, s)
-                                is Screen.YtPlaylist -> YtPlaylistScreen(container, ui, s.playlistId, s.title)
-                                is Screen.LocalPlaylist -> LocalPlaylistScreen(container, ui, s.id)
-                                is Screen.LibraryList -> LibraryListScreen(container, ui, s.kind)
-                                Screen.Search -> SearchScreen(container, ui)
-                                Screen.Downloads -> DownloadsScreen(container, ui, player)
-                                Screen.ManageSubscriptions -> ManageSubsScreen(container, ui)
-                                Screen.Stats -> StatsScreen(container, ui)
-                                Screen.Settings -> SettingsScreen(container, ui)
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                        Box(Modifier.tabletPageWidth(pageCap)) {
+                            if (stack.isEmpty) {
+                                when (tab) {
+                                    0 -> HomeScreen(container, ui)
+                                    1 -> ExploreScreen(container, ui)
+                                    2 -> SubscriptionsScreen(container, ui)
+                                    else -> YouScreen(container, ui)
+                                }
+                            } else {
+                                when (val s = stack.top) {
+                                    is Screen.Watch -> WatchScreen(container, player, ui, s.video, s.context ?: listOf(s.video))
+                                    is Screen.Channel -> ChannelScreen(container, ui, s)
+                                    is Screen.YtPlaylist -> YtPlaylistScreen(container, ui, s.playlistId, s.title)
+                                    is Screen.LocalPlaylist -> LocalPlaylistScreen(container, ui, s.id)
+                                    is Screen.LibraryList -> LibraryListScreen(container, ui, s.kind)
+                                    Screen.Search -> SearchScreen(container, ui)
+                                    Screen.Downloads -> DownloadsScreen(container, ui, player)
+                                    Screen.ManageSubscriptions -> ManageSubsScreen(container, ui)
+                                    Screen.Stats -> StatsScreen(container, ui)
+                                    Screen.Settings -> SettingsScreen(container, ui)
+                                }
                             }
                         }
                     }
@@ -567,41 +585,81 @@ private fun BottomBar(tab: Int, onTab: (Int) -> Unit) {
     }
 }
 
-// YouTube's tablet rail: icons with a label underneath, always visible on the
-// left edge, so the bottom of the screen is free for content and the mini
-// player.
+// YouTube's tablet rail: an icon with its label underneath, always on the left
+// edge, so the bottom of the screen is free for content and the mini player.
+// Material's own NavigationRail is a fixed 80dp wide and clips any label that
+// does not fit - which, once the system font scale goes up, is every long one.
+// This rail takes its width from its widest label instead, within a limit that
+// keeps it a rail rather than a drawer, and centres the icons on that width so
+// the column of destinations reads as one piece at any text size.
 @Composable
 internal fun TabletNavRail(tab: Int, onTab: (Int) -> Unit) {
-    NavigationRail(
-        containerColor = YtBg,
-        // A little wider than Material's 80dp so "Subscriptions" fits its
-        // label without clipping at 11sp.
-        modifier = Modifier.fillMaxHeight().width(88.dp),
-        header = { Spacer(Modifier.height(8.dp)) },
+    val layout = rememberWindowLayout()
+    Box(
+        Modifier
+            .fillMaxHeight()
+            .widthIn(min = layout.navRailMinWidth, max = layout.navRailMaxWidth)
+            .background(YtBg)
+            .testTag("tablet-nav-rail"),
+        contentAlignment = Alignment.TopCenter,
     ) {
-        NavDestinations.forEachIndexed { i, (label, outlined, filled) ->
-            NavigationRailItem(
-                selected = tab == i,
-                onClick = { onTab(i) },
-                icon = {
-                    Icon(
-                        if (tab == i) filled else outlined,
-                        contentDescription = label,
-                        modifier = Modifier.size(24.dp),
-                    )
-                },
-                label = {
-                    Text(label, fontSize = 11.sp, maxLines = 1)
-                },
-                colors = NavigationRailItemDefaults.colors(
-                    selectedIconColor = YtText,
-                    selectedTextColor = YtText,
-                    unselectedIconColor = YtMuted,
-                    unselectedTextColor = YtMuted,
-                    indicatorColor = Color.Transparent,
-                ),
+        Column(
+            Modifier
+                .fillMaxHeight()
+                .width(IntrinsicSize.Max)
+                .padding(horizontal = 8.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            NavDestinations.forEachIndexed { i, (label, outlined, filled) ->
+                RailItem(tab == i, label, outlined, filled) { onTab(i) }
+                if (i != NavDestinations.lastIndex) Spacer(Modifier.height(6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun RailItem(
+    selected: Boolean,
+    label: String,
+    outlined: ImageVector,
+    filled: ImageVector,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            if (selected) {
+                Box(
+                    Modifier
+                        .size(width = 56.dp, height = 32.dp)
+                        .background(YtSurfaceHi, RoundedCornerShape(16.dp)),
+                )
+            }
+            Icon(
+                if (selected) filled else outlined,
+                contentDescription = label,
+                tint = if (selected) YtText else YtMuted,
+                modifier = Modifier.size(24.dp),
             )
         }
+        Spacer(Modifier.height(5.dp))
+        Text(
+            label,
+            fontSize = 11.sp,
+            lineHeight = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            color = if (selected) YtText else YtMuted,
+        )
     }
 }
 
@@ -613,6 +671,7 @@ private fun MiniPlayer(container: Container, ui: UiRefs, player: PlaybackControl
     val position by player.position.collectAsState()
     val duration by player.duration.collectAsState()
     val video = current ?: return
+    val layout = rememberWindowLayout()
     val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
     val density = LocalDensity.current
     val dismissThreshold = with(density) { 72.dp.toPx() }
@@ -706,7 +765,10 @@ private fun MiniPlayer(container: Container, ui: UiRefs, player: PlaybackControl
                     video.title,
                     style = MiniTitle,
                     color = YtText,
-                    maxLines = 2,
+                    // On a tablet the bar is already as wide as the whole
+                    // window, so a second title line only pushes the content
+                    // above it around.
+                    maxLines = layout.miniPlayerTitleLines,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(3.dp))

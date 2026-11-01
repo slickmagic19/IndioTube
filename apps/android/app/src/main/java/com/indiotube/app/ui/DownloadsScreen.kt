@@ -232,6 +232,7 @@ fun DownloadsScreen(container: Container, ui: UiRefs, player: PlaybackController
     if (deleteIds != null) {
         val count = deleteIds.size
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { pendingDelete = null },
             containerColor = YtSurface,
             title = {

@@ -206,6 +206,7 @@ fun StatsScreen(container: Container, ui: UiRefs) {
 
     if (confirmClear) {
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { confirmClear = false },
             containerColor = YtSurface,
             titleContentColor = YtText,

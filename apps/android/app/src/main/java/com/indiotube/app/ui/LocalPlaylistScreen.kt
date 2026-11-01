@@ -133,6 +133,7 @@ fun LocalPlaylistScreen(container: Container, ui: UiRefs, id: String) {
 
     if (renameOpen) {
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { renameOpen = false },
             containerColor = YtSurface,
             titleContentColor = YtText,
@@ -163,6 +164,7 @@ fun LocalPlaylistScreen(container: Container, ui: UiRefs, id: String) {
 
     if (deleteOpen) {
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { deleteOpen = false },
             containerColor = YtSurface,
             titleContentColor = YtText,

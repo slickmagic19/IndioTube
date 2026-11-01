@@ -146,8 +146,8 @@ fun YouScreen(container: Container, ui: UiRefs) {
                 val streak = watchStreak(stats, System.currentTimeMillis())
                 val subtitle = when {
                     stats.totalMs <= 0 -> "Watch time, streak and top channels"
-                    streak > 1 -> "${formatWatchTime(stats.totalMs)} - $streak day streak"
-                    else -> formatWatchTime(stats.totalMs)
+                    streak > 1 -> "Watched ${formatWatchTime(stats.totalMs)} - $streak day streak"
+                    else -> "Watched ${formatWatchTime(stats.totalMs)}"
                 }
                 YouRow(Icons.Outlined.Insights, "Your activity", subtitle) {
                     ui.open(Screen.Stats)
@@ -184,6 +184,7 @@ fun YouScreen(container: Container, ui: UiRefs) {
 
     if (newPlaylistOpen) {
         AlertDialog(
+            modifier = tabletDialogWidth(),
             onDismissRequest = { newPlaylistOpen = false },
             containerColor = YtSurface,
             titleContentColor = YtText,
