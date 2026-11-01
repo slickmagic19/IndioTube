@@ -68,4 +68,35 @@ class PlaybackPrefsTest {
         prefs.setDefaultQualityHeight(0)
         assertNull(prefs.defaultQualityHeight.value)
     }
+
+    // The chosen speed sticks across videos and launches; 1x is what a fresh
+    // install starts on.
+    @Test
+    fun thePlaybackSpeedStartsAtNormal() {
+        assertEquals(1f, PlaybackPrefs(context).speed.value)
+    }
+
+    @Test
+    fun aPlaybackSpeedPersistsAcrossInstances() {
+        PlaybackPrefs(context).setSpeed(1.5f)
+        assertEquals(1.5f, PlaybackPrefs(context).speed.value)
+    }
+
+    @Test
+    fun aPlaybackSpeedCanBeSetBackToNormal() {
+        val prefs = PlaybackPrefs(context)
+        prefs.setSpeed(2f)
+        prefs.setSpeed(1f)
+        assertEquals(1f, prefs.speed.value)
+        assertEquals(1f, PlaybackPrefs(context).speed.value)
+    }
+
+    @Test
+    fun aNonsenseSpeedIsClampedToTheLadder() {
+        val prefs = PlaybackPrefs(context)
+        prefs.setSpeed(0f)
+        assertEquals("zero would freeze playback", 1f, prefs.speed.value)
+        prefs.setSpeed(8f)
+        assertEquals(2f, prefs.speed.value)
+    }
 }

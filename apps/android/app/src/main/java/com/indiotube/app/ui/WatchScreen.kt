@@ -140,6 +140,7 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.indiotube.app.Container
+import com.indiotube.app.data.BOOST_PLAYBACK_SPEED
 import com.indiotube.app.data.CaptionPrefs
 import com.indiotube.app.data.CaptionStyleSettings
 import com.indiotube.app.data.ChannelItem
@@ -147,6 +148,7 @@ import com.indiotube.app.data.Chapter
 import com.indiotube.app.data.CommentItem
 import com.indiotube.app.data.DlStatus
 import com.indiotube.app.data.LiveChatMessage
+import com.indiotube.app.data.PLAYBACK_SPEEDS
 import com.indiotube.app.data.SponsorSegment
 import com.indiotube.app.data.SubtitleTrack
 import com.indiotube.app.data.VideoItem
@@ -159,6 +161,7 @@ import com.indiotube.app.data.formatDuration
 import com.indiotube.app.data.autoSkipTarget
 import com.indiotube.app.data.isAtLiveEdge
 import com.indiotube.app.data.recommendableVideos
+import com.indiotube.app.data.speedLabel
 import com.indiotube.app.data.sponsorLabel
 import com.indiotube.app.data.sponsorSegmentAt
 import com.indiotube.app.data.stripChapterLines
@@ -253,6 +256,7 @@ fun WatchScreen(
     var qualitySheet by remember { mutableStateOf(false) }
     var downloadSheet by remember(video.videoId) { mutableStateOf(false) }
     var captionsSheet by remember { mutableStateOf(false) }
+    var speedSheet by remember { mutableStateOf(false) }
     var captionStyleSheet by remember { mutableStateOf(false) }
     var qualities by remember(video.videoId) { mutableStateOf<VideoQualities?>(null) }
     var qualityError by remember(video.videoId) { mutableStateOf(false) }
@@ -268,6 +272,8 @@ fun WatchScreen(
     val downloadSettings by container.downloadPrefs.settings.collectAsState()
     val subtitle by player.subtitle.collectAsState()
     val autoplayNext by player.autoplayNext.collectAsState()
+    val speed by player.speed.collectAsState()
+    val boosted by player.boosted.collectAsState()
     val captionsAvailable = qualities?.subtitles?.isNotEmpty() == true
     val pageState = rememberLazyListState()
 
@@ -1135,6 +1141,17 @@ fun WatchScreen(
                             onDragCancel = { dragged = 0f },
                         )
                     }
+                }
+                // Press and hold: run at 2x until the finger lifts, on top of
+                // whatever speed the user chose. Observes only, so tapping,
+                // double-tap seeking and the swipe-to-minimise still work.
+                .pointerInput(video.videoId, membersOnly) {
+                    if (!membersOnly) {
+                        detectHoldToBoost(
+                            onHoldStart = { player.setSpeedBoost(true) },
+                            onHoldEnd = { player.setSpeedBoost(false) },
+                        )
+                    }
                 },
         ) {
             // Thumbnail sits behind the inline player only; fullscreen shows
@@ -1253,6 +1270,37 @@ fun WatchScreen(
                 }
             }
 
+            // Hold-to-boost feedback: the pill YouTube shows while a press and
+            // hold runs the video at double speed.
+            if (boosted) {
+                Box(
+                    Modifier.fillMaxSize().padding(top = 14.dp),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0xB3000000))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.FastForward,
+                            null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "${speedLabel(BOOST_PLAYBACK_SPEED)} Speed",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+
             if (!membersOnly) {
                 PlayerChrome(
                     visible = controlsVisible,
@@ -1271,12 +1319,14 @@ fun WatchScreen(
                     chapterTitle = chapterTitle,
                     chapterMarks = chapterMarks,
                     qualityLabel = qualityLabel,
+                    speedText = speedLabel(speed),
                     captionsAvailable = captionsAvailable,
                     captionsOn = subtitle != null,
                     autoplayOn = autoplayNext,
                     onToggleAutoplay = { player.setAutoplayNext(it) },
                     onQuality = { qualitySheet = true },
                     onCaptions = { captionsSheet = true },
+                    onSpeed = { speedSheet = true },
 
                     onBack = { ui.back() },
                     onTogglePlay = { player.togglePlayPause() },
@@ -1541,6 +1591,14 @@ fun WatchScreen(
         )
     }
 
+    if (speedSheet) {
+        SpeedSheet(
+            current = speed,
+            onSelect = { player.setSpeed(it) },
+            onDismiss = { speedSheet = false },
+        )
+    }
+
     if (captionsSheet) {
         CaptionsSheet(
             subtitles = qualities?.subtitles.orEmpty(),
@@ -1718,12 +1776,14 @@ private fun PlayerChrome(
     chapterTitle: String?,
     chapterMarks: List<Float>,
     qualityLabel: String,
+    speedText: String,
     captionsAvailable: Boolean,
     captionsOn: Boolean,
     autoplayOn: Boolean,
     onToggleAutoplay: (Boolean) -> Unit,
     onQuality: () -> Unit,
     onCaptions: () -> Unit,
+    onSpeed: () -> Unit,
 
     onBack: () -> Unit,
     onTogglePlay: () -> Unit,
@@ -1943,6 +2003,17 @@ private fun PlayerChrome(
                             }
                         }
                     }
+                    // Speed chip: the chosen rate, opening the speed menu.
+                    Text(
+                        speedText,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable(onClick = onSpeed)
+                            .padding(horizontal = 6.dp, vertical = 7.dp),
+                    )
                     Text(qualityLabel, color = Color.White, fontSize = 11.sp)
                     IconButton(onClick = onQuality, modifier = Modifier.size(40.dp)) {
                         Icon(
@@ -2413,6 +2484,52 @@ private fun SheetRow(
         )
         if (checked) {
             Icon(Icons.Filled.Check, "Saved", tint = YtBlue, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+// ---- speed menu ---------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SpeedSheet(
+    current: Float,
+    onSelect: (Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState()
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = YtSurface,
+        contentColor = YtText,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 20.dp),
+        ) {
+            Text(
+                "Playback speed",
+                style = MaterialTheme.typography.titleMedium,
+                color = YtText,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp),
+            )
+            Text(
+                "Remembered for every video. Hold the video for 2x while you need it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = YtMuted,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp, bottom = 8.dp),
+            )
+            PLAYBACK_SPEEDS.forEach { option ->
+                ChoiceRow(
+                    label = speedLabel(option),
+                    subtitle = if (option == 1f) "Normal" else null,
+                    selected = kotlin.math.abs(current - option) < 0.01f,
+                    onClick = { onSelect(option) },
+                )
+            }
         }
     }
 }

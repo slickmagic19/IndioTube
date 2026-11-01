@@ -4,6 +4,7 @@ import com.indiotube.app.data.InnerTube
 import com.indiotube.app.data.SavedDownload
 import com.indiotube.app.data.SyncJson
 import com.indiotube.app.data.VideoItem
+import com.indiotube.app.data.recommendableVideos
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
@@ -106,6 +107,29 @@ class MembersOnlyTest {
         assertTrue(watch.related.single().membersOnly)
         assertEquals("Members only lockup", watch.related.single().title)
         assertNull("the badge must not become the channel name", watch.related.single().channelName)
+    }
+
+    @Test
+    fun recommendationFeedsDropMembersOnlyVideos() {
+        val videos = listOf(
+            VideoItem("public-1"),
+            VideoItem("member-1", membersOnly = true),
+            VideoItem("public-2"),
+        )
+
+        assertEquals(listOf("public-1", "public-2"), videos.recommendableVideos().map { it.videoId })
+    }
+
+    // A feed that is only members uploads has to come back empty, so Home can
+    // show its empty state instead of a wall of cards that cannot play.
+    @Test
+    fun aFeedOfOnlyMembersUploadsRecommendsNothing() {
+        val videos = listOf(
+            VideoItem("member-1", membersOnly = true),
+            VideoItem("member-2", membersOnly = true),
+        )
+
+        assertTrue(videos.recommendableVideos().isEmpty())
     }
 
     @Test

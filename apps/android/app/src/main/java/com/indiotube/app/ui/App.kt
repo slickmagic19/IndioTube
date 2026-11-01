@@ -104,6 +104,7 @@ sealed interface Screen {
     data object Search : Screen
     data object Downloads : Screen
     data object ManageSubscriptions : Screen
+    data object Stats : Screen
     data object Settings : Screen
 }
 
@@ -498,6 +499,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                                 Screen.Search -> SearchScreen(container, ui)
                                 Screen.Downloads -> DownloadsScreen(container, ui, player)
                                 Screen.ManageSubscriptions -> ManageSubsScreen(container, ui)
+                                Screen.Stats -> StatsScreen(container, ui)
                                 Screen.Settings -> SettingsScreen(container, ui)
                             }
                         }

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
 import androidx.compose.material.icons.automirrored.outlined.QueueMusic
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LiveTv
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Block
@@ -125,17 +126,30 @@ fun Thumb(
             }
         }
         if (membersOnly) {
-            Text(
-                "MEMBERS ONLY",
-                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = Color.White,
-                modifier = Modifier
+            // YouTube's lock-up badge: a dark pill with a lock, so a card reads
+            // as "needs a membership" before it is tapped.
+            Row(
+                Modifier
                     .align(Alignment.TopStart)
                     .padding(6.dp)
                     .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xCC272727))
-                    .padding(horizontal = 5.dp, vertical = 2.dp),
-            )
+                    .background(Color(0xE6272727))
+                    .padding(start = 5.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Lock,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(10.dp),
+                )
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    "Members",
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = Color.White,
+                )
+            }
         }
         if (live) {
             Text(
@@ -162,6 +176,27 @@ fun Thumb(
                     .padding(horizontal = 5.dp, vertical = 2.dp),
             )
         }
+    }
+}
+
+// The tag under a title, so the thumbnail badge isn't the only cue: search
+// results, rows and the Up next rail all say it in words as well.
+@Composable
+fun MembersTag(modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(YtSurfaceHi)
+            .padding(horizontal = 4.dp, vertical = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Lock, null, tint = YtMuted, modifier = Modifier.size(9.dp))
+        Spacer(Modifier.width(3.dp))
+        Text(
+            "Members only",
+            fontSize = 10.sp,
+            color = YtMuted,
+        )
     }
 }
 
@@ -261,13 +296,20 @@ fun VideoCard(
                     lineHeight = 19.sp,
                 )
                 Spacer(Modifier.height(3.dp))
-                Text(
-                    video.metaLine(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = YtMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (video.membersOnly) {
+                        MembersTag()
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(
+                        video.metaLine(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = YtMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
             }
             if (onFeedback != null || onDownload != null || onPlayNext != null ||
                 onAddToQueue != null || onToggleWatched != null
@@ -622,13 +664,20 @@ fun VideoRow(
             } else {
                 video.metaLine()
             }
-            Text(
-                meta,
-                style = MaterialTheme.typography.bodySmall,
-                color = YtMuted,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (video.membersOnly) {
+                    MembersTag()
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    meta,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = YtMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
         }
         if (trailing != null) {
             Spacer(Modifier.width(6.dp))

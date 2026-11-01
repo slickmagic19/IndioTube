@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FastForward
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Subtitles
@@ -49,12 +50,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indiotube.app.Container
 import com.indiotube.app.data.DOWNLOAD_QUALITY_CHOICES
+import com.indiotube.app.data.PLAYBACK_SPEEDS
 import com.indiotube.app.data.SPONSOR_CATEGORIES
+import com.indiotube.app.data.formatWatchTime
+import com.indiotube.app.data.speedLabel
+import com.indiotube.app.data.watchStreak
 
 @Composable
 fun SettingsScreen(container: Container, ui: UiRefs) {
     val playback by container.playbackPrefs.autoplayNext.collectAsState()
     val defaultQuality by container.playbackPrefs.defaultQualityHeight.collectAsState()
+    val speed by container.playbackPrefs.speed.collectAsState()
+    val stats by container.stats.stats.collectAsState()
     val downloadSettings by container.downloadPrefs.settings.collectAsState()
     val captionStyle by container.captions.style.collectAsState()
     val sponsor by container.sponsorBlockPrefs.settings.collectAsState()
@@ -69,6 +76,7 @@ fun SettingsScreen(container: Container, ui: UiRefs) {
     }
 
     var qualitySheet by remember { mutableStateOf(false) }
+    var speedSheet by remember { mutableStateOf(false) }
     var downloadQualitySheet by remember { mutableStateOf(false) }
     var captionSheet by remember { mutableStateOf(false) }
     var confirmClearHistory by remember { mutableStateOf(false) }
@@ -108,6 +116,18 @@ fun SettingsScreen(container: Container, ui: UiRefs) {
                     title = "Default video quality",
                     subtitle = defaultQuality?.let { "${it}p" } ?: "Auto",
                     onClick = { qualitySheet = true },
+                )
+            }
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.FastForward,
+                    title = "Playback speed",
+                    subtitle = if (speed == 1f) {
+                        "Normal - long-press a video for 2x"
+                    } else {
+                        "${speedLabel(speed)} - long-press a video for 2x"
+                    },
+                    onClick = { speedSheet = true },
                 )
             }
 
@@ -204,6 +224,25 @@ fun SettingsScreen(container: Container, ui: UiRefs) {
                 )
             }
 
+            item { SettingsSection("Your activity") }
+            item {
+                SettingsRow(
+                    icon = Icons.Outlined.Insights,
+                    title = "Watch statistics",
+                    subtitle = if (stats.totalMs <= 0) {
+                        "Watch time, streak and top channels"
+                    } else {
+                        val streak = watchStreak(stats, System.currentTimeMillis())
+                        if (streak > 1) {
+                            "${formatWatchTime(stats.totalMs)} watched - $streak day streak"
+                        } else {
+                            "${formatWatchTime(stats.totalMs)} watched"
+                        }
+                    },
+                    onClick = { ui.open(Screen.Stats) },
+                )
+            }
+
             item { SettingsSection("History and privacy") }
             item {
                 SettingsToggleRow(
@@ -262,6 +301,17 @@ fun SettingsScreen(container: Container, ui: UiRefs) {
                 qualitySheet = false
             },
             onDismiss = { qualitySheet = false },
+        )
+    }
+
+    if (speedSheet) {
+        SpeedDialog(
+            selected = speed,
+            onSelect = {
+                container.playbackPrefs.setSpeed(it)
+                speedSheet = false
+            },
+            onDismiss = { speedSheet = false },
         )
     }
 
@@ -431,6 +481,56 @@ private fun QualityDialog(
                         }
                     }
                 }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close", color = YtMuted) }
+        },
+    )
+}
+
+// Same shape as the quality picker, so the two Playback rows open the same
+// kind of list instead of one sheet and one dialog.
+@Composable
+private fun SpeedDialog(
+    selected: Float,
+    onSelect: (Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = YtSurface,
+        titleContentColor = YtText,
+        textContentColor = YtText,
+        title = { Text("Playback speed") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                PLAYBACK_SPEEDS.forEach { choice ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(choice) }
+                            .padding(vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            speedLabel(choice),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (choice == selected) YtRed else YtText,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (choice == selected) {
+                            Text("Selected", color = YtRed, fontSize = 12.sp)
+                        }
+                    }
+                }
+                Text(
+                    "Applies to every video. Long-pressing a video plays it at 2x until you let go.",
+                    color = YtMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+                )
             }
         },
         confirmButton = {

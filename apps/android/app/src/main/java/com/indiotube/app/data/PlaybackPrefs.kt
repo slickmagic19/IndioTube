@@ -13,6 +13,10 @@ import kotlinx.coroutines.flow.asStateFlow
 // keeps YouTube's behaviour (the best single file, fastest start), a height
 // pins the rung - every video that offers it starts there, and one that does
 // not uses the next lower rung it has.
+//
+// The speed is the user's chosen rate; it is re-applied to every video and to
+// every new player session, and a press-and-hold boost only overrides it for
+// as long as the finger stays down.
 class PlaybackPrefs(context: Context) {
 
     private val prefs = context.getSharedPreferences("indiotube_playback", Context.MODE_PRIVATE)
@@ -33,8 +37,20 @@ class PlaybackPrefs(context: Context) {
         _defaultQualityHeight.value = height?.takeIf { it > 0 }
     }
 
+    private val _speed = MutableStateFlow(
+        clampPlaybackSpeed(prefs.getFloat(KEY_SPEED, 1f)),
+    )
+    val speed: StateFlow<Float> = _speed.asStateFlow()
+
+    fun setSpeed(speed: Float) {
+        val value = clampPlaybackSpeed(speed)
+        prefs.edit().putFloat(KEY_SPEED, value).apply()
+        _speed.value = value
+    }
+
     private companion object {
         const val KEY_AUTOPLAY_NEXT = "autoplay_next"
         const val KEY_DEFAULT_QUALITY = "default_quality"
+        const val KEY_SPEED = "speed"
     }
 }

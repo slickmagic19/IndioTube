@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import com.indiotube.app.Container
 import com.indiotube.app.data.VideoItem
 import com.indiotube.app.data.publishAgeMinutes
+import com.indiotube.app.data.recommendableVideos
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -143,7 +144,11 @@ fun SubscriptionsScreen(container: Container, ui: UiRefs) {
                     scrollable = true,
                 )
                 else -> {
-                    val list = videos.orEmpty()
+                    // Members-only uploads can't be played without a channel
+                    // membership, so the feed leaves them out instead of
+                    // offering a card that can only fail. They are still listed
+                    // (tagged) on the channel page and in search.
+                    val list = videos.orEmpty().recommendableVideos()
                         .filter { selectedChannel == null || it.channelId == selectedChannel }
                     Column(Modifier.fillMaxSize()) {
                         LazyRow(

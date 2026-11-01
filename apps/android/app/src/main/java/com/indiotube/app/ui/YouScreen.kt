@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.PlaylistPlay
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Settings
@@ -40,6 +41,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.indiotube.app.Container
+import com.indiotube.app.data.formatWatchTime
+import com.indiotube.app.data.watchStreak
 import com.indiotube.app.ui.Screen.LibraryList
 
 @Composable
@@ -53,6 +56,7 @@ fun YouScreen(container: Container, ui: UiRefs) {
     val liked by container.library.liked.collectAsState()
     val downloads by container.downloads.items.collectAsState()
     val downloadTasks by container.downloads.tasks.collectAsState()
+    val stats by container.stats.stats.collectAsState()
 
     var newPlaylistOpen by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
@@ -136,6 +140,17 @@ fun YouScreen(container: Container, ui: UiRefs) {
                 }
                 YouRow(Icons.Outlined.Download, "Downloads", subtitle) {
                     ui.open(Screen.Downloads)
+                }
+            }
+            item {
+                val streak = watchStreak(stats, System.currentTimeMillis())
+                val subtitle = when {
+                    stats.totalMs <= 0 -> "Watch time, streak and top channels"
+                    streak > 1 -> "${formatWatchTime(stats.totalMs)} - $streak day streak"
+                    else -> formatWatchTime(stats.totalMs)
+                }
+                YouRow(Icons.Outlined.Insights, "Your activity", subtitle) {
+                    ui.open(Screen.Stats)
                 }
             }
 

@@ -15,6 +15,8 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.indiotube.app.Container
+import com.indiotube.app.data.BOOST_PLAYBACK_SPEED
+import com.indiotube.app.data.COMPLETED_FRACTION
 import com.indiotube.app.data.LibraryStore
 import com.indiotube.app.data.PlaybackPrefs
 import com.indiotube.app.data.QualityOption
@@ -107,6 +109,17 @@ class PlaybackController(
     // current video instead of continuing with the next item in the queue.
     val autoplayNext: StateFlow<Boolean> get() = prefs.autoplayNext
 
+    // Playback speed. `speed` is the user's choice and survives restarts;
+    // a press-and-hold on the video temporarily overrides it with `boosted`,
+    // and releasing restores the chosen rate without touching the preference.
+    val speed: StateFlow<Float> get() = prefs.speed
+
+    private val _boosted = MutableStateFlow(false)
+    val boosted: StateFlow<Boolean> = _boosted.asStateFlow()
+
+    private val _effectiveSpeed = MutableStateFlow(prefs.speed.value)
+    val effectiveSpeed: StateFlow<Float> = _effectiveSpeed.asStateFlow()
+
     // The pending "Up next" transition shown on the watch page. It is null
     // whenever autoplay is off, there is no next item, or the countdown has
     // been cancelled.
@@ -137,6 +150,13 @@ class PlaybackController(
     private var lastPositionSave = 0L
     private var lastMediaId: String? = null
     private var replacingItem = false
+
+    // Watch-time bookkeeping for the statistics page. `lastWatchTickAt` is the
+    // wall clock of the previous tick that found the player running, so paused
+    // time is never counted; `sessionMs` accumulates one uninterrupted stretch
+    // of playback for the "longest session" figure.
+    private var lastWatchTickAt = 0L
+    private var sessionMs = 0L
 
     // Quality state for the video that is playing: the ladder we last showed
     // the user, and how many times we stepped down after a failed switch.
@@ -189,6 +209,12 @@ class PlaybackController(
         )
 
         scope.launch {
+            // A speed picked in Settings must reach a mini player that is
+            // already running, not only the next video.
+            prefs.speed.collect { applySpeed() }
+        }
+
+        scope.launch {
             while (true) {
                 delay(500)
                 val c = controller ?: continue
@@ -196,6 +222,7 @@ class PlaybackController(
                 val d = c.duration
                 _duration.value = if (d > 0) d else 0
                 maybeStartUpNext(c)
+                trackWatchTime(c)
                 // remember watch progress ~every 5s while playing
                 if (c.isPlaying) {
                     val now = System.currentTimeMillis()
@@ -215,6 +242,7 @@ class PlaybackController(
         // The service may have been created while the watch page was already
         // open; re-assert the countdown pause state on every connection.
         sendCountdownPause(c)
+        applySpeed()
         c.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _playing.value = isPlaying
@@ -239,6 +267,9 @@ class PlaybackController(
                 val id = mediaItem?.mediaId
                 val newVideo = id != null && id != lastMediaId
                 if (newVideo) {
+                    // A session belongs to one video: close it before the next
+                    // item's tick starts accumulating.
+                    endWatchSession()
                     lastMediaId = id
                     if (!replacingItem) _qualityHeight.value = null
                     currentQualities = null
@@ -256,6 +287,9 @@ class PlaybackController(
                     _queue.value.getOrNull(idx)?.let { store.noteOpen(it) }
                 }
                 if (newVideo) {
+                    // The speed is a user preference, so it follows the play
+                    // through every autoplay/Next transition.
+                    applySpeed()
                     _queue.value.getOrNull(idx)?.let { video ->
                         applyDefaultQuality(c, idx, video)
                         // The row below this one is next; resolving it now
@@ -525,6 +559,61 @@ class PlaybackController(
     fun setAutoplayNext(enabled: Boolean) {
         prefs.setAutoplayNext(enabled)
         if (!enabled) cancelUpNext()
+    }
+
+    // ---- playback speed -------------------------------------------------------
+
+    // The user's chosen speed, remembered for every video.
+    fun setSpeed(value: Float) {
+        prefs.setSpeed(value)
+        // Choosing a speed always ends any hold-boost.
+        _boosted.value = false
+        applySpeed()
+    }
+
+    // Press-and-hold on the video: boost while the finger is down, restore the
+    // chosen speed on release. Idempotent so a cancelled gesture can't leave
+    // the player stuck at 2x.
+    fun setSpeedBoost(on: Boolean) {
+        if (_boosted.value == on) return
+        _boosted.value = on
+        applySpeed()
+    }
+
+    private fun applySpeed() {
+        val target = if (_boosted.value) BOOST_PLAYBACK_SPEED else prefs.speed.value
+        _effectiveSpeed.value = target
+        controller?.setPlaybackSpeed(target)
+    }
+
+    // ---- watch statistics ------------------------------------------------------
+
+    // Runs on the 500ms tick. Only wall-clock time with the player actually
+    // running is counted: a long buffer, a paused video or a tab left open on
+    // the mini player contributes nothing, so the figures match what was
+    // really watched. A gap between ticks (the app was frozen, the device
+    // slept) is capped so it can't be credited as watch time.
+    private fun trackWatchTime(c: MediaController) {
+        val now = System.currentTimeMillis()
+        val video = _queue.value.getOrNull(c.currentMediaItemIndex)
+        if (!c.isPlaying || video == null) {
+            endWatchSession()
+            return
+        }
+        if (lastWatchTickAt > 0L) {
+            val delta = (now - lastWatchTickAt).coerceIn(0L, 2_000L)
+            sessionMs += delta
+            container?.stats?.addWatchTime(delta, video, c.playbackParameters.speed)
+        }
+        lastWatchTickAt = now
+    }
+
+    // Closes the current uninterrupted stretch of playback. Called when the
+    // video changes, playback stops, or the controller is released.
+    private fun endWatchSession() {
+        if (sessionMs > 0L) container?.stats?.endSession(sessionMs)
+        sessionMs = 0L
+        lastWatchTickAt = 0L
     }
 
     // The watch page arms the countdown while it is visible; leaving the page
@@ -899,6 +988,8 @@ class PlaybackController(
     fun release() {
         countdownArmed = false
         cancelUpNext()
+        endWatchSession()
+        container?.stats?.flush()
         controller?.release()
         controller = null
         _connected.value = false

@@ -14,6 +14,7 @@ import com.indiotube.app.data.PlaybackPrefs
 import com.indiotube.app.data.SponsorBlock
 import com.indiotube.app.data.SponsorBlockPrefs
 import com.indiotube.app.data.StreamResolver
+import com.indiotube.app.data.WatchStatsStore
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -68,10 +69,16 @@ class Container(context: Context) {
 
     val library = LibraryStore(context.filesDir, appScope)
 
+    // Watch-time ledger for the statistics page, one file per local account.
+    val stats = WatchStatsStore(context.filesDir, appScope)
+
     val accounts = AccountsStore(File(context.filesDir, "accounts.json"), appScope) { accountId ->
         library.switchAccount(accountId)
+        stats.switchAccount(accountId)
     }.also { store ->
-        library.switchAccount(store.activeId.value.ifEmpty { "default" })
+        val id = store.activeId.value.ifEmpty { "default" }
+        library.switchAccount(id)
+        stats.switchAccount(id)
     }
 
     val innerTube = InnerTube(http)
