@@ -6,6 +6,10 @@ dist/
 release/
 *.log
 
+# node (desktop workspace)
+node_modules/
+apps/desktop/vendor/
+
 # ide
 .idea/
 *.iml

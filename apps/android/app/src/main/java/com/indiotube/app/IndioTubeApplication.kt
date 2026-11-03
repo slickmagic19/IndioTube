@@ -14,6 +14,7 @@ import com.indiotube.app.data.PlaybackPrefs
 import com.indiotube.app.data.SponsorBlock
 import com.indiotube.app.data.SponsorBlockPrefs
 import com.indiotube.app.data.StreamResolver
+import com.indiotube.app.data.SyncClient
 import com.indiotube.app.data.WatchStatsStore
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -83,6 +84,7 @@ class Container(context: Context) {
 
     val innerTube = InnerTube(http)
     val sponsorBlock = SponsorBlock(http)
+    val syncClient = SyncClient(http)
     val sponsorBlockPrefs = SponsorBlockPrefs(context)
     val resolver = StreamResolver(http).also { StreamResolver.init(http) }
     val captions = CaptionPrefs(context)

@@ -66,6 +66,30 @@ class LibraryStore(
         load()
     }
 
+    // The whole library of the active account, as one file-shaped value —
+    // the base a sync merge starts from.
+    fun currentFile(): LibraryFile = LibraryFile(
+        watchLater = _watchLater.value,
+        historyPaused = _historyPaused.value,
+        history = _history.value,
+        playlists = _playlists.value,
+        liked = _liked.value,
+        searches = _searches.value,
+        notInterestedIds = _notInterestedIds.value.toList(),
+        interestedChannelIds = _interestedChannelIds.value.toList(),
+        blockedChannelIds = _blockedChannelIds.value.toList(),
+    )
+
+    // Swaps in the merged library after a phone/PC sync. The merge already
+    // kept every local row (add-only), so this is a straight replace.
+    fun applyMerged(data: LibraryFile) {
+        _watchLater.value = data.watchLater
+        _history.value = data.history
+        _playlists.value = data.playlists
+        _liked.value = data.liked
+        persist()
+    }
+
     @Volatile private var loaded = false
 
     fun load() {

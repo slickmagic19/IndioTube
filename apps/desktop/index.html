@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IndioTube</title>
+    <!-- Warm the connections the first screen needs before React mounts. -->
+    <link rel="preconnect" href="https://i.ytimg.com" />
+    <link rel="preconnect" href="https://www.youtube.com" />
+    <link rel="dns-prefetch" href="https://yt3.ggpht.com" />
+    <script>
+      // Paint the saved theme before first frame — no flash on relaunch.
+      try {
+        const saved = localStorage.getItem('indio-theme');
+        document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+      } catch (e) { /* default dark */ }
+      // Captured by the INDIOTUBE_SMOKE dev harness (electron/main.js).
+      window.__smokeErrors = [];
+      window.addEventListener('error', (e) => window.__smokeErrors.push(String(e.message).slice(0, 200)));
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -143,6 +143,13 @@ class AccountsStore(
         }
     }
 
+    // Replaces the active account's subscriptions after an add-only sync
+    // merge — the merged list already contains everything local.
+    fun applyMergedSubscriptions(merged: List<Subscription>) {
+        val acc = _active.value ?: return
+        updateActive(acc) { it.copy(subscriptions = merged) }
+    }
+
     private fun updateActive(acc: Account, transform: (Account) -> Account) {
         _accounts.value = _accounts.value.map { if (it.id == acc.id) transform(it) else it }
         _active.value = _accounts.value.firstOrNull { it.id == acc.id }

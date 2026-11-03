@@ -13,8 +13,8 @@ android {
         applicationId = "com.indiotube.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 133
-        versionName = "0.1.33"
+        versionCode = 134
+        versionName = "0.1.34"
     }
 
     // The keystore and its passwords are never committed. Provide them in
@@ -96,6 +96,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
+    // QR pairing for the desktop sync: bundles the zxing decoder with a
+    // camera scan activity; no Google Play Services required.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.robolectric:robolectric:4.13")

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Subscriptions
 import androidx.compose.material.icons.outlined.ThumbUp
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -171,6 +172,11 @@ fun YouScreen(container: Container, ui: UiRefs) {
             item {
                 YouRow(Icons.Outlined.Settings, "Settings", null) {
                     ui.open(Screen.Settings)
+                }
+            }
+            item {
+                YouRow(Icons.Rounded.Sync, "Sync with PC", "Pair over Wi-Fi — history, likes, playlists, subscriptions") {
+                    ui.open(Screen.Sync)
                 }
             }
             item {

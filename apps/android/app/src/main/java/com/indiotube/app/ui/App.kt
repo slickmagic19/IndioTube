@@ -109,6 +109,7 @@ sealed interface Screen {
     data object ManageSubscriptions : Screen
     data object Stats : Screen
     data object Settings : Screen
+    data object Sync : Screen
 }
 
 // The back stack of the app. Screens are pushed on top of each other and the
@@ -396,7 +397,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
         !useRail -> null
         stack.isEmpty -> if (tab == 3) layout.listPageWidth else null
         else -> when (stack.top) {
-            Screen.Settings, Screen.Stats, Screen.ManageSubscriptions -> layout.listPageWidth
+            Screen.Settings, Screen.Stats, Screen.ManageSubscriptions, Screen.Sync -> layout.listPageWidth
             Screen.Search, Screen.Downloads, is Screen.LibraryList,
             is Screen.YtPlaylist, is Screen.LocalPlaylist -> layout.rowPageWidth
             is Screen.Watch, is Screen.Channel -> null
@@ -518,6 +519,7 @@ fun IndioTubeApp(container: Container, player: PlaybackController) {
                                     Screen.ManageSubscriptions -> ManageSubsScreen(container, ui)
                                     Screen.Stats -> StatsScreen(container, ui)
                                     Screen.Settings -> SettingsScreen(container, ui)
+                                    Screen.Sync -> SyncScreen(container, ui)
                                 }
                             }
                         }

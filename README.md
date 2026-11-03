@@ -1,8 +1,13 @@
-# IndioTube — ad-free YouTube client for Android
+# IndioTube — ad-free YouTube client for Android and Windows
 
 Unofficial YouTube client. No ads, no Shorts, no sign-in required. Dark theme only.
 
-**Stack:** Kotlin + Jetpack Compose + Media3 (ExoPlayer) + NewPipeExtractor + InnerTube (WEB) for metadata.
+Two front ends, one library each: the Android app (Kotlin + Compose) and a Windows desktop app
+(Electron + React). They keep their history, likes, playlists and subscriptions on the device, and
+can be merged with each other over your own network — no account, no server in the middle.
+
+**Stack:** Kotlin + Jetpack Compose + Media3 (ExoPlayer) + NewPipeExtractor + InnerTube (WEB) for
+metadata; Electron + React + Vite + InnerTube + a bundled yt-dlp for the desktop build.
 
 **Features**
 - Ad-free video playback (NewPipeExtractor resolves clean progressive streams)
@@ -37,12 +42,54 @@ rebuilds the ranking, and it force-refreshes channel data when the last build is
 than 30 minutes old (or on pull-to-refresh). The nudge is only shown when there is
 nothing local to recommend either.
 
+## Desktop app (Windows)
+
+The same app as a Windows build (`apps/desktop`), laid out like the web player: a top bar with the
+same type-ahead search, a left navigation column, and the phone's card grid for Home and Trending.
+
+- Ad-free playback through a bundled `yt-dlp` sidecar. YouTube only serves single-file streams up to
+  360p now, so anything above that comes as separate video and audio tracks: the player runs a
+  muted video element and an audio element, keeps them within a frame of each other, mutes while
+  they are out of sync and never lets the audio speak from the wrong position â€” including while a
+  seek is still loading
+- Auto quality picks 720p when the video offers it and steps down from there; hovering a card warms
+  the stream ladder so playback starts sooner, and a byte cache serves the second seek instantly
+- YouTube-style mini player: it floats over the page and keeps playing while you browse, expands back
+  to the watch page on click, and docks itself automatically when you leave a playing video
+- The watch page keeps scrolling: video, actions, description, comments, an Up next rail, chapters,
+  SponsorBlock segments, captions and playback speed
+- Every card has the phone's full â‹® menu: mark watched/unwatched, play next, add to queue, like, save
+  to Watch later, save to a playlist, download, copy link, interested, not interested (with Undo) and
+  don't recommend this channel â€” the last three filter the Home and Trending grids immediately
+- Downloads land as real files in a folder you choose; History, Watch later, Liked videos, Playlists
+  and Downloads all mirror the phone's library screens
+
+## Phone â†” desktop sync
+
+The desktop app opens a small LAN server (`/indio/v1/*`, port 47711, token protected) and shows a QR
+code; scanning it on the phone pairs the two, and the same screen accepts a typed host/port/token
+when there is no camera. Sync is add-only and merges rather than overwrites: history keeps the newest
+position per video, likes and Watch later are unioned, playlists are matched by name, and
+subscriptions are unioned. On the phone it lives under **You â†’ Sync**; on the desktop under
+**Settings â†’ Sync**.
+
 ## Build
 
 ```powershell
 cd apps/android
 .\gradlew assembleRelease
 # -> app/build/outputs/apk/release/app-release.apk
+```
+
+```powershell
+# desktop, from the repository root
+npm install
+npm run fetch:ytdlp      # pins yt-dlp.exe into apps/desktop/vendor
+npm run dist:portable    # -> release/IndioTube-<version>-win.exe
+
+npm run dev              # vite dev server on 127.0.0.1:5174
+npm run electron:dev     # the desktop app against it
+npm test                 # desktop unit tests (vitest)
 ```
 
 ## Legal note

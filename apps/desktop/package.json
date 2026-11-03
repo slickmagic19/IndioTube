@@ -1,0 +1,59 @@
+{
+  "name": "indiotube-desktop",
+  "private": true,
+  "version": "0.1.34",
+  "description": "IndioTube — ad-free YouTube desktop player with phone sync.",
+  "author": "IndioTube",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "electron:dev": "electron .",
+    "check": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "dist:portable": "node ../../scripts/fetch-ytdlp.js && npm run build && electron-builder --win portable"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "electron": "32.3.3",
+    "electron-builder": "^25.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "build": {
+    "appId": "com.indiotube.desktop",
+    "productName": "IndioTube",
+    "npmRebuild": false,
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/ytdlp/yt-dlp.exe",
+        "to": "ytdlp/yt-dlp.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ]
+    },
+    "portable": {
+      "artifactName": "IndioTube-${version}-win.${ext}"
+    },
+    "directories": {
+      "output": "../../release"
+    }
+  }
+}
