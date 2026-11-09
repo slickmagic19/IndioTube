@@ -17,6 +17,7 @@ function on(channel, cb) {
 
 contextBridge.exposeInMainWorld('indio', {
   home: async (p = {}) => (await invoke('indio:home', p)).feed,
+  homeMore: async (p = {}) => (await invoke('indio:homeMore', p)).videos,
   homeCont: async (token) => (await invoke('indio:homeCont', { token })).feed,
   trending: async (p = {}) => (await invoke('indio:trending', p)).feed,
   trendingCont: async (token) => (await invoke('indio:trendingCont', { token })).feed,
@@ -24,12 +25,13 @@ contextBridge.exposeInMainWorld('indio', {
   searchCont: async (token) => (await invoke('indio:searchCont', { token })).results,
   suggest: async (query) => (await invoke('indio:suggest', { query })).suggestions,
   channel: async (channelId, params) => (await invoke('indio:channel', { channelId, params })).page,
-  channelCont: async (token) => (await invoke('indio:channelCont', { token })).page,
+  channelCont: async (token, channelId) => (await invoke('indio:channelCont', { token, channelId })).page,
   channelLive: async (channelId) => (await invoke('indio:channelLive', { channelId })).page,
   channelPlaylists: async (channelId) => (await invoke('indio:channelPlaylists', { channelId })).page,
   channelPlaylistsCont: async (token) => (await invoke('indio:channelPlaylistsCont', { token })).page,
   channelAbout: async (channelId, token) => (await invoke('indio:channelAbout', { channelId, token })).about,
   watch: async (videoId) => (await invoke('indio:watch', { videoId })).data,
+  watchMore: async (token) => (await invoke('indio:watchMore', { token })).page,
   comments: async (token) => (await invoke('indio:comments', { token })).page,
   playlist: async (playlistId) => (await invoke('indio:playlist', { playlistId })).page,
   playlistCont: async (token) => (await invoke('indio:playlistCont', { token })).page,
@@ -54,7 +56,7 @@ contextBridge.exposeInMainWorld('indio', {
   },
 
   sponsorBlock: {
-    segments: async (videoId) => (await invoke('sb:segments', { videoId })).data,
+    segments: async (videoId, categories) => (await invoke('sb:segments', { videoId, categories })).data,
   },
 
   library: {

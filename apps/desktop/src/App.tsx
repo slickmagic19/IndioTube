@@ -14,8 +14,8 @@ import { DownloadsScreen, LocalPlayerScreen } from './screens/DownloadsScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { PlaybackHost } from './player/PlaybackHost';
 import {
-  ClockIcon, DownloadIcon, FireIcon, HistoryIcon, HomeIcon, PlaylistIcon, SearchIcon,
-  SettingsIcon, SubsIcon, ThumbUpIcon,
+  ClockIcon, DownloadIcon, FireIcon, HistoryIcon, HomeIcon, MenuIcon, PlaylistIcon,
+  PlayIcon, SearchIcon, SettingsIcon, SubsIcon, ThumbUpIcon,
 } from './components/icons';
 
 // Clicking the logo or Home asks the feed to revalidate, exactly like
@@ -68,9 +68,9 @@ function TopBar({ onMenu }: { onMenu(): void }) {
   return (
     <div className="topbar">
       <div className="tb-left mini-hide">
-        <button className="icon-btn" onClick={onMenu} title="Menu">☰</button>
+        <button className="icon-btn" onClick={onMenu} title="Menu"><MenuIcon size={22} /></button>
         <div className="brand" onClick={homeClick}>
-          <span className="logo">▶</span> IndioTube
+          <span className="logo"><PlayIcon size={15} /></span> IndioTube
         </div>
       </div>
       <div className="search-wrap" ref={boxRef}>
@@ -144,6 +144,13 @@ function Shell() {
     window.indio.window.isFullscreen().then(setFs).catch(() => undefined);
     return window.indio.window.onFullscreen(setFs);
   }, []);
+
+  // Watching a video is an immersive view: collapse the side navigation so the
+  // player and the Up next rail get the full width (the hamburger brings it
+  // back without interrupting playback).
+  useEffect(() => {
+    if (route.page === 'watch') setNavOpen(false);
+  }, [route.page]);
 
   // The player layer is a sibling of the shell, so fullscreen is flagged on
   // the document for it to react to.

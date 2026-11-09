@@ -80,7 +80,13 @@ export interface LibraryState {
 }
 
 export interface Chip { title: string; params: string | null; token: string | null }
-export interface Feed { chips: Chip[]; videos: VideoItem[]; continuation: string | null }
+export interface Feed {
+  chips: Chip[];
+  videos: VideoItem[];
+  continuation: string | null;
+  /** True when the feed was built locally from this device's own data. */
+  local?: boolean;
+}
 export type SearchEntry =
   | { kind: 'video'; video: VideoItem }
   | { kind: 'channel'; channel: ChannelItem }
@@ -101,6 +107,7 @@ export interface WatchData {
   likesText: string | null;
   description: string | null;
   related: VideoItem[];
+  relatedToken: string | null;
   commentsToken: string | null;
   commentsCountText: string | null;
   membersOnly: boolean;
@@ -177,7 +184,13 @@ export interface Qualities {
   auto: QualityFile | null;
   /** The height plain "Auto" plays: 720p when the video offers it. */
   autoHeight: number;
-  audio: { url: string; ext: string; codec: string | null } | null;
+  audio: {
+    url: string;
+    ext: string;
+    codec: string | null;
+    language?: string | null;
+    original?: boolean;
+  } | null;
   subtitles: SubtitleTrack[];
   isLive: boolean;
   membersOnly: boolean;
@@ -191,6 +204,8 @@ export interface Settings {
   captionsEnabled: boolean;
   captionLang: string;
   sponsorBlock: boolean;
+  sponsorBlockAutoSkip: boolean;
+  sponsorBlockCategories: string[];
   downloadDir: string;
   downloadHeight: number;
   volume: number;
@@ -210,6 +225,7 @@ export interface SyncStats {
 
 export interface IndioBridge {
   home(p?: { params?: string | null; force?: boolean }): Promise<Feed>;
+  homeMore(p?: { excludeIds?: string[]; limit?: number }): Promise<VideoItem[]>;
   homeCont(token: string): Promise<Feed>;
   trending(p?: { force?: boolean }): Promise<Feed>;
   trendingCont(token: string): Promise<Feed>;
@@ -217,12 +233,13 @@ export interface IndioBridge {
   searchCont(token: string): Promise<SearchResults>;
   suggest(query: string): Promise<string[]>;
   channel(channelId: string, params?: string): Promise<ChannelPage>;
-  channelCont(token: string): Promise<ChannelPage>;
+  channelCont(token: string, channelId?: string): Promise<ChannelPage>;
   channelLive(channelId: string): Promise<ChannelPage>;
   channelPlaylists(channelId: string): Promise<{ playlists: PlaylistItem[]; continuation: string | null; hasTab: boolean }>;
   channelPlaylistsCont(token: string): Promise<{ playlists: PlaylistItem[]; continuation: string | null }>;
   channelAbout(channelId: string, token?: string | null): Promise<ChannelAbout | null>;
   watch(videoId: string): Promise<WatchData>;
+  watchMore(token: string): Promise<{ related: VideoItem[]; continuation: string | null }>;
   comments(token: string): Promise<{ comments: CommentItem[]; continuation: string | null }>;
   playlist(playlistId: string): Promise<PlaylistPage>;
   playlistCont(token: string): Promise<PlaylistPage>;
@@ -241,7 +258,7 @@ export interface IndioBridge {
     onEvent(cb: (e: DownloadEvent) => void): () => void;
   };
   sponsorBlock: {
-    segments(videoId: string): Promise<{ category: string; segment: [number, number]; UUID?: string }[]>;
+    segments(videoId: string, categories?: string[]): Promise<{ category: string; segment: [number, number]; UUID?: string }[]>;
   };
   library: {
     get(): Promise<LibraryState>;

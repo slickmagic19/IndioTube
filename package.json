@@ -1,8 +1,10 @@
 {
   "name": "indiotube",
   "private": true,
-  "version": "0.1.34",
-  "workspaces": ["apps/desktop"],
+  "version": "0.1.35",
+  "workspaces": [
+    "apps/desktop"
+  ],
   "scripts": {
     "dev": "npm --workspace apps/desktop run dev",
     "electron:dev": "npm --workspace apps/desktop run electron:dev",

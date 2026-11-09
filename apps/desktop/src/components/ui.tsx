@@ -7,7 +7,7 @@ export function Spinner() {
 }
 
 export function Menu({
-  anchor, onClose, children, width, placement = 'below', label = 'Menu',
+  anchor, onClose, children, width, placement = 'below', label = 'Menu', className,
 }: {
   anchor: DOMRect | null;
   onClose(): void;
@@ -15,6 +15,7 @@ export function Menu({
   width?: number;
   placement?: 'below' | 'above';
   label?: string;
+  className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
@@ -95,7 +96,7 @@ export function Menu({
   // that ancestor and land in the wrong place. React events still bubble
   // through the component tree, so clicks must not reach the card underneath.
   return createPortal(
-    <div ref={ref} className="menu" role="menu" aria-label={label}
+    <div ref={ref} className={`menu${className ? ` ${className}` : ''}`} role="menu" aria-label={label}
       style={{ ...pos, width: width || 220, maxHeight }}
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}>

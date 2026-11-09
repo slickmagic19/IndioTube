@@ -25,12 +25,29 @@ export function SyncModal({ onClose }: { onClose(): void }) {
   const [error, setError] = useState('');
   const [lastMerge, setLastMerge] = useState<string | null>(null);
   const [payload, setPayload] = useState<Record<string, unknown> | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!payload || !canvasRef.current) return;
-    QRCode.toCanvas(canvasRef.current, JSON.stringify(payload), { width: 240, margin: 1 })
-      .catch(() => setError('Could not render the QR code'));
+    // 320px with a real quiet zone keeps the code readable from a phone even
+    // when the window is scaled; 240px was cramped enough to fail on cameras
+    // that pick the smallest preview size.
+    QRCode.toCanvas(canvasRef.current, JSON.stringify(payload), {
+      width: 320, margin: 2, errorCorrectionLevel: 'M',
+    }).catch(() => setError('Could not render the QR code'));
   }, [payload]);
+
+  const manualText = payload ? `${payload.host} ${payload.port} ${payload.token}` : '';
+  const copyManual = async () => {
+    if (!manualText) return;
+    try {
+      await navigator.clipboard.writeText(manualText);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError('Could not copy — select the text below and copy it manually.');
+    }
+  };
 
   useEffect(() => {
     let stopped = false;
@@ -79,9 +96,17 @@ export function SyncModal({ onClose }: { onClose(): void }) {
                   : 'Phone linked — it pulled your desktop library and pushed its own back.'}
               </div>
               {lastMerge && <div className="qr-status"><b>Last merge:</b> {lastMerge}</div>}
-              <div className="qr-pair-text">
-                {payload && `Manual fallback →  host ${payload.host}   port ${payload.port}   token ${String(payload.token).slice(0, 12)}…`}
-              </div>
+              {payload && (
+                <div className="qr-pair">
+                  <div className="qr-pair-title">No camera? Enter these on the phone under “Enter PC address manually”</div>
+                  <div className="qr-pair-row"><span>Host</span><code>{String(payload.host)}</code></div>
+                  <div className="qr-pair-row"><span>Port</span><code>{String(payload.port)}</code></div>
+                  <div className="qr-pair-row"><span>Token</span><code>{String(payload.token)}</code></div>
+                  <button className="btn ghost" onClick={copyManual}>
+                    {copied ? 'Copied ✓' : 'Copy address, port and token'}
+                  </button>
+                </div>
+              )}
             </>
           )}
           <button className="btn ghost" onClick={onClose} style={{ marginTop: 8 }}>Close</button>

@@ -126,7 +126,16 @@ fun SyncScreen(container: Container, ui: UiRefs) {
                     onClick = {
                         launcher.launch(
                             ScanOptions()
+                                // Leave the orientation to the manifest, which
+                                // pins CaptureActivity to portrait. zxing's own
+                                // "locked" mode freezes whatever orientation
+                                // the phone happens to be in, so after
+                                // fullscreen playback it kept opening side-on
+                                // with a rotated preview that never decoded.
                                 .setOrientationLocked(false)
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setBeepEnabled(false)
+                                .setBarcodeImageEnabled(false)
                                 .setPrompt("Scan the QR code from IndioTube on your PC"),
                         )
                     },

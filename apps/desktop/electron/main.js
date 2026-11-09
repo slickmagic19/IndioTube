@@ -7,16 +7,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { InnerTube } = require('./inTube');
 const library = require('./library');
+const { createLocalFeed } = require('./localFeed');
 const { createStreams } = require('./streams');
 const sync = require('./sync');
 
 const DEV_URL = process.env.INDIOTUBE_DEV_URL || 'http://127.0.0.1:5174';
+// Cap on a local "load more" page, so a renderer bug cannot ask for the whole
+// candidate pool at once.
+const RANK_PAGE_MAX = 80;
 
 let win = null;
 let store = null;
 let streams = null;
 let syncState = null; // { server, stop }
 const tube = new InnerTube();
+// Signed-out YouTube serves an empty Home, so the local recommender builds a
+// personal mix from this device's history, subscriptions, likes and searches
+// (the desktop counterpart of Android's LocalFeed.kt).
+const localFeed = createLocalFeed(tube);
 
 // Stream cancellation (seeks) and network drops must never surface
 // Electron's default "JavaScript error occurred in the main process"
@@ -38,6 +46,13 @@ const DEFAULT_SETTINGS = {
   captionsEnabled: false,
   captionLang: '',
   sponsorBlock: true,
+  // Full SponsorBlock controls, mirroring the phone: a master switch, an
+  // auto-skip switch, and the categories to skip. Auto-skip stays on by
+  // default because the desktop toggle always behaved as "auto-skip".
+  sponsorBlockAutoSkip: true,
+  sponsorBlockCategories: [
+    'sponsor', 'selfpromo', 'interaction', 'intro', 'outro', 'preview', 'music_offtopic', 'filler',
+  ],
   downloadDir: '',        // filled on first use
   downloadHeight: 720,
   volume: 1,
@@ -97,7 +112,40 @@ function broadcast(channel, payload) {
 function registerIpc() {
   // InnerTube browsing. Handlers return { ok, ... } shape with named keys;
   // preload throws on { ok: false } so the renderer can try/catch everywhere.
-  ipcMain.handle('indio:home', (_e, p = {}) => wrap(async () => ({ feed: await tube.home(p.params || null, Boolean(p.force)) })));
+  //
+  // Home is special: a signed-out FEwhat_to_watch is empty, so an empty
+  // network answer is replaced by the local recommender (Android parity).
+  // `force` (a reload / logo click) rotates the mix, so every refresh shows
+  // different videos from the same signals.
+  ipcMain.handle('indio:home', (_e, p = {}) => wrap(async () => {
+    const force = Boolean(p.force);
+    const params = p.params || null;
+    let remote = null;
+    try {
+      remote = await tube.home(params, force);
+    } catch {
+      remote = { chips: [], videos: [], continuation: null };
+    }
+    // A category chip is a YouTube-side filter; local recommendations cannot
+    // honour it, so only substitute the local mix for the plain Home tab.
+    if (remote.videos.length || params) return { feed: remote };
+    const videos = await localFeed.build(store.getState(), { force });
+    if (!videos.length) return { feed: remote };
+    return {
+      feed: {
+        chips: remote.chips || [],
+        videos,
+        continuation: null,
+        local: true,
+      },
+    };
+  }));
+  ipcMain.handle('indio:homeMore', (_e, p = {}) => wrap(async () => ({
+    videos: await localFeed.more(store.getState(), {
+      excludeIds: Array.isArray(p.excludeIds) ? p.excludeIds : [],
+      limit: Number(p.limit) > 0 ? Math.min(RANK_PAGE_MAX, Number(p.limit)) : undefined,
+    }),
+  })));
   ipcMain.handle('indio:homeCont', (_e, p) => wrap(async () => ({ feed: await tube.homeContinuation(p.token) })));
   ipcMain.handle('indio:trending', (_e, p = {}) => wrap(async () => ({ feed: await tube.trending(Boolean(p.force)) })));
   ipcMain.handle('indio:trendingCont', (_e, p) => wrap(async () => ({ feed: await tube.trendingContinuation(p.token) })));
@@ -105,12 +153,13 @@ function registerIpc() {
   ipcMain.handle('indio:searchCont', (_e, p) => wrap(async () => ({ results: await tube.searchContinuation(p.token) })));
   ipcMain.handle('indio:suggest', (_e, p) => wrap(async () => ({ suggestions: await tube.suggestions(String(p.query || '')) })));
   ipcMain.handle('indio:channel', (_e, p) => wrap(async () => ({ page: await tube.channelVideos(p.channelId, p.params || undefined) })));
-  ipcMain.handle('indio:channelCont', (_e, p) => wrap(async () => ({ page: await tube.channelContinuation(p.token) })));
+  ipcMain.handle('indio:channelCont', (_e, p) => wrap(async () => ({ page: await tube.channelContinuation(p.token, p.channelId || '') })));
   ipcMain.handle('indio:channelLive', (_e, p) => wrap(async () => ({ page: await tube.channelLive(p.channelId) })));
   ipcMain.handle('indio:channelPlaylists', (_e, p) => wrap(async () => ({ page: await tube.channelPlaylistsPage(p.channelId) })));
   ipcMain.handle('indio:channelPlaylistsCont', (_e, p) => wrap(async () => ({ page: await tube.channelPlaylistsContinuation(p.token) })));
   ipcMain.handle('indio:channelAbout', (_e, p) => wrap(async () => ({ about: await tube.channelAbout(p.channelId, p.token || null) })));
   ipcMain.handle('indio:watch', (_e, p) => wrap(async () => ({ data: await tube.watch(p.videoId) })));
+  ipcMain.handle('indio:watchMore', (_e, p) => wrap(async () => ({ page: await tube.watchContinuation(p.token) })));
   ipcMain.handle('indio:comments', (_e, p) => wrap(async () => ({ page: await tube.comments(p.token) })));
   ipcMain.handle('indio:playlist', (_e, p) => wrap(async () => ({ page: await tube.playlist(p.playlistId) })));
   ipcMain.handle('indio:playlistCont', (_e, p) => wrap(async () => ({ page: await tube.playlistContinuation(p.token) })));
@@ -136,18 +185,33 @@ function registerIpc() {
   });
   ipcMain.handle('downloads:reveal', (_e, p) => { shell.showItemInFolder(p.file); return ok({}); });
 
-  // SponsorBlock — plain HTTPS, proxied through main to avoid CORS.
+  // SponsorBlock — plain HTTPS, proxied through main to avoid CORS. The host
+  // is the official API (sponsor.ajay.app); the old sponsor.ajay.news name
+  // never resolved, so every lookup failed silently. The categories selected
+  // in Settings are requested instead of filtering a full list afterwards.
   const sbCache = new Map();
   ipcMain.handle('sb:segments', (_e, p) => wrap(async () => {
-    const hit = sbCache.get(p.videoId);
+    const videoId = String(p.videoId || '');
+    if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw new Error('invalid video id');
+    const categories = Array.isArray(p.categories) && p.categories.length
+      ? p.categories.map(String)
+      : settings.sponsorBlockCategories;
+    const key = `${videoId}|${[...categories].sort().join(',')}`;
+    const hit = sbCache.get(key);
     if (hit && Date.now() - hit.at < 10 * 60_000) return { data: hit.data };
-    const res = await fetch(
-      `https://sponsor.ajay.news/api/skipSegments?videoID=${encodeURIComponent(p.videoId)}`,
-      { signal: AbortSignal.timeout(8000) },
-    );
+    const url = new URL('https://sponsor.ajay.app/api/skipSegments');
+    url.searchParams.set('videoID', videoId);
+    url.searchParams.set('categories', JSON.stringify(categories));
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    // 404 is the normal "nobody submitted segments" answer, not a failure.
+    if (res.status === 404) {
+      sbCache.set(key, { at: Date.now(), data: [] });
+      return { data: [] };
+    }
     if (!res.ok) throw new Error(`SponsorBlock returned HTTP ${res.status}`);
     const data = await res.json();
-    sbCache.set(p.videoId, { at: Date.now(), data });
+    if (!Array.isArray(data)) return { data: [] };
+    sbCache.set(key, { at: Date.now(), data });
     return { data };
   }));
 
@@ -262,6 +326,9 @@ async function createWindow() {
       nodeIntegration: false,
       // YouTube thumbnails and i.ytimg.com load directly in the renderer.
       webSecurity: true,
+      // The player's A/V sync tick must keep running at full rate even when
+      // the window is in the background, or audio can drift while minimized.
+      backgroundThrottling: false,
     },
   });
   if (!app.isPackaged) {
@@ -315,6 +382,14 @@ async function createWindow() {
             errors: (window.__smokeErrors || []),
           })`);
           console.log('[smoke]', JSON.stringify(report));
+          // Generic probe for release checks that need DOM detail the report
+          // above does not carry (modal contents, switches, QR canvas).
+          if (process.env.INDIOTUBE_SMOKE_PROBE) {
+            try {
+              const probed = await win.webContents.executeJavaScript(process.env.INDIOTUBE_SMOKE_PROBE);
+              console.log('[probe]', JSON.stringify(probed));
+            } catch (e) { console.log('[probe-fail]', e.message); }
+          }
           if (process.env.INDIOTUBE_SMOKE_MEDIA === '1') {
             // Timeline probe: seek once, then sample both clocks every 800ms.
             // With INDIOTUBE_SMOKE_THROTTLE this reproduces "seeking while
@@ -419,7 +494,7 @@ async function createWindow() {
             const feedState = () => win.webContents.executeJavaScript(`({
               refreshBar: Boolean(document.querySelector('.refresh-bar.on')),
               gridAnimated: Boolean(document.querySelector('.grid.feed-in')),
-              showMore: (document.querySelector('.show-more button') || {}).textContent || null,
+              sentinel: Boolean(document.querySelector('.feed-sentinel')),
               cards: document.querySelectorAll('.card').length,
               skeletons: document.querySelectorAll('.sk').length,
             })`);

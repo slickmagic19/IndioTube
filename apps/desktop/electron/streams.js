@@ -113,6 +113,41 @@ function audioRank(f) {
   return 0;
 }
 
+function languageBase(tag) {
+  return String(tag || '').trim().toLowerCase().split(/[-_]/)[0];
+}
+
+// YouTube now publishes several audio tracks for one video: the creator's
+// original plus auto-dubbed translations. yt-dlp puts them all in the same
+// format list and marks the creator's track in format_note ("English (US)
+// original (default)") or audio_track.type. Picking purely by bitrate chose a
+// dub - Spanish is often a few kbps above the English original - which is why
+// playback sometimes spoke another language. Rank the original first, then a
+// track whose language matches the video's own language, then unknown
+// metadata, and only then a known dub.
+function audioOriginRank(f, info) {
+  const note = String(f.format_note || '').toLowerCase();
+  if (note.includes('original') || note.includes('(default)')) return 3;
+  const track = f.audio_track || {};
+  if (track.type === 'original') return 3;
+  if (track.type) return 0;
+  const primary = languageBase((info && info.language) || '');
+  const lang = languageBase(f.language || '');
+  if (primary && lang) return lang === primary ? 2 : 0;
+  return 1;
+}
+
+// Higher wins. Origin rank dominates; DRC (a loudness-compressed duplicate of
+// the same track) loses to the plain one, then codec preference and bitrate
+// break ties exactly like before.
+function audioScore(f, info) {
+  const note = String(f.format_note || '').toLowerCase();
+  return audioOriginRank(f, info) * 1e12
+    + (note.includes('drc') ? 0 : 1) * 1e9
+    + audioRank(f) * 1e6
+    + (f.abr || f.tbr || 0);
+}
+
 function formatHeight(f) {
   if (f.height > 0) return f.height;
   const m = /(\d{3,4})p/.exec(f.format_note || '');
@@ -142,13 +177,12 @@ function buildQualities(info) {
   // Best audio-only track: original audio, m4a preferred, then bitrate -
   // Android's bestAudio().
   const audios = all.filter((f) => playable(f) && (!f.vcodec || f.vcodec === 'none') && f.acodec && f.acodec !== 'none');
-  const audio = audios.length ? audios.reduce((best, f) => {
-    const score = (x) => audioRank(x) * 1e9 + (x.abr || x.tbr || 0);
-    return score(f) > score(best) ? f : best;
-  }, audios[0]) : null;
+  const audio = audios.length ? audios.reduce((best, f) => (
+    audioScore(f, info) > audioScore(best, info) ? f : best
+  ), audios[0]) : null;
 
   const bestMuxedAt = (h) => muxed.filter((f) => formatHeight(f) === h)
-    .sort((a, b) => (b.tbr || 0) - (a.tbr || 0))[0] || null;
+    .sort((a, b) => audioScore(b, info) - audioScore(a, info))[0] || null;
   const bestVideoAt = (h) => {
     if (!audio) return null;
     const cands = videoOnly.filter((f) => formatHeight(f) === h);
@@ -213,7 +247,13 @@ function buildQualities(info) {
     durationSec: Math.round(info.duration || 0),
     options,
     auto,
-    audio: audio ? { url: audio.url, ext: audio.ext || 'm4a', codec: audio.acodec } : null,
+    audio: audio ? {
+      url: audio.url,
+      ext: audio.ext || 'm4a',
+      codec: audio.acodec,
+      language: audio.language || null,
+      original: audioOriginRank(audio, info) >= 2,
+    } : null,
     subtitles: dedupeSubtitles(subs).map((t) => ({ ...t, url: subtitleVttUrl(t.url) })),
     isLive: liveStatus === 'is_live' || liveStatus === 'was_live' || Boolean(info.is_live),
     membersOnly: liveStatus === 'needs_auth',
@@ -355,11 +395,14 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
     const target = height == null ? resolveAutoHeight(q) : height;
     const option = nearest(q, target);
     if (option) {
-      if (option.videoOnly) {
-        return { video: option.videoOnly.url, audio: q.audio && q.audio.url, height: option.height, label: height == null ? 'Auto' : option.label };
-      }
+      // A muxed rung is one file, so the browser's own media pipeline keeps
+      // audio and video locked together. Prefer it whenever the rung has it;
+      // only split into two elements when there is no single-file stream.
       if (option.muxed) {
         return { video: option.muxed.url, audio: null, height: option.height, label: height == null ? 'Auto' : option.label };
+      }
+      if (option.videoOnly) {
+        return { video: option.videoOnly.url, audio: q.audio && q.audio.url, height: option.height, label: height == null ? 'Auto' : option.label };
       }
     }
     if (q.auto) return { video: q.auto.url, audio: null, height: q.auto.height, label: 'Auto' };
@@ -553,7 +596,10 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
     } catch (e) {
       if (ac.signal.aborted || e?.name === 'AbortError') return; // a normal seek
       if (!res.destroyed && !res.headersSent) {
-        res.writeHead(502, { 'content-type': 'text/plain' });
+        // 502s need the CORS headers too: without them Chromium reports a
+        // media load failure as a confusing CORS error instead of a network
+        // one, and the player cannot tell a transient CDN hiccup apart.
+        res.writeHead(502, { ...corsHeaders(), 'content-type': 'text/plain' });
         res.end(`proxy error: ${e.message}`);
       } else {
         try { res.destroy(); } catch { /* gone */ }
@@ -563,7 +609,10 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
 
   async function serveSubtitle(t, req, res) {
     const entry = tokens.get(t);
-    if (!entry) { res.writeHead(404); return res.end(); }
+    if (!entry) {
+      res.writeHead(404, { ...corsHeaders(), 'content-type': 'text/plain' });
+      return res.end('stale token');
+    }
     const ac = new AbortController();
     req.on('close', () => { try { ac.abort(); } catch { /* gone */ } });
     try {
@@ -571,7 +620,27 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
         headers: { 'user-agent': PROXY_UA, referer: 'https://www.youtube.com/' },
         signal: ac.signal,
       });
+      // YouTube sometimes rate-limits caption fetches (or hits an upstream 5xx);
+      // retry a couple of times with backoff before failing, so a transient
+      // network hiccup does not leave captions dead.
+      if (!up.ok && up.status >= 400 && up.status <= 599) {
+        let attempt = 0;
+        while (attempt < 3) {
+          attempt += 1;
+          await new Promise((r) => setTimeout(r, 300 * attempt));
+          const retry = await fetch(entry.url, {
+            headers: { 'user-agent': PROXY_UA, referer: 'https://www.youtube.com/' },
+            signal: ac.signal,
+          });
+          if (retry.ok) {
+            Object.assign(up, retry);
+            break;
+          }
+          if (retry.status < 500) break; // client error: don't retry 40x
+        }
+      }
       if (!up.ok) throw new Error(`HTTP ${up.status}`);
+      const contentType = up.headers.get('content-type') || 'text/vtt; charset=utf-8';
       const text = await up.text();
       let vtt = null;
       if (text.startsWith('WEBVTT')) vtt = text;
@@ -583,12 +652,15 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
         throw new Error('unrecognized caption payload');
       }
       if (res.destroyed || res.writableEnded) return;
-      res.writeHead(200, { ...corsHeaders(), 'content-type': 'text/vtt; charset=utf-8', 'cache-control': 'no-store' });
+      res.writeHead(200, { ...corsHeaders(), 'content-type': contentType, 'cache-control': 'no-store' });
       res.end(vtt);
     } catch (e) {
       if (ac.signal.aborted || e?.name === 'AbortError') return;
       try {
-        if (!res.destroyed && !res.headersSent) { res.writeHead(502, { 'content-type': 'text/plain' }); res.end('subtitle unavailable'); }
+        if (!res.destroyed && !res.headersSent) {
+          res.writeHead(502, { ...corsHeaders(), 'content-type': 'text/plain' });
+          res.end('subtitle unavailable');
+        }
       } catch { /* gone */ }
     }
   }

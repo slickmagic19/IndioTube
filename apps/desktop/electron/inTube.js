@@ -465,6 +465,35 @@ function feedContinuation(root) {
   return null;
 }
 
+// Browse continuations arrive outside `contents`: the next page of items is
+// in onResponseReceivedActions / onResponseReceivedEndpoints /
+// onResponseReceivedCommands (appendContinuationItemsAction or
+// reloadContinuationItemsCommand). Looking only under `contents` made every
+// "load more" page parse as empty even though the token was valid.
+function continuationActionItems(root) {
+  const out = [];
+  const add = (el) => {
+    if (!el || typeof el !== 'object') return;
+    const items = path(el, 'appendContinuationItemsAction', 'continuationItems')
+      || path(el, 'reloadContinuationItemsCommand', 'continuationItems');
+    if (Array.isArray(items)) out.push(...items);
+    const commands = path(el, 'commandExecutorCommand', 'commands');
+    if (Array.isArray(commands)) for (const cmd of commands) add(cmd);
+  };
+  for (const key of ['onResponseReceivedActions', 'onResponseReceivedEndpoints', 'onResponseReceivedCommands']) {
+    const list = root && root[key];
+    if (Array.isArray(list)) for (const el of list) add(el);
+  }
+  return out;
+}
+
+// Initial renders keep the grid under `contents`; subsequent pages keep it
+// in a continuation action. Both feed the same item loop.
+function feedItems(root) {
+  const direct = feedContents(root);
+  return direct.length ? direct : continuationActionItems(root);
+}
+
 function recommendableVideos(videos) {
   return videos.filter((v) => !v.membersOnly);
 }
@@ -488,7 +517,7 @@ function parseFeed(root) {
     });
   }
 
-  const contents = feedContents(root);
+  const contents = feedItems(root);
   const videos = [];
   let continuation = null;
   for (const entry of contents) {
@@ -716,7 +745,7 @@ function parseChannelAbout(root) {
 
 function parseChannelPage(root, requestedId) {
   const channel = parseChannelHeader(root, requestedId);
-  const contents = feedContents(root);
+  const contents = feedItems(root);
   const videos = [];
   let continuation = null;
   for (const entry of contents) {
@@ -917,6 +946,25 @@ function parseWatch(root, videoId) {
     if (lv) { const v = parseLockup(lv); if (v) related.push(v); }
   }
 
+  // The Up next rail ends with a continuation item; keeping its token is what
+  // lets the watch page append more recommendations on demand.
+  let relatedToken = null;
+  for (let i = resultList.length - 1; i >= 0; i -= 1) {
+    const cont = obj(resultList[i], 'continuationItemRenderer');
+    if (!cont) continue;
+    relatedToken = extractContinuation(cont) || null;
+    if (relatedToken) break;
+  }
+  if (!relatedToken) {
+    const sec = path(root, 'contents', 'twoColumnWatchNextResults', 'secondaryResults', 'secondaryResults');
+    if (sec) {
+      for (const cont of findAll(sec, 'continuationItemRenderer', 8, 4)) {
+        relatedToken = extractContinuation(cont) || null;
+        if (relatedToken) break;
+      }
+    }
+  }
+
   // comments entry point
   let commentsToken = null;
   let commentsCount = null;
@@ -969,11 +1017,52 @@ function parseWatch(root, videoId) {
     description: (description || '').trim() || null,
     related: related.filter((v) => (seenRelated.has(v.videoId) ? false : (seenRelated.add(v.videoId), true)))
       .filter((v) => v.videoId !== videoId && !v.membersOnly),
+    relatedToken,
     commentsToken,
     commentsCountText: commentsCount || null,
     membersOnly,
     chapters: parseChapters(root),
     isLive: Boolean(isLive),
+  };
+}
+
+// A continuation of the watch page's secondary results (the Up next rail).
+// The appended items are bare lockupViewModel / compactVideoRenderer entries
+// inside appendContinuationItemsAction, not wrapped in a rich grid.
+function parseWatchContinuation(root) {
+  const items = continuationActionItems(root);
+  const videos = [];
+  let continuation = null;
+  for (const el of items) {
+    const cont = obj(el, 'continuationItemRenderer');
+    if (cont) {
+      continuation = extractContinuation(cont) || continuation;
+      continue;
+    }
+    let video = null;
+    for (const key of ['compactVideoRenderer', 'videoRenderer', 'playlistVideoRenderer']) {
+      const renderer = obj(el, key);
+      if (renderer) { video = parseVideoRenderer(renderer); break; }
+    }
+    if (!video) {
+      const lockup = obj(el, 'lockupViewModel');
+      if (lockup) video = parseLockup(lockup);
+    }
+    if (!video) {
+      const rich = obj(el, 'richItemRenderer');
+      if (rich) {
+        const content = field(rich, 'content');
+        video = content && parseAnyVideo(content);
+      }
+    }
+    if (video && video.videoId) videos.push(video);
+  }
+  const seen = new Set();
+  return {
+    related: videos
+      .filter((v) => !v.membersOnly)
+      .filter((v) => (seen.has(v.videoId) ? false : (seen.add(v.videoId), true))),
+    continuation,
   };
 }
 
@@ -1424,8 +1513,8 @@ class InnerTube {
       parseChannelPage(await this.browse(channelId, params), channelId));
   }
 
-  async channelContinuation(token) {
-    return parseChannelPage(await this.browse('', null, token), '');
+  async channelContinuation(token, channelId = '') {
+    return parseChannelPage(await this.browse('', null, token), channelId);
   }
 
   async channelLive(channelId, force = false) {
@@ -1483,6 +1572,12 @@ class InnerTube {
     return parseWatch(root, videoId);
   }
 
+  async watchContinuation(token) {
+    const c = await this.config();
+    const root = await this.post('next', { context: this.contextOf(c), continuation: token });
+    return parseWatchContinuation(root);
+  }
+
   // ---- comments ----
 
   async comments(token) {
@@ -1517,6 +1612,7 @@ module.exports = {
   parseChannelPlaylistsPage,
   parseChannelTabs,
   parseWatch,
+  parseWatchContinuation,
   parseChapters,
   parseComments,
   parsePlaylist,

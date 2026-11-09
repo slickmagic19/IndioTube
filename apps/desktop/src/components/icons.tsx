@@ -16,6 +16,10 @@ export const HomeIcon = svg(<>
   <path d="M4 10.5 12 4l8 6.5" /><path d="M6 9.5V20h12V9.5" />
 </>);
 
+export const MenuIcon = svg(<>
+  <path d="M4 7h16M4 12h16M4 17h16" />
+</>);
+
 export const FireIcon = svg(<>
   <path d="M12 3c1 3-3 4.5-3 8a3.2 3.2 0 0 0 6.2 1c2 1.6 2.8 3 2.8 4.7A6 6 0 1 1 6.4 12C6.4 8 9 6 12 3Z" />
 </>);
@@ -87,6 +91,16 @@ export const MuteIcon = svg(<>
 export const CaptionsIcon = svg(<>
   <rect x="3" y="6" width="18" height="12" rx="2.5" />
   <path d="M10 10.2a2.4 2.4 0 1 0 0 3.6M16.5 10.2a2.4 2.4 0 1 0 0 3.6" />
+</>);
+export const HdIcon = svg(<>
+  <rect x="3" y="5.5" width="18" height="13" rx="2.5" />
+  <path d="M8 9.5v5M8 12h3M11 9.5v5" />
+  <path d="M14 9.5v5h1.4a2.5 2.5 0 0 0 0-5H14Z" />
+</>);
+export const SpeedIcon = svg(<>
+  <path d="M5 17a8 8 0 1 1 14 0" />
+  <path d="m12 12 3.6-3.6" />
+  <circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none" />
 </>);
 export const GearSmallIcon = GearIcon;
 export const PipIcon = svg(<>

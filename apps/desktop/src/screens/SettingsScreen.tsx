@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useApp } from '../store';
 import { SyncModal } from '../components/SyncModal';
 import { QrIcon } from '../components/icons';
+import { SPONSOR_CATEGORIES } from '../player/sponsorLogic';
 
 export function SettingsScreen() {
   const { settings, saveSettings, lib, op, toast } = useApp();
@@ -13,6 +14,12 @@ export function SettingsScreen() {
   if (!settings) return <div className="state">Loading settings…</div>;
 
   const set = (patch: Partial<typeof settings>) => saveSettings(patch as any);
+
+  const toggleCategory = (id: string, on: boolean) => {
+    const next = new Set(settings.sponsorBlockCategories || []);
+    if (on) next.add(id); else next.delete(id);
+    set({ sponsorBlockCategories: SPONSOR_CATEGORIES.map((c) => c.id).filter((x) => next.has(x)) });
+  };
 
   return (
     <div className="settings">
@@ -52,10 +59,31 @@ export function SettingsScreen() {
           onClick={() => set({ captionsEnabled: !settings.captionsEnabled })}><i /></button>
       </div>
       <div className="field">
-        <div className="label"><b>SponsorBlock</b><span>Auto-skip sponsors, intros and self-promo</span></div>
+        <div className="label"><b>SponsorBlock</b><span>Community-submitted sponsor, intro and self-promo segments</span></div>
         <button className={`switch${settings.sponsorBlock ? ' on' : ''}`}
           onClick={() => set({ sponsorBlock: !settings.sponsorBlock })}><i /></button>
       </div>
+      {settings.sponsorBlock && (
+        <>
+          <div className="field">
+            <div className="label"><b>Skip segments automatically</b><span>Off shows a Skip button in the player instead</span></div>
+            <button className={`switch${settings.sponsorBlockAutoSkip ? ' on' : ''}`}
+              onClick={() => set({ sponsorBlockAutoSkip: !settings.sponsorBlockAutoSkip })}><i /></button>
+          </div>
+          <div className="sb-cats">
+            <div className="sb-cats-head">Categories to skip</div>
+            {SPONSOR_CATEGORIES.map((c) => {
+              const on = (settings.sponsorBlockCategories || []).includes(c.id);
+              return (
+                <label key={c.id} className={`check${on ? ' on' : ''}`}>
+                  <input type="checkbox" checked={on} onChange={(e) => toggleCategory(c.id, e.target.checked)} />
+                  <span className="check-text"><b>{c.label}</b><small>{c.description}</small></span>
+                </label>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       <h2>Downloads</h2>
       <div className="field">

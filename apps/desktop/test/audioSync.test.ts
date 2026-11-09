@@ -61,6 +61,31 @@ describe('audioSyncAction', () => {
     expect(big.muted).toBe(true);
   });
 
+  it('leaves frame-level drift alone', () => {
+    const action = audioSyncAction({ ...base, audioTime: 10.02, videoTime: 10 });
+    expect(action.rate).toBeUndefined();
+    expect(action).toEqual({ muted: false });
+  });
+
+  it('nudges the rate instead of seeking for small drift', () => {
+    // Audio 100ms behind: speed up a hair so it catches up in under a second.
+    const behind = audioSyncAction({ ...base, audioTime: 9.9, videoTime: 10, playbackRate: 1 });
+    expect(behind.seekTo).toBeUndefined();
+    expect(behind.muted).toBe(false);
+    expect(behind.rate).toBeGreaterThan(1);
+    expect(behind.rate).toBeLessThan(1.05);
+
+    const ahead = audioSyncAction({ ...base, audioTime: 10.15, videoTime: 10, playbackRate: 1.5 });
+    expect(ahead.rate).toBeLessThan(1.5);
+    expect(ahead.rate).toBeGreaterThan(1.4);
+  });
+
+  it('never leaves a nudge running while the video is paused', () => {
+    const action = audioSyncAction({ ...base, videoPaused: true, audioPaused: true, audioTime: 9.9, videoTime: 10 });
+    expect(action.rate).toBeUndefined();
+    expect(action.pause).toBeUndefined(); // already paused on both sides
+  });
+
   it('mirrors play/pause state', () => {
     expect(audioSyncAction({ ...base, videoPaused: true, audioPaused: false })).toEqual({ muted: false, pause: true });
     expect(audioSyncAction({ ...base, videoPaused: false, audioPaused: true })).toEqual({ muted: false, play: true });

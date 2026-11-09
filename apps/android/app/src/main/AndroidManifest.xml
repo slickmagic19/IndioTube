@@ -36,6 +36,16 @@
             </intent-filter>
         </activity>
 
+        <!-- The bundled zxing viewfinder follows the sensor by default. A phone
+             that was just held in landscape (the player locks landscape for
+             fullscreen) then opens the scanner side-on, and the rotated
+             preview never locks onto the code. Pairing only needs the code on
+             the PC screen, so the viewfinder is always portrait. -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="portrait"
+            tools:replace="android:screenOrientation" />
+
         <service
             android:name=".player.PlaybackService"
             android:exported="false"

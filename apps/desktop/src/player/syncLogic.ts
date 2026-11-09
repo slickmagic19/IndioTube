@@ -1,20 +1,22 @@
 // Dual-track sync decisions, kept pure so they can be unit-tested without a
 // DOM. The player has a muted <video> (video-only stream) and an <audio>
-// element (audio-only stream); this decides each 250ms tick what to do with
-// the audio so scrubbing while everything is still loading never produces
-// the "audio stutters / plays from the wrong position" effect.
+// element (audio-only stream); this decides each tick what to do with the
+// audio so the two clocks stay together without audible stutter.
 //
 // Rules:
 //  - while the audio element has no usable metadata (readyState < 2) or is
 //    already seeking, stay muted and never touch its clock;
-//  - for a moment after a user seek (700ms) let both elements settle: muted,
-//    no further seeking;
+//  - for a moment after a seek let both elements settle: muted, no seeking;
 //  - if the VIDEO is stalling (readyState < 3, i.e. it has no future data),
 //    pause the audio instead of chasing its clock: that is how a single
 //    muxed stream behaves, and it avoids the audible "seek back" stutter
 //    every time the video rebuffers;
-//  - otherwise mirror play/pause, correct drift above 350ms, and stay muted
-//    while the drift is still large (so the wrong part is never heard).
+//  - otherwise mirror play/pause, gently nudge the audio rate while the drift
+//    is still small (Chromium keeps the pitch), re-seek above 250ms, and stay
+//    muted only while the drift is large enough that the wrong part could be
+//    heard. A 40ms window is about one frame at 24fps - the same tolerance a
+//    single muxed stream gets from the browser - so ordinary playback is no
+//    longer left audibly ahead or behind.
 export interface AudioSyncInput {
   audioReadyState: number;   // HTMLMediaElement.readyState (0..4)
   audioSeeking: boolean;
@@ -26,18 +28,23 @@ export interface AudioSyncInput {
   muted: boolean;            // the user's mute switch
   lastSeekAt: number;        // ms timestamp of the last user seek
   now: number;               // current ms timestamp
+  playbackRate?: number;     // the user's chosen speed (default 1)
 }
 
 export interface AudioSyncAction {
   play?: boolean;
   pause?: boolean;
   seekTo?: number;
+  /** Absolute playbackRate for the audio element this tick (nudge only). */
+  rate?: number;
   muted: boolean;
 }
 
-const SEEK_SETTLE_MS = 700;
-const DRIFT_SEEK = 0.35;
-const DRIFT_MUTE = 0.9;
+const SEEK_SETTLE_MS = 350;
+const DRIFT_SEEK = 0.25;
+const DRIFT_MUTE = 0.6;
+const SOFT_DRIFT = 0.04;
+const MAX_NUDGE = 0.05;
 
 export function audioSyncAction(i: AudioSyncInput): AudioSyncAction {
   // NaN/inf clocks mean "not measured yet" — leave the audio alone.
@@ -62,6 +69,13 @@ export function audioSyncAction(i: AudioSyncInput): AudioSyncAction {
   if (drift > DRIFT_SEEK) {
     action.seekTo = videoTime;
     action.muted = true;
+  } else if (!i.videoPaused && drift > SOFT_DRIFT) {
+    // Behind (audioTime < videoTime) speeds up a hair, ahead slows down a
+    // hair; the correction is small enough to be inaudible but converges in
+    // under a second instead of leaving a permanent offset.
+    const base = Number.isFinite(i.playbackRate) && i.playbackRate > 0 ? i.playbackRate : 1;
+    const nudge = Math.max(-MAX_NUDGE, Math.min(MAX_NUDGE, (videoTime - audioTime) * 0.35));
+    action.rate = Math.max(0.25, Math.min(4, base + nudge));
   }
   return action;
 }

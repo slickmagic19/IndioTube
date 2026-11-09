@@ -50,14 +50,18 @@ same type-ahead search, a left navigation column, and the phone's card grid for 
 - Ad-free playback through a bundled `yt-dlp` sidecar. YouTube only serves single-file streams up to
   360p now, so anything above that comes as separate video and audio tracks: the player runs a
   muted video element and an audio element, keeps them within a frame of each other, mutes while
-  they are out of sync and never lets the audio speak from the wrong position â€” including while a
-  seek is still loading
+  they are out of sync and never lets the audio speak from the wrong position — including while a
+  seek is still loading. A single-file stream is used whenever the rung has one, and multi-audio
+  videos always play the creator's original track rather than an auto-dub
 - Auto quality picks 720p when the video offers it and steps down from there; hovering a card warms
   the stream ladder so playback starts sooner, and a byte cache serves the second seek instantly
 - YouTube-style mini player: it floats over the page and keeps playing while you browse, expands back
   to the watch page on click, and docks itself automatically when you leave a playing video
 - The watch page keeps scrolling: video, actions, description, comments, an Up next rail, chapters,
   SponsorBlock segments, captions and playback speed
+- SponsorBlock has the phone's full controls: a master switch, an auto-skip switch, and the eight
+  segment categories to skip; with auto-skip off the player offers a Skip button at each segment
+  and an Undo after every automatic skip
 - Every card has the phone's full â‹® menu: mark watched/unwatched, play next, add to queue, like, save
   to Watch later, save to a playlist, download, copy link, interested, not interested (with Undo) and
   don't recommend this channel â€” the last three filter the Home and Trending grids immediately

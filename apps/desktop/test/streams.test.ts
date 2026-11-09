@@ -42,6 +42,37 @@ describe('buildQualities', () => {
     expect(q.durationSec).toBe(100);
   });
 
+  it('plays the original audio track, not a higher-bitrate dub', () => {
+    // Real shape from a multi-audio video: yt-dlp marks the creator's track in
+    // format_note, while dubbed tracks are often a few kbps larger. Picking by
+    // bitrate alone used to play Hindi/Spanish audio for an English video.
+    const q = buildQualities({
+      id: 'v', duration: 100, language: 'en-US',
+      formats: [
+        fmt({ height: 1080, vcodec: 'vp9', acodec: 'none', tbr: 4000 }),
+        fmt({ height: 0, vcodec: 'none', acodec: 'mp4a.40.2', ext: 'm4a', language: 'hi', format_note: 'Hindi, medium', abr: 181 }),
+        fmt({ height: 0, vcodec: 'none', acodec: 'mp4a.40.2', ext: 'm4a', language: 'es', format_note: 'Spanish, medium', abr: 149 }),
+        fmt({ height: 0, vcodec: 'none', acodec: 'opus', ext: 'webm', language: 'hi', format_note: 'Hindi, low', abr: 60 }),
+        fmt({ height: 0, vcodec: 'none', acodec: 'mp4a.40.2', ext: 'm4a', language: 'en-US', format_note: 'English (US) original (default), medium', abr: 134 }),
+      ],
+    });
+    expect(q.audio.language).toBe('en-US');
+    expect(q.audio.original).toBe(true);
+  });
+
+  it('falls back to the video language when yt-dlp gives no original marker', () => {
+    const q = buildQualities({
+      id: 'v', duration: 100, language: 'en',
+      formats: [
+        fmt({ height: 0, vcodec: 'none', acodec: 'mp4a.40.2', ext: 'm4a', language: 'de', format_note: 'German, medium', abr: 150 }),
+        fmt({ height: 0, vcodec: 'none', acodec: 'mp4a.40.2', ext: 'm4a', language: 'en', format_note: 'English, medium', abr: 129 }),
+        fmt({ height: 0, vcodec: 'none', acodec: 'mp4a.40.2', ext: 'm4a', language: 'en', format_note: 'English, medium, DRC', abr: 129.5 }),
+      ],
+    });
+    expect(q.audio.language).toBe('en');
+    expect(q.audio.codec).toBe('mp4a.40.2');
+  });
+
   it('labels 60fps rungs like Android does', () => {
     const q = buildQualities({
       id: 'v', duration: 1,

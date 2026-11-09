@@ -1,12 +1,14 @@
 // Channel page: header + Subscribe, Videos / Live / Playlists / About tabs,
-// infinite continuation per tab.
-import React, { useEffect, useState } from 'react';
+// with the Videos grid appending the next page automatically when scrolled
+// to the end.
+import React, { useCallback, useEffect, useState } from 'react';
 import type { ChannelAbout, ChannelPage, PlaylistItem, VideoItem } from '../types';
 import { navigate } from '../router';
 import { useApp } from '../store';
 import { VideoCard } from '../components/VideoCard';
 import { Avatar, Spinner } from '../components/ui';
 import { ChannelSkeleton } from '../components/Skeletons';
+import { useInfiniteScroll } from '../useInfiniteScroll';
 
 const TABS = ['Videos', 'Live', 'Playlists', 'About'] as const;
 
@@ -19,6 +21,10 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
   const [about, setAbout] = useState<ChannelAbout | null | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [videos, setVideos] = useState<VideoItem[]>([]);
+  const [continuation, setContinuation] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [done, setDone] = useState(false);
 
   const subscribed = Boolean(lib?.subscriptions.some((s) => s.channelId === channelId));
 
@@ -30,8 +36,17 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
     setLivePage(null);
     setPlaylists(null);
     setAbout(undefined);
+    setVideos([]);
+    setContinuation(null);
+    setDone(false);
     window.indio.channel(channelId)
-      .then((p) => { if (!cancelled) setPage(p); })
+      .then((p) => {
+        if (cancelled) return;
+        setPage(p);
+        setVideos(p.videos);
+        setContinuation(p.continuation);
+        setDone(!p.continuation);
+      })
       .catch((e) => { if (!cancelled) setError(String(e?.message || e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -52,6 +67,24 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
       window.indio.channelAbout(channelId, page?.aboutToken || null).then(setAbout).catch(() => setAbout(null));
     }
   }, [tab, playlists, about, channelId, page?.aboutToken]);
+
+  const loadMore = useCallback(() => {
+    if (tab !== 0 || loadingMore || done || !continuation) return;
+    setLoadingMore(true);
+    window.indio.channelCont(continuation, channelId).then((p) => {
+      const known = new Set(videos.map((v) => v.videoId));
+      const fresh = p.videos.filter((v) => !known.has(v.videoId));
+      if (fresh.length) setVideos((cur) => [...cur, ...fresh]);
+      const next = p.continuation && p.continuation !== continuation ? p.continuation : null;
+      setContinuation(next);
+      if (!next) setDone(true);
+    }).catch(() => setDone(true))
+      .finally(() => setLoadingMore(false));
+  }, [tab, loadingMore, done, continuation, videos, channelId]);
+
+  const sentinelRef = useInfiniteScroll(loadMore, [
+    tab, videos.length, continuation, done, loadingMore,
+  ]);
 
   if (loading) return <ChannelSkeleton />;
   if (error || !page) {
@@ -86,8 +119,12 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
       </div>
 
       {tab === 0 && (
-        page.videos.length
-          ? <div className="grid">{page.videos.map((v, i) => <VideoCard key={`${v.videoId}-${i}`} video={v} showChannel={false} />)}</div>
+        videos.length
+          ? <>
+            <div className="grid">{videos.map((v, i) => <VideoCard key={`${v.videoId}-${i}`} video={v} showChannel={false} />)}</div>
+            {!done && <div ref={sentinelRef} className="feed-sentinel" aria-hidden="true" />}
+            {loadingMore && <div className="state"><Spinner /></div>}
+          </>
           : <div className="state">No videos yet.</div>
       )}
       {tab === 1 && (

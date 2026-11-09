@@ -20,6 +20,9 @@ export function WatchScreen({ videoId }: { videoId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [comments, setComments] = useState<CommentItem[]>([]);
   const [commentsCont, setCommentsCont] = useState<string | null>(null);
+  const [related, setRelated] = useState<VideoItem[]>([]);
+  const [relatedToken, setRelatedToken] = useState<string | null>(null);
+  const [moreRelated, setMoreRelated] = useState(false);
   const [descOpen, setDescOpen] = useState(false);
   const [saveAnchor, setSaveAnchor] = useState<DOMRect | null>(null);
 
@@ -49,6 +52,8 @@ export function WatchScreen({ videoId }: { videoId: string }) {
     setWatch(null);
     setError(null);
     setComments([]);
+    setRelated([]);
+    setRelatedToken(null);
     setDescOpen(false);
     // Hand the video to the shared player straight away (it keeps playing
     // across routes) and warm the yt-dlp ladder in parallel with the metadata.
@@ -62,6 +67,8 @@ export function WatchScreen({ videoId }: { videoId: string }) {
       .then((w) => {
         if (cancelled) return;
         setWatch(w);
+        setRelated(w.related);
+        setRelatedToken(w.relatedToken || null);
         const full: VideoItem = {
           videoId,
           title: w.title,
@@ -103,6 +110,24 @@ export function WatchScreen({ videoId }: { videoId: string }) {
     }
   };
 
+  const loadMoreRelated = async () => {
+    if (!relatedToken || moreRelated) return;
+    setMoreRelated(true);
+    try {
+      const page = await window.indio.watchMore(relatedToken);
+      const known = new Set(related.map((v) => v.videoId));
+      const fresh = page.related.filter((v) => !known.has(v.videoId));
+      if (fresh.length) setRelated((cur) => [...cur, ...fresh]);
+      const next = page.continuation && page.continuation !== relatedToken ? page.continuation : null;
+      setRelatedToken(next);
+      if (!next) toast('No more recommendations');
+    } catch (e: any) {
+      toast(String(e?.message || e));
+    } finally {
+      setMoreRelated(false);
+    }
+  };
+
   if (error) {
     return (
       <div className="state">
@@ -116,12 +141,26 @@ export function WatchScreen({ videoId }: { videoId: string }) {
   }
 
   return (
-    <div className={`watch-layout${settings?.theater ? ' theater' : ''}`}>
+    <div className={`watch-layout${settings?.theater ? ' theater' : ''} ${
+      settings?.sidebarCollapsed ? 'collapsed' : ''
+    }`}>
       <div className="watch-main">
         {/* The persistent player covers this slot; it keeps playing when the
             user leaves this page and becomes the floating mini player. */}
         <div className="player-slot" ref={playback.registerSlot} />
         <h1 className="watch-title">{watch.title}</h1>
+
+        <button className="watch-collapse-btn" onClick={() => {
+          // Toggle collapsed state in settings or local storage
+          // For now, just toggle the class
+          const html = document.documentElement;
+          html.classList.toggle('sidebar-collapsed');
+        }} title="Collapse sidebar">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M15 18l-6-6 6-6"/>
+            <path d="M9 6l6 6-6 6"/>
+          </svg>
+        </button>
 
         <div className="watch-bar">
           <div className="watch-channel" style={{ margin: 0 }}>
@@ -214,7 +253,10 @@ export function WatchScreen({ videoId }: { videoId: string }) {
                   <div className="who"><b>{c.author}</b> {c.publishedText || ''}</div>
                   <div className="text">{c.text}</div>
                   <div className="acts">
-                    <span>👍 {c.likesText && c.likesText !== '0' ? c.likesText : ''}</span>
+                    <span className="like-act">
+                      <ThumbUpIcon size={14} />
+                      {c.likesText && c.likesText !== '0' ? c.likesText : ''}
+                    </span>
                     {c.replyCountText && <span>{c.replyCountText}</span>}
                   </div>
                 </div>
@@ -226,10 +268,14 @@ export function WatchScreen({ videoId }: { videoId: string }) {
       </div>
 
       <div className="watch-side mini-hide">
-        {watch.related.length > 0 && (
+        {related.length > 0 && (
           <>
             <div className="section-head" style={{ marginTop: 0 }}><h2 style={{ fontSize: 15 }}>Up next</h2></div>
-            {watch.related.map((v) => <RelatedCard key={v.videoId} video={v} />)}
+            {related.map((v) => <RelatedCard key={v.videoId} video={v} />)}
+            <button className="btn ghost side-more" disabled={moreRelated || !relatedToken}
+              onClick={loadMoreRelated}>
+              {moreRelated ? 'Loading…' : relatedToken ? 'Show more videos' : 'No more videos'}
+            </button>
           </>
         )}
       </div>

@@ -1,14 +1,23 @@
-// Home + Trending grids: chips row, infinite continuation, retry states.
+// Home + Trending grids: chips row, auto-loading continuation, retry states.
+//
+// Home is built by the main process: when signed-out YouTube answers with an
+// empty feed, it returns a local mix computed from this device's history,
+// subscriptions, likes and searches (the port of Android's LocalFeed.kt).
+// A reload (logo / Home click) rotates that mix, so the next pull is genuinely
+// different. Scrolling to the end keeps appending: YouTube continuation pages
+// for the network feed, a fresh draw from the local pool for the local feed.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { Feed } from '../types';
+import type { Feed, VideoItem } from '../types';
 import { VideoCard } from '../components/VideoCard';
 import { GridSkeleton } from '../components/Skeletons';
 import { useApp } from '../store';
+import { useInfiniteScroll } from '../useInfiniteScroll';
 
 // Last rendered feed per mode: returning to Home/Trending paints instantly
 // from here while a fresh request revalidates in the background.
 const feedCache: Record<string, { at: number; feed: Feed; popular: boolean }> = {};
 const CACHE_TTL = 10 * 60_000;
+const LOCAL_PAGE_SIZE = 40;
 
 export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
   const { lib } = useApp();
@@ -16,6 +25,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
   const [chipIdx, setChipIdx] = useState(-1);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [exhausted, setExhausted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [force, setForce] = useState(0);
   const [popular, setPopular] = useState(false);
@@ -31,9 +41,11 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       setFeed(c && Date.now() - c.at < CACHE_TTL ? c.feed : null);
       setPopular(c ? c.popular : mode === 'trending');
       setChipIdx(-1);
+      setExhausted(false);
     }
     setLoading(true);
     setError(null);
+    setExhausted(false);
     const params = chipIdx >= 0 ? feed?.chips[chipIdx]?.params || null : null;
     // Home and Trending go out together: a signed-out Home is usually empty
     // and the popular mix is the fallback, so racing them removes a whole
@@ -72,26 +84,72 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
   const pickChip = (idx: number) => {
     setChipIdx(idx);
     setLoading(true);
+    setExhausted(false);
     const params = feed?.chips[idx]?.params || null;
     window.indio.home({ params, force: false })
-      .then(setFeed)
+      .then((f) => {
+        setFeed(f);
+        setFeedVersion((v) => v + 1);
+        feedCache[mode] = { at: Date.now(), feed: f, popular };
+      })
       .catch((e) => setError(String(e?.message || e)))
       .finally(() => setLoading(false));
   };
 
   const loadMore = useCallback(() => {
-    if (!feed?.continuation || loadingMore) return;
+    if (!feed || loadingMore || exhausted) return;
+    const isLocal = Boolean(feed.local);
+    const token = feed.continuation;
+    if (!isLocal && !token) {
+      setExhausted(true);
+      return;
+    }
     setLoadingMore(true);
-    const next = mode === 'home'
-      ? window.indio.homeCont(feed.continuation)
-      : window.indio.trendingCont(feed.continuation);
-    next.then((f) => setFeed((cur) => cur && ({
-      chips: cur.chips,
-      videos: [...cur.videos, ...f.videos],
-      continuation: f.continuation === cur.continuation ? null : f.continuation,
-    }))).catch(() => setFeed((cur) => cur && { ...cur, continuation: null }))
+    const request: Promise<Feed | VideoItem[]> = isLocal
+      ? window.indio.homeMore({ excludeIds: feed.videos.map((v) => v.videoId), limit: LOCAL_PAGE_SIZE })
+      : (mode === 'home' ? window.indio.homeCont(token!) : window.indio.trendingCont(token!));
+    request.then((result) => {
+      const known = new Set(feed.videos.map((v) => v.videoId));
+      if (isLocal) {
+        const fresh = (result as VideoItem[]).filter((v) => !known.has(v.videoId));
+        if (!fresh.length) {
+          setExhausted(true);
+          return;
+        }
+        const next = { ...feed, videos: [...feed.videos, ...fresh] };
+        setFeed(next);
+        feedCache[mode] = { at: Date.now(), feed: next, popular };
+        return;
+      }
+      const page = result as Feed;
+      const fresh = page.videos.filter((v) => !known.has(v.videoId));
+      const nextToken = page.continuation && page.continuation !== feed.continuation
+        ? page.continuation
+        : null;
+      if (!fresh.length && !nextToken) {
+        setExhausted(true);
+        return;
+      }
+      const next: Feed = {
+        chips: feed.chips,
+        videos: [...feed.videos, ...fresh],
+        continuation: nextToken,
+        local: false,
+      };
+      setFeed(next);
+      feedCache[mode] = { at: Date.now(), feed: next, popular };
+      if (!nextToken) setExhausted(true);
+    }).catch(() => setExhausted(true))
       .finally(() => setLoadingMore(false));
-  }, [feed, mode, loadingMore]);
+  }, [feed, mode, loadingMore, exhausted, popular]);
+
+  const sentinelRef = useInfiniteScroll(loadMore, [
+    feed?.videos.length || 0,
+    feed?.local || false,
+    exhausted,
+    loadingMore,
+    mode,
+  ]);
 
   if (loading && !feed) {
     return <div style={{ paddingTop: 6 }}><GridSkeleton count={12} /></div>;
@@ -124,8 +182,13 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
           <button className={`chip${chipIdx === -1 ? ' active' : ''}`} onClick={() => {
             setChipIdx(-1);
             setLoading(true);
+            setExhausted(false);
             window.indio.home({ params: null, force: false })
-              .then(setFeed)
+              .then((f) => {
+                setFeed(f);
+                setFeedVersion((v) => v + 1);
+                feedCache[mode] = { at: Date.now(), feed: f, popular };
+              })
               .catch((e) => setError(String(e?.message || e)))
               .finally(() => setLoading(false));
           }}>
@@ -143,6 +206,11 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
           Popular right now — signed-out Home is empty on YouTube, so this is the trending mix.
         </div>
       )}
+      {feed?.local && mode === 'home' && (
+        <div style={{ color: 'var(--text-dim)', padding: '2px 2px 12px' }}>
+          Recommended for you — built from your history and subscriptions. Reload Home for a fresh mix.
+        </div>
+      )}
       {!visible.length ? (
         <div className="state">
           <div>Nothing here right away. {mode === 'home' ? 'Signed-out Home can be empty — try Trending or Search.' : ''}</div>
@@ -155,16 +223,13 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
           ))}
         </div>
       )}
-      {feed?.continuation ? (
-        <div className="show-more">
-          <button className="btn ghost" onClick={loadMore} disabled={loadingMore}>
-            {loadingMore ? 'Loading…' : 'Show more videos'}
-          </button>
-        </div>
-      ) : visible.length > 0 ? (
-        <div className="show-more" style={{ color: 'var(--text-dim)' }}>You're all caught up</div>
-      ) : null}
+      {visible.length > 0 && !exhausted && (
+        <div ref={sentinelRef} className="feed-sentinel" aria-hidden="true" />
+      )}
       {loadingMore && <div style={{ marginTop: 22 }}><GridSkeleton count={4} /></div>}
+      {exhausted && visible.length > 0 && (
+        <div className="show-more" style={{ color: 'var(--text-dim)' }}>You're all caught up</div>
+      )}
     </div>
   );
 }
