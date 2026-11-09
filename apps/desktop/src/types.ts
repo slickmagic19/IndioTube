@@ -211,6 +211,8 @@ export interface Settings {
   volume: number;
   playbackRate: number;
   theater: boolean;
+  /** Watch-page side rail hidden; toggled in the DOM, not persisted by main. */
+  sidebarCollapsed?: boolean;
 }
 
 export interface SyncStats {
