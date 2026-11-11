@@ -14,6 +14,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { Readable } = require('node:stream');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 
 const CACHE_TTL_MS = 5 * 3600 * 1000; // URLs live ~6h, same as Android
 const MISS_TTL_MS = 60 * 1000;
@@ -282,7 +283,7 @@ function pickName(list) {
   return first.name || first.language_code || null;
 }
 
-function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
+function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
   const cache = new Map();     // videoId -> { at, qualities }
   const misses = new Map();    // videoId -> at (negative cache)
   const inflight = new Map();  // videoId -> Promise
@@ -291,6 +292,65 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
   let server = null;
   let port = 0;
   let hasFfmpeg = null;
+
+  // ---- persisted resolution cache -------------------------------------------
+  // Extraction is the slow part of pressing play (measured ~5s, with occasional
+  // 15-25s stalls when YouTube is slow). Resolved formats stay valid for ~5h, so
+  // they are kept on disk between launches: reopening a video - or starting the
+  // app on the same one - skips yt-dlp completely.
+  let diskLoaded = false;
+  let diskLoading = null;
+  let saveTimer = null;
+
+  async function loadDiskCache() {
+    if (!cacheFile || diskLoaded) return;
+    if (diskLoading) return diskLoading;
+    diskLoading = (async () => {
+      try {
+        const buf = await fs.promises.readFile(cacheFile);
+        const doc = JSON.parse(zlib.gunzipSync(buf).toString('utf8'));
+        const entries = doc && doc.entries && typeof doc.entries === 'object' ? doc.entries : {};
+        const now = Date.now();
+        for (const [id, entry] of Object.entries(entries)) {
+          if (!entry || !entry.qualities || !Array.isArray(entry.qualities.options)) continue;
+          const at = Number(entry.at) || 0;
+          if (now - at >= CACHE_TTL_MS) continue;
+          if (!cache.has(id)) cache.set(id, { at, qualities: entry.qualities });
+        }
+      } catch {
+        // First run, corrupt file or a version bump: start with an empty cache.
+      }
+      diskLoaded = true;
+    })();
+    return diskLoading;
+  }
+
+  function scheduleDiskSave() {
+    if (!cacheFile) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      saveDiskCache();
+    }, 800);
+    if (typeof saveTimer.unref === 'function') saveTimer.unref();
+  }
+
+  async function saveDiskCache() {
+    if (!cacheFile) return;
+    try {
+      const now = Date.now();
+      const entries = [...cache.entries()]
+        .filter(([, e]) => e && now - e.at < CACHE_TTL_MS)
+        .sort((a, b) => b[1].at - a[1].at)
+        .slice(0, 60);
+      const doc = { v: 1, entries: Object.fromEntries(entries) };
+      const tmp = `${cacheFile}.tmp`;
+      await fs.promises.writeFile(tmp, zlib.gzipSync(JSON.stringify(doc)));
+      await fs.promises.rename(tmp, cacheFile);
+    } catch {
+      // The cache is an optimisation; never let it break playback.
+    }
+  }
 
   // ---- extraction ------------------------------------------------------------
 
@@ -331,8 +391,11 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
     // tables, so plain metadata dumping is enough - no --write-subs.
     const out = await runYtdlp([
       '--no-warnings', '--no-playlist', '--dump-single-json', '--skip-download',
+      // Bounded retries: the defaults can sit on a stalled socket for tens of
+      // seconds, which the viewer experiences as a video that never starts.
+      '--socket-timeout', '8', '--retries', '1', '--extractor-retries', '1', '--fragment-retries', '1',
       `https://www.youtube.com/watch?v=${videoId}`,
-    ], { timeoutMs: 90_000 });
+    ], { timeoutMs: 45_000 });
     // Some builds print warnings before the JSON; the document starts at the
     // first "{"
     const brace = out.indexOf('{');
@@ -348,6 +411,7 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
   }
 
   async function qualities(videoId, force = false) {
+    await loadDiskCache();
     if (!force) {
       const hit = cache.get(videoId);
       if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.qualities;
@@ -367,6 +431,7 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent }) {
           throw new Error('This video has no downloadable stream without ads');
         }
         cache.set(videoId, { at: Date.now(), qualities: q });
+        scheduleDiskSave();
         misses.delete(videoId);
         return q;
       } catch (e) {

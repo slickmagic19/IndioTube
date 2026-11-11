@@ -10,11 +10,11 @@ import { usePlayback } from '../player/PlaybackHost';
 import { RelatedCard, downloadVideo, openVideo } from '../components/VideoCard';
 import { Avatar, Menu } from '../components/ui';
 import { WatchSkeleton } from '../components/Skeletons';
-import { ClockIcon, DownloadIcon, PlaylistIcon, ThumbDownIcon, ThumbUpIcon } from '../components/icons';
+import { ClockIcon, DownloadIcon, PanelRightIcon, PlaylistIcon, ThumbDownIcon, ThumbUpIcon } from '../components/icons';
 import { PlaylistPicker } from '../components/VideoCard';
 
 export function WatchScreen({ videoId }: { videoId: string }) {
-  const { lib, op, toast, settings } = useApp();
+  const { lib, op, toast, settings, saveSettings } = useApp();
   const playback = usePlayback();
   const [watch, setWatch] = useState<WatchData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -140,27 +140,27 @@ export function WatchScreen({ videoId }: { videoId: string }) {
     return <WatchSkeleton />;
   }
 
+  // The "Up next" rail is toggled from its own header (and from the title row
+  // while it is hidden); the choice is remembered across videos and restarts.
+  const railHidden = Boolean(settings?.sidebarCollapsed);
+
   return (
     <div className={`watch-layout${settings?.theater ? ' theater' : ''} ${
-      settings?.sidebarCollapsed ? 'collapsed' : ''
+      railHidden ? ' collapsed' : ''
     }`}>
       <div className="watch-main">
         {/* The persistent player covers this slot; it keeps playing when the
             user leaves this page and becomes the floating mini player. */}
         <div className="player-slot" ref={playback.registerSlot} />
-        <h1 className="watch-title">{watch.title}</h1>
-
-        <button className="watch-collapse-btn" onClick={() => {
-          // Toggle collapsed state in settings or local storage
-          // For now, just toggle the class
-          const html = document.documentElement;
-          html.classList.toggle('sidebar-collapsed');
-        }} title="Collapse sidebar">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M15 18l-6-6 6-6"/>
-            <path d="M9 6l6 6-6 6"/>
-          </svg>
-        </button>
+        <div className="watch-title-row">
+          <h1 className="watch-title">{watch.title}</h1>
+          {railHidden && (
+            <button className="rail-toggle" onClick={() => saveSettings({ sidebarCollapsed: false })}
+              title="Show related videos" aria-label="Show related videos">
+              <PanelRightIcon size={18} /> Related videos
+            </button>
+          )}
+        </div>
 
         <div className="watch-bar">
           <div className="watch-channel" style={{ margin: 0 }}>
@@ -270,7 +270,13 @@ export function WatchScreen({ videoId }: { videoId: string }) {
       <div className="watch-side mini-hide">
         {related.length > 0 && (
           <>
-            <div className="section-head" style={{ marginTop: 0 }}><h2 style={{ fontSize: 15 }}>Up next</h2></div>
+            <div className="side-head">
+              <h2>Up next</h2>
+              <button className="rail-toggle" onClick={() => saveSettings({ sidebarCollapsed: true })}
+                title="Hide related videos" aria-label="Hide related videos">
+                <PanelRightIcon size={18} /> Hide
+              </button>
+            </div>
             {related.map((v) => <RelatedCard key={v.videoId} video={v} />)}
             <button className="btn ghost side-more" disabled={moreRelated || !relatedToken}
               onClick={loadMoreRelated}>

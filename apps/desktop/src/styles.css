@@ -98,8 +98,11 @@ a { color: inherit; text-decoration: none; }
   gap: 12px;
   padding: 0 16px;
   background: var(--bg);
+  /* Sits above the docked playback layer (z-index 70) so a scrolled watch page
+     slides under the bar instead of painting over the search box. Player menus
+     (90), modals (100) and the mini player (120) still stack above it. */
   position: relative;
-  z-index: 30;
+  z-index: 80;
 }
 
 .tb-left, .tb-right { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -341,8 +344,24 @@ a { color: inherit; text-decoration: none; }
   position: absolute; bottom: 68px; right: 12px; background: var(--chip-active); color: var(--chip-active-text);
   padding: 9px 14px; border-radius: 8px; font-weight: 700;
 }
-.caption-layer { position: absolute; left: 0; right: 0; bottom: 64px; text-align: center; pointer-events: none; }
-.caption-layer span { background: rgba(0, 0, 0, .75); color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 17px; line-height: 1.45; }
+/* Captions are painted by the Player overlay so they can sit where the phone
+   app puts them: hugging the bottom edge with a small margin, lifting clear
+   of the control strip whenever the controls are on screen. */
+.caption-layer {
+  position: absolute; left: 0; right: 0; bottom: calc(7% + 4px);
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 0 6%; text-align: center; pointer-events: none;
+  transition: bottom .15s ease;
+}
+.player-frame:hover .caption-layer,
+.player-frame.paused .caption-layer { bottom: calc(7% + 60px); }
+.caption-layer span {
+  display: inline-block; max-width: 100%;
+  background: rgba(8, 8, 8, .75); color: #fff;
+  padding: 2px 7px; border-radius: 3px;
+  font-size: clamp(13px, 1.35vw, 20px); line-height: 1.4; font-weight: 400;
+  white-space: pre-line; text-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+}
 /* The video itself lives in the PiP window: make that state explicit and
    give a way back instead of leaving a dead black player behind. */
 .pip-placeholder {
@@ -487,8 +506,13 @@ select:focus, .text-input:focus { border-color: #1c62b9; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ================= 0.1.35 bug-fix overrides ================= */
-/* Player settings menu: the gear panel in Player.tsx. */
-.player-menu { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+/* Player settings menu: the gear panel in Player.tsx scrolls internally (the
+   caption language list can be 150+ rows) with the header pinned. */
+.player-menu {
+  padding: 0; display: flex; flex-direction: column;
+  overflow-y: auto; overscroll-behavior: contain;
+  border-radius: 12px; box-shadow: 0 16px 48px rgba(0, 0, 0, .55);
+}
 .player-menu .menu-head, .player-menu .head { display: none; }
 .player-menu button { width: auto; }
 
@@ -502,11 +526,9 @@ select:focus, .text-input:focus { border-color: #1c62b9; }
   /* instant positioning prevents overlap on scroll */
 }
 
-/* ---- Bug 1b: prevent sidebar/content overlap ---- */
-.sidebar-overlap-guard {
-  z-index: 1;
-  /* ensures sidebar stays above player layer on scroll */
-}
+/* ---- Bug 1b: the sidebar is a static flex column inside .main; the
+   fixed playback layer (z-index 70) only ever covers the scrolling
+   content, never the nav, so no extra guard is needed. ---- */
 
 /* ---- Bug 2: chapter-name truncation ---- */
 .controls .time {
@@ -547,13 +569,12 @@ select:focus, .text-input:focus { border-color: #1c62b9; }
 }
 .comment .acts .like-act svg { flex-shrink: 0; }
 
-/* ---- Bug 3: closed captions button fix ---- */
-.player-settings .tbtn[title="Captions (c)"] {
+/* ---- Bug 3: closed captions button stays clickable above the rest of
+   the control strip (the controls live inside .player-frame). ---- */
+.controls .tbtn[title="Captions (c)"] {
   position: relative;
   z-index: 2;
-  /* ensures CC button is above other controls */
 }
-.player-settings .tbtn svg { isolate: transform; }
 
 /* ---- Bug 5: Show more button in the rail ---- */
 .side-more {
@@ -566,144 +587,97 @@ select:focus, .text-input:focus { border-color: #1c62b9; }
 .side-more:hover { background: var(--bg-hover); }
 .side-more:disabled { opacity: .5; cursor: default; }
 
-/* ---- Bug 5b: auto-collapse sidebar when watching ---- */
-.sidebar-collapsed .watch-side {
+/* ---- Bug 5b: the watch page hides the app nav on mount (App.tsx) and
+   the rail toggle lives on .watch-layout.collapsed (see below). ---- */
+html.sidebar-collapsed .watch-side {
   display: none;
-  visibility: hidden;
-  width: 0;
 }
-.sidebar-collapsed .watch-main {
-  width: calc(100% - var(--sidebar-width, 300px));
+.watch-layout.collapsed .watch-side {
+  display: none;
 }
-.watch-collapse-btn {
-  position: absolute;
-  top: 20px;
-  left: 20px;
-  background: transparent;
-  color: var(--text);
-  border: none;
-  z-index: 100;
-  cursor: pointer;
-  font-size: 20px;
-  padding: 4px;
-  border-radius: 4px;
+.watch-layout.collapsed .watch-main {
+  max-width: none;
 }
-.watch-collapse-btn:hover {
-  background: var(--bg-hover);
+/* The related-videos toggle lives in the rail header ("Up next"), not over the
+   video; while the rail is hidden the same control sits by the title, so the
+   rail can always be brought back without covering the player. */
+.watch-title-row {
+  display: flex; align-items: flex-start; gap: 16px;
+  margin: 14px 0 10px;
 }
-
-@media (max-width: 1200px) {
-  .watch-layout:hover .watch-collapse-btn {
-    display: block;
-  }
-  .watch-layout:not(:hover) .watch-collapse-btn {
-    display: none;
-  }
-}
-
-/* ---- Bug 7: professional player settings menu ---- */
-.ps-head {
+.watch-title-row .watch-title { flex: 1; min-width: 0; margin: 0; }
+.side-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0 16px 2px;
+  gap: 12px; margin: 0 0 10px;
 }
-.ps-title {
-  font-size: 13px; font-weight: 700; color: var(--text);
+.side-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.rail-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 12px; border-radius: 15px;
+  color: var(--text-dim); font-size: 12.5px; font-weight: 600;
+  white-space: nowrap; flex: 0 0 auto;
 }
-.ps-x {
-  width: 30px; height: 30px; border-radius: 6px;
-  display: inline-flex; align-items: center; justify-content: center;
-  background: transparent; color: var(--text); border: none;
-}
-.ps-x:hover { background: var(--bg-hover); }
+.rail-toggle:hover { background: var(--bg-hover); color: var(--text); }
+.rail-toggle svg { flex-shrink: 0; }
 
-.ps-tabs {
-  display: flex; gap: 6px; padding: 10px 14px 6px;
-  background: var(--bg-elev); border-bottom: 1px solid var(--line);
-}
-.ps-tab {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 8px 12px; border-radius: 20px; font-size: 12.5px;
-  color: var(--text-dim); background: transparent; border: 1px solid transparent;
-}
-.ps-tab svg { flex-shrink: 0; }
-.ps-tab:hover { background: var(--bg-hover); color: var(--text); }
-.ps-tab.sel { background: var(--bg-hover); color: var(--text); font-weight: 600; border-color: var(--line); }
-
-.ps-body { flex: 1; min-width: 0; overflow-y: auto; }
-.ps-section { padding: 12px 14px 16px; }
-.ps-section-title {
-  font-size: 11.5px; font-weight: 700; color: var(--text-dim);
-  letter-spacing: 0.3px; text-transform: uppercase; margin: 0 0 10px;
-}
-.ps-row {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; width: 100%;
-  padding: 12px 14px; border-radius: 12px;
-  background: transparent; border: none; color: var(--text);
-  font-size: 14px;
-}
-.ps-row:hover { background: var(--bg-hover); }
-.ps-row.sel { background: var(--bg-elev); }
-.ps-row-main { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-.ps-row-label { font-weight: 600; white-space: nowrap; }
-.ps-row-sub {
-  font-size: 12px; color: var(--text-dim); font-weight: 400;
-}
-.ps-row-tag { font-size: 12.5px; color: var(--text-dim); }
-.ps-switch {
-  width: 40px; height: 21px; min-width: 40px; border-radius: 12px;
-  background: var(--bg-hover); position: relative; transition: background .15s;
-}
-.ps-switch i {
-  position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px;
-  border-radius: 50%; background: #fff; transition: left .15s;
-}
-.ps-switch.on { background: var(--accent-strong); }
-.ps-switch.on i { left: 21.5px; }
-.ps-empty {
-  color: var(--text-dim); font-size: 13px; padding: 4px 0 2px;
-  text-align: center;
-}
-
-/* ---- Bug 7b: professional appearance improvements ---- */
-.ps-head {
+/* ---- Player settings panel (YouTube-style gear menu) ---------------- */
+/* One panel: a header (title on the main list, back arrow + title in a
+   submenu), then a flat list of rows showing label, current value and a
+   chevron — or a tick on the chosen option. */
+.player-menu .ps-head {
+  position: sticky; top: 0; z-index: 3;
+  display: flex; align-items: center; gap: 2px;
+  height: 48px; padding: 0 6px;
   background: var(--bg-elev);
-  border-radius: 12px 12px 0 0;
-  margin: -14px -14px 8px;
-  padding: 10px 14px 2px;
 }
-.ps-body {
-  margin: -8px -14px 8px;
-  border-radius: 0 0 12px 12px;
-  border: 1px solid var(--line);
+.player-menu .ps-title {
+  padding-left: 8px;
+  font-size: 15px; font-weight: 500; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ps-tab {
-  padding: 8px 16px;
+.player-menu .ps-title-main { padding-left: 10px; }
+.player-menu .ps-head-gap { flex: 1; }
+.player-menu .ps-icon {
+  width: 36px; height: 36px; min-width: 36px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text); background: transparent;
 }
-.ps-tab.sel {
-  border-bottom: 2px solid var(--accent-strong);
-  margin-bottom: -2px;
+.player-menu .ps-icon:hover { background: var(--bg-hover); }
+
+.player-menu .ps-body { flex: 1; min-width: 0; }
+.player-menu .ps-list { padding: 2px 8px 10px; }
+.player-menu .ps-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; width: 100%; min-height: 40px;
+  padding: 8px 12px; border-radius: 8px;
+  color: var(--text); background: transparent; text-align: left;
+  transition: background .12s ease;
 }
-.ps-row {
-  border-radius: 8px;
-  margin: 4px;
+.player-menu .ps-row + .ps-row { margin-top: 2px; }
+.player-menu .ps-row:hover { background: var(--bg-hover); }
+.player-menu .ps-row-label {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  font-size: 13.5px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ps-row.sel {
-  background: var(--bg-hover);
+.player-menu .ps-row-end {
+  display: inline-flex; align-items: center; gap: 8px;
+  flex: 0 0 auto; color: var(--text-dim);
 }
-.ps-empty {
-  padding: 16px;
-  text-align: center;
-  color: var(--text-dim);
+.player-menu .ps-row-value { font-size: 12.5px; color: var(--text-dim); }
+.player-menu .ps-row-tag { font-size: 11.5px; font-weight: 400; color: var(--text-dim); }
+.player-menu .ps-row > svg { flex: 0 0 auto; color: var(--text); }
+.player-menu .ps-divider { height: 1px; margin: 6px 12px; background: var(--line); }
+.player-menu .ps-note {
+  padding: 6px 12px 2px;
+  font-size: 12px; line-height: 1.45; color: var(--text-dim);
 }
 
 /* ---- Sidebar collapse on the watch page (WatchScreen.tsx) ---- */
-/* The button toggles the class on <html>; the layout classes live on
-   .watch-layout, so drive both from the document-level flag. */
+/* Kept for the document-level toggle; the rail itself is driven by
+   .watch-layout.collapsed above. */
 html.sidebar-collapsed .watch-side { display: none; }
 html.sidebar-collapsed .watch-main { max-width: none; }
-.watch-layout.collapsed .watch-side { display: none; }
-.watch-layout.collapsed .watch-main { max-width: none; }
 
 /* ---- Mini player chrome buttons (PlaybackHost.tsx) ---- */
 .mini-chrome button.mini-open, .mini-chrome button.mini-close { padding: 6px; }

@@ -13,8 +13,9 @@ import {
   type SbSegment,
 } from './sponsorLogic';
 import {
-  CaptionsIcon, CheckIcon, CloseIcon, GearSmallIcon, HdIcon, MiniIcon, MuteIcon, NextIcon,
-  PauseIcon, PipIcon, PlayIcon, PrevIcon, SpeedIcon, TheaterIcon, VolumeIcon,
+  BackIcon, CaptionsIcon, CheckIcon, ChevronRightIcon, CloseIcon, GearSmallIcon,
+  MiniIcon, MuteIcon, NextIcon,
+  PauseIcon, PipIcon, PlayIcon, PrevIcon, TheaterIcon, VolumeIcon,
   FullscreenIcon, ExitFullscreenIcon,
 } from '../components/icons';
 import { Menu, Spinner } from '../components/ui';
@@ -60,9 +61,13 @@ export function Player(props: PlayerProps) {
   const [pipActive, setPipActive] = useState(false);
   const wasPlayingBeforePip = useRef(true);
   const [gearAnchor, setGearAnchor] = useState<DOMRect | null>(null);
-  const [gearTab, setGearTab] = useState<'quality' | 'speed' | 'subs'>('quality');
+  const [gearView, setGearView] = useState<'main' | 'quality' | 'speed' | 'captions'>('main');
   const [captionsOn, setCaptionsOn] = useState(Boolean(settings?.captionsEnabled));
   const [captionUrl, setCaptionUrl] = useState<string | null>(null);
+  // Cue text for the overlay below. Rendering the active cues ourselves is what
+  // lets captions sit where the phone app puts them; the native cue renderer
+  // always parks them at the very bottom of the video.
+  const [cueLines, setCueLines] = useState<string[]>([]);
   const [segments, setSegments] = useState<SbSegment[]>([]);
   const [skipHint, setSkipHint] = useState<SbSegment | null>(null);
   // Segments auto-skipped (or explicitly undone) stay that way for the rest of
@@ -167,12 +172,19 @@ export function Player(props: PlayerProps) {
   useEffect(() => {
     let cancelled = false;
     resumeRef.current = 0;
-    window.indio.library.op<number>('enrichVideo', video).catch(() => undefined);
     window.indio.library.op<number>('noteOpen', video).catch(() => undefined);
     window.indio.library.op<number>('resumePosition', video.videoId)
       .then((pos) => { if (!cancelled) resumeRef.current = Number(pos) || 0; });
     return () => { cancelled = true; };
   }, [video.videoId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The watch page plays a "Loading…" stub first; once the real title arrives,
+  // enrich the stored entry so history never keeps the placeholder.
+  const hasRealTitle = Boolean(video.title) && !/^loading/i.test(String(video.title).trim());
+  useEffect(() => {
+    if (!hasRealTitle) return;
+    window.indio.library.op<number>('enrichVideo', video).catch(() => undefined);
+  }, [video.videoId, hasRealTitle]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveProgress = useCallback(() => {
     const v = videoRef.current;
@@ -453,10 +465,7 @@ export function Player(props: PlayerProps) {
         case '.': setRate(Math.min(2, SPEEDS[SPEEDS.indexOf(rate) + 1] ?? 2)); break;
         case 'n': if (queue.length > queueIndex + 1) onNext(); break;
         case 'p': if (queueIndex > 0) onPrev(); break;
-        case 'c': setCaptionsOn((x) => {
-          saveSettings({ captionsEnabled: !x });
-          return !x;
-        }); break;
+        case 'c': captionsToggleRef.current(); break;
         default: break;
       }
     };
@@ -510,23 +519,91 @@ export function Player(props: PlayerProps) {
     saveSettings({ captionsEnabled: true });
   }, [captionsOn, captionUrl, qualities, settings?.captionLang, saveSettings, video.videoId, captionFailure, toast]);
 
-  // A <track> is inert until its TextTrack mode is "showing". The element only
-  // mounts once the VTT URL is known, and swapping sources re-creates the track,
-  // so re-assert the mode whenever either changes. Hidden (not "disabled") keeps
-  // the cues parsed so toggling back on is instant.
+  // The keyboard effect is installed before this callback exists; the ref
+  // lets the 'c' shortcut call the latest toggle without a forward reference.
+  const captionsToggleRef = useRef<() => void>(() => undefined);
+  captionsToggleRef.current = toggleCaptions;
+
+  // ---- player settings panel ------------------------------------------------
+  // One list, like YouTube's: the main menu shows the current value of each
+  // setting and a submenu opens with the options (and a tick on the chosen one).
+  const closeGear = useCallback(() => {
+    setGearAnchor(null);
+    setGearView('main');
+  }, []);
+  const gearTitle = gearView === 'main' ? 'Settings'
+    : gearView === 'quality' ? 'Quality'
+      : gearView === 'speed' ? 'Playback speed' : 'Subtitles/CC';
+  const qualityLabel = height === null
+    ? (qualities?.autoHeight ? `Auto (${qualities.autoHeight}p)` : 'Auto')
+    : `${height}p`;
+  const captionLabel = !captionsOn ? 'Off'
+    : (qualities?.subtitles.find((s) => s.languageTag === settings?.captionLang)?.label || 'On');
+
+  // Captions are painted by the overlay below, never by the native cue
+  // renderer: every track stays "hidden", which still parses the cues (so
+  // seeking and toggling stay instant) while leaving placement to us. YouTube
+  // hugs the bottom edge and lifts the line above the controls when they show;
+  // that is exactly what .caption-layer does.
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    let tracks: TextTrack[] = [];
+
+    const read = () => {
+      if (!captionsOn) {
+        setCueLines((prev) => (prev.length ? [] : prev));
+        return;
+      }
+      const lines: string[] = [];
+      for (const track of tracks) {
+        const cues = track.activeCues;
+        if (!cues) continue;
+        for (let i = 0; i < cues.length; i += 1) {
+          const text = String((cues[i] as VTTCue).text || '')
+            .replace(/<[^>]*>/g, '')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&nbsp;/g, ' ')
+            .trim();
+          if (text) lines.push(text);
+        }
+      }
+      setCueLines((prev) => (
+        prev.length === lines.length && prev.every((line, i) => line === lines[i]) ? prev : lines
+      ));
+    };
+
     const sync = () => {
+      for (const track of tracks) track.removeEventListener('cuechange', read);
+      tracks = [];
       for (let i = 0; i < v.textTracks.length; i += 1) {
         const track = v.textTracks[i];
         if (track.kind !== 'subtitles' && track.kind !== 'captions') continue;
-        track.mode = captionsOn ? 'showing' : 'hidden';
+        track.mode = 'hidden';
+        track.addEventListener('cuechange', read);
+        tracks.push(track);
       }
+      read();
     };
+
     sync();
     v.textTracks.addEventListener('addtrack', sync);
-    return () => v.textTracks.removeEventListener('addtrack', sync);
+    // Seeking into a cue, or a track finishing parsing after the last cuechange,
+    // would otherwise leave a stale line on screen.
+    v.addEventListener('timeupdate', read);
+    v.addEventListener('seeking', read);
+    // Belt and braces: some track implementations miss a cuechange right after a
+    // quality swap, which would leave the overlay empty.
+    const ticker = captionsOn ? window.setInterval(read, 250) : 0;
+    return () => {
+      v.textTracks.removeEventListener('addtrack', sync);
+      v.removeEventListener('timeupdate', read);
+      v.removeEventListener('seeking', read);
+      for (const track of tracks) track.removeEventListener('cuechange', read);
+      if (ticker) window.clearInterval(ticker);
+    };
   }, [captionsOn, captionUrl, srcs]);
 
   const sponsorNear = settings?.sponsorBlock ? sponsorSegmentNear(segments, now) : null;
@@ -567,6 +644,10 @@ export function Player(props: PlayerProps) {
           if (srcs) recoverStream();
         }}
         crossOrigin="anonymous"
+        // Show the thumbnail while the first bytes arrive instead of a black
+        // box, and let Chromium fill the buffer as soon as a source is set.
+        poster={video.thumbnail}
+        preload="auto"
         playsInline
       >
         {captionUrl && captionsOn && (
@@ -575,7 +656,6 @@ export function Player(props: PlayerProps) {
             src={captionUrl}
             srcLang={settings?.captionLang || 'en'}
             label="Captions"
-            default
             onError={captionFailure}
           />
         )}
@@ -601,6 +681,11 @@ export function Player(props: PlayerProps) {
         }}
       />
 
+      {captionsOn && cueLines.length > 0 && (
+        <div className="caption-layer" aria-live="polite" aria-atomic="true">
+          {cueLines.map((line, i) => <span key={i}>{line}</span>)}
+        </div>
+      )}
       {loading && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Spinner />
@@ -698,117 +783,152 @@ export function Player(props: PlayerProps) {
               Skip {sponsorLabel(sponsorNear.category)}
             </button>
           )}
-          <button className={`tbtn${captionsOn ? ' on' : ''}`} onClick={toggleCaptions} title="Captions (c)">
+          <button
+            className={`tbtn${captionsOn ? ' on' : ''}`}
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setGearView('captions');
+              setGearAnchor(gearAnchor && gearView === 'captions' ? null : rect);
+            }}
+            title="Captions (c)"
+            aria-label="Captions"
+            aria-haspopup="menu"
+            aria-expanded={Boolean(gearAnchor) && gearView === 'captions'}
+          >
             <CaptionsIcon size={18} />
           </button>
           <button
-            className={`tbtn${gearAnchor ? ' on' : ''}`}
-            onClick={(e) => setGearAnchor(e.currentTarget.getBoundingClientRect())}
+            className={`tbtn${gearAnchor && gearView === 'main' ? ' on' : ''}`}
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setGearView('main');
+              setGearAnchor(gearAnchor && gearView === 'main' ? null : rect);
+            }}
             title="Settings"
             aria-label="Player settings"
             aria-haspopup="menu"
-            aria-expanded={Boolean(gearAnchor)}
+            aria-expanded={Boolean(gearAnchor) && gearView === 'main'}
           >
             <GearSmallIcon size={18} />
           </button>
           {gearAnchor && (
-            <Menu anchor={gearAnchor} onClose={() => setGearAnchor(null)} width={320}
-              placement="above" label="Player settings" className="player-menu">
+            <Menu anchor={gearAnchor} onClose={closeGear} width={320}
+              placement="above" label={gearTitle} className="player-menu">
               <div className="ps-head">
-                <span className="ps-title">Settings</span>
-                <button type="button" className="ps-x" onClick={() => setGearAnchor(null)}
-                  title="Close" aria-label="Close settings">
-                  <CloseIcon size={16} />
-                </button>
-              </div>
-              <div role="tablist" aria-label="Settings sections" className="ps-tabs">
-                {([
-                  ['quality', 'Quality', HdIcon],
-                  ['speed', 'Speed', SpeedIcon],
-                  ['subs', 'Captions', CaptionsIcon],
-                ] as const).map(([id, label, Icon]) => (
-                  <button key={id} type="button" role="tab" aria-selected={gearTab === id}
-                    className={`ps-tab${gearTab === id ? ' sel' : ''}`} onClick={() => setGearTab(id)}>
-                    <Icon size={18} />
-                    <span>{label}</span>
+                {gearView === 'main' ? (
+                  <span className="ps-title ps-title-main">Settings</span>
+                ) : (
+                  <button type="button" className="ps-icon ps-back" onClick={() => setGearView('main')}
+                    title="Back" aria-label="Back to settings">
+                    <BackIcon size={20} />
                   </button>
-                ))}
+                )}
+                {gearView !== 'main' && <span className="ps-title">{gearTitle}</span>}
+                <span className="ps-head-gap" />
+                {gearView === 'main' && (
+                  <button type="button" className="ps-icon" onClick={closeGear}
+                    title="Close" aria-label="Close settings">
+                    <CloseIcon size={18} />
+                  </button>
+                )}
               </div>
-              <div className="ps-body" role="tabpanel">
-                {gearTab === 'quality' && (
-                  <div className="ps-section">
-                    <div className="ps-section-title">Resolution</div>
-                    <button type="button" aria-pressed={height === null}
-                      className={`ps-row${height === null ? ' sel' : ''}`} onClick={() => switchQuality(null)}>
-                      <span className="ps-row-main">
-                        <span className="ps-row-label">Auto</span>
-                        <span className="ps-row-sub">
-                          {qualities?.autoHeight ? `Up to ${qualities.autoHeight}p` : 'Best for your connection'}
-                        </span>
+
+              <div className="ps-body">
+                {gearView === 'main' && (
+                  <div className="ps-list">
+                    <button type="button" className="ps-row" onClick={() => setGearView('quality')}>
+                      <span className="ps-row-label">Quality</span>
+                      <span className="ps-row-end">
+                        <span className="ps-row-value">{qualityLabel}</span>
+                        <ChevronRightIcon size={18} />
+                      </span>
+                    </button>
+                    <button type="button" className="ps-row" onClick={() => setGearView('speed')}>
+                      <span className="ps-row-label">Playback speed</span>
+                      <span className="ps-row-end">
+                        <span className="ps-row-value">{rate === 1 ? 'Normal' : `${rate}×`}</span>
+                        <ChevronRightIcon size={18} />
+                      </span>
+                    </button>
+                    <button type="button" className="ps-row" onClick={() => setGearView('captions')}>
+                      <span className="ps-row-label">Subtitles/CC</span>
+                      <span className="ps-row-end">
+                        <span className="ps-row-value">{captionLabel}</span>
+                        <ChevronRightIcon size={18} />
+                      </span>
+                    </button>
+                  </div>
+                )}
+
+                {gearView === 'quality' && (
+                  <div className="ps-list">
+                    <button type="button" className="ps-row" aria-pressed={height === null}
+                      onClick={() => { switchQuality(null); closeGear(); }}>
+                      <span className="ps-row-label">
+                        Auto{qualities?.autoHeight ? ` (${qualities.autoHeight}p)` : ''}
                       </span>
                       {height === null && <CheckIcon size={18} />}
                     </button>
                     {(qualities?.options || []).map((o) => (
-                      <button type="button" key={o.height} aria-pressed={height === o.height}
-                        className={`ps-row${height === o.height ? ' sel' : ''}`}
-                        onClick={() => switchQuality(o.height)}>
-                        <span className="ps-row-main">
-                          <span className="ps-row-label">{o.label}</span>
-                        </span>
+                      <button type="button" key={o.height} className="ps-row" aria-pressed={height === o.height}
+                        onClick={() => { switchQuality(o.height); closeGear(); }}>
+                        <span className="ps-row-label">{o.label}</span>
                         {height === o.height && <CheckIcon size={18} />}
                       </button>
                     ))}
                     {!qualities?.options.length && (
-                      <div className="ps-empty">Resolution options load with the video.</div>
+                      <div className="ps-note">Resolution options load with the video.</div>
                     )}
                   </div>
                 )}
-                {gearTab === 'speed' && (
-                  <div className="ps-section">
-                    <div className="ps-section-title">Playback speed</div>
-                    {SPEEDS.map((s) => (
-                      <button type="button" key={s} aria-pressed={rate === s}
-                        className={`ps-row${rate === s ? ' sel' : ''}`}
-                        onClick={() => { setRate(s); saveSettings({ playbackRate: s }); }}>
-                        <span className="ps-row-main">
-                          <span className="ps-row-label">{s === 1 ? 'Normal' : `${s}×`}</span>
-                        </span>
-                        {rate === s && <CheckIcon size={18} />}
+
+                {gearView === 'speed' && (
+                  <div className="ps-list">
+                    {SPEEDS.map((sp) => (
+                      <button type="button" key={sp} className="ps-row" aria-pressed={rate === sp}
+                        onClick={() => { setRate(sp); saveSettings({ playbackRate: sp }); closeGear(); }}>
+                        <span className="ps-row-label">{sp === 1 ? 'Normal' : `${sp}×`}</span>
+                        {rate === sp && <CheckIcon size={18} />}
                       </button>
                     ))}
                   </div>
                 )}
-                {gearTab === 'subs' && (
-                  <div className="ps-section">
-                    <div className="ps-section-title">Captions</div>
-                    <button type="button" aria-pressed={captionsOn}
-                      className={`ps-row${captionsOn ? ' sel' : ''}`} onClick={toggleCaptions}>
-                      <span className="ps-row-main">
-                        <span className="ps-row-label">Show captions</span>
-                        <span className="ps-row-sub">{captionsOn ? 'On' : 'Off'}</span>
-                      </span>
-                      <span className={`ps-switch${captionsOn ? ' on' : ''}`} aria-hidden="true"><i /></span>
+
+                {gearView === 'captions' && (
+                  <div className="ps-list">
+                    <button type="button" className="ps-row" aria-pressed={!captionsOn}
+                      onClick={() => { if (captionsOn) toggleCaptions(); closeGear(); }}>
+                      <span className="ps-row-label">Off</span>
+                      {!captionsOn && <CheckIcon size={18} />}
                     </button>
-                    {(qualities?.subtitles || []).map((s) => (
-                      <button type="button" key={s.languageTag}
-                        className={`ps-row${settings?.captionLang === s.languageTag && captionsOn ? ' sel' : ''}`}
-                        onClick={async () => {
-                          const u = await window.indio.streams.subtitleUrl(video.videoId, s.languageTag)
-                            .catch(() => null);
-                          if (!u) { captionFailure(); return; }
-                          setCaptionUrl(u);
-                          setCaptionsOn(true);
-                          saveSettings({ captionsEnabled: true, captionLang: s.languageTag });
-                        }}>
-                        <span className="ps-row-main">
-                          <span className="ps-row-label">{s.label}</span>
-                          {s.autoGenerated && <span className="ps-row-sub">Auto-generated</span>}
-                        </span>
-                        {settings?.captionLang === s.languageTag && captionsOn && <CheckIcon size={18} />}
-                      </button>
-                    ))}
-                    {!qualities?.subtitles.length && (
-                      <div className="ps-empty">No captions are available for this video.</div>
+                    {(qualities?.subtitles?.length || 0) > 0 && <div className="ps-divider" />}
+                    {(qualities?.subtitles || []).map((sub) => {
+                      const active = captionsOn && settings?.captionLang === sub.languageTag;
+                      return (
+                        <button type="button" key={sub.languageTag} className="ps-row" aria-pressed={active}
+                          onClick={async () => {
+                            const u = await window.indio.streams.subtitleUrl(video.videoId, sub.languageTag)
+                              .catch(() => null);
+                            if (!u) { captionFailure(); return; }
+                            setCaptionUrl(u);
+                            setCaptionsOn(true);
+                            saveSettings({ captionsEnabled: true, captionLang: sub.languageTag });
+                            closeGear();
+                          }}>
+                          <span className="ps-row-label">
+                            {sub.label}
+                            {sub.autoGenerated && <span className="ps-row-tag">Auto-generated</span>}
+                          </span>
+                          {active && <CheckIcon size={18} />}
+                        </button>
+                      );
+                    })}
+                    {!qualities && <div className="ps-note">Checking available captions…</div>}
+                    {qualities && !qualities.subtitles.length && (
+                      <div className="ps-note">No captions available for this video.</div>
+                    )}
+                    {(qualities?.subtitles || []).some((sub) => sub.autoGenerated) && (
+                      <div className="ps-note">Auto-generated captions may be inaccurate.</div>
                     )}
                   </div>
                 )}

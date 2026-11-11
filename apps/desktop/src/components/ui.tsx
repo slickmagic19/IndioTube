@@ -87,9 +87,11 @@ export function Menu({
   if (!anchor || !pos) return null;
   // 'above' menus are capped to the space between the anchor and the top
   // edge so a long list scrolls inside the panel instead of leaving the
-  // screen, exactly like YouTube's player menu.
+  // screen, exactly like YouTube's player menu. The cap also guarantees
+  // the panel can never reach past the top edge (158 caption languages
+  // used to push the header off-screen and clip the close button).
   const maxHeight = placement === 'above'
-    ? Math.max(180, anchor.top - 12)
+    ? Math.min(Math.max(180, anchor.top - 12), Math.max(180, window.innerHeight - anchor.top - 12))
     : Math.max(180, window.innerHeight - anchor.bottom - 12);
   // Portalled to <body>: a menu inside an animated/transformed ancestor (the
   // feed grids animate in) would otherwise resolve position:fixed against

@@ -1,6 +1,6 @@
 // History / Watch later / Liked lists and the Continue-watching row. Rows
 // support remove, "mark watched", and resume.
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryEntry, VideoItem } from '../types';
 import { formatDuration, watchedFraction } from '../types';
 import { navigate } from '../router';
@@ -8,8 +8,12 @@ import { useApp } from '../store';
 import { openVideo } from '../components/VideoCard';
 import { Menu, Thumb } from '../components/ui';
 import { ClockIcon, MoreIcon, PlayIcon, PlusIcon, TrashIcon } from '../components/icons';
+import { useInfiniteScroll } from '../useInfiniteScroll';
 
 const COMPLETED = 0.92;
+// Rows are built a page at a time: history can hold thousands of entries and
+// mounting every row up front made the page slow to open and to scroll.
+const PAGE_SIZE = 40;
 
 function continueWatching(history: HistoryEntry[]): HistoryEntry[] {
   const seen = new Set<string>();
@@ -40,6 +44,86 @@ export function LibraryScreen({ kind }: { kind: 'history' | 'watchlater' | 'like
   const rows: VideoItem[] = kind === 'history'
     ? history.map((h) => h.video)
     : kind === 'watchlater' ? (lib?.library.watchLater || []) : (lib?.library.liked || []);
+
+  // Only the rows on screen are built; history can run to thousands of entries.
+  const [limit, setLimit] = useState(PAGE_SIZE);
+  useEffect(() => { setLimit(PAGE_SIZE); }, [kind]);
+  const visible = rows.slice(0, limit);
+  const hasMore = rows.length > visible.length;
+  const loadMore = useCallback(() => {
+    setLimit((n) => Math.min(n + PAGE_SIZE, rows.length));
+  }, [rows.length]);
+  const sentinelRef = useInfiniteScroll(loadMore, [kind, rows.length, limit]);
+
+  // Entries written before the metadata fix still hold the "Loading…" stub.
+  // Heal them as they come into view: the watch metadata first, then yt-dlp's
+  // own title as a fallback. Failures are retried (a few rounds, capped per
+  // video) because a transient YouTube hiccup must not leave a row stuck.
+  const attempts = useRef<Map<string, number>>(new Map());
+  const [repairRound, setRepairRound] = useState(0);
+  useEffect(() => {
+    if (kind !== 'history') return undefined;
+    const isStub = (t?: string) => !t || /^loading/i.test(String(t).trim());
+    const pending = visible
+      .filter((v) => isStub(v.title))
+      .filter((v) => (attempts.current.get(v.videoId) || 0) < 3)
+      .slice(0, 8);
+    if (!pending.length) return undefined;
+    let cancelled = false;
+    (async () => {
+      let failed = 0;
+      for (let i = 0; i < pending.length; i += 4) {
+        const batch = pending.slice(i, i + 4);
+        await Promise.all(batch.map(async (v) => {
+          const id = v.videoId;
+          if (!id) return;
+          attempts.current.set(id, (attempts.current.get(id) || 0) + 1);
+          let patch: Record<string, unknown> | null = null;
+          try {
+            const w = await window.indio.watch(id);
+            if (w && w.title) {
+              patch = {
+                videoId: id,
+                title: w.title,
+                channelId: w.channelId,
+                channelName: w.channelName,
+                channelAvatar: w.channelAvatar,
+                viewsText: w.viewsText,
+                publishedText: w.publishedText,
+                isLive: w.isLive,
+                membersOnly: w.membersOnly,
+                durationSec: v.durationSec,
+              };
+            }
+          } catch { /* fall through to the extractor */ }
+          if (!patch) {
+            try {
+              const q = await window.indio.streams.qualities(id);
+              if (q && q.title) {
+                patch = {
+                  videoId: id,
+                  title: q.title,
+                  durationSec: q.durationSec || v.durationSec,
+                  isLive: q.isLive,
+                  membersOnly: q.membersOnly,
+                };
+              }
+            } catch { /* offline or unavailable */ }
+          }
+          if (!patch || cancelled) { failed += 1; return; }
+          await op('enrichVideo', patch).catch(() => undefined);
+        }));
+        if (cancelled) return;
+      }
+      // Only a handful are handled per pass: run another round until nothing is
+      // left (or the cap is hit), backing off when lookups are failing. Without
+      // this, a history with more than one batch of stubs would stay stuck.
+      if (!cancelled && repairRound < 20) {
+        window.setTimeout(() => setRepairRound((n) => n + 1), failed ? 1500 : 250);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [kind, visible.length, limit, repairRound]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div>
@@ -87,7 +171,7 @@ export function LibraryScreen({ kind }: { kind: 'history' | 'watchlater' | 'like
           <button onClick={() => navigate('/home')}>Browse Home</button>
         </div>
       ) : (
-        rows.map((v, i) => {
+        visible.map((v, i) => {
           const entry = kind === 'history' ? history.find((h) => h.video.videoId === v.videoId) : undefined;
           const frac = watchedFraction(entry);
           return (
@@ -117,6 +201,15 @@ export function LibraryScreen({ kind }: { kind: 'history' | 'watchlater' | 'like
             </div>
           );
         })
+      )}
+
+      {hasMore && (
+        <>
+          <button className="btn ghost side-more" style={{ marginTop: 12 }} onClick={loadMore}>
+            Show more ({rows.length - visible.length} remaining)
+          </button>
+          <div ref={sentinelRef} className="feed-sentinel" aria-hidden="true" />
+        </>
       )}
 
       {anchor && (

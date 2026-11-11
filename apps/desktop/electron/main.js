@@ -679,6 +679,7 @@ app.whenReady().then(async () => {
   streams = createStreams({
     ytdlpPath: ytdlpPath || 'yt-dlp.exe',
     downloadDir: settings.downloadDir,
+    cacheFile: path.join(app.getPath('userData'), 'streams-cache.json'),
     onDownloadEvent: (evt) => broadcast('download:event', evt),
   });
   await streams.startProxy();

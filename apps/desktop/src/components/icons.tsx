@@ -112,9 +112,15 @@ export const TheaterIcon = svg(<>
 export const MiniIcon = svg(<>
   <rect x="3" y="7" width="12" height="10" rx="2" /><rect x="16.5" y="4" width="5.5" height="5" rx="1.2" fill="currentColor" stroke="none" />
 </>);
+// Watch-page rail toggle: a frame whose right column folds away.
+export const PanelRightIcon = svg(<>
+  <rect x="3" y="4.5" width="18" height="15" rx="2" /><path d="M15 4.5v15" />
+</>);
 export const PlusIcon = svg(<path d="M12 5v14M5 12h14" />);
 export const CloseIcon = svg(<path d="M6 6l12 12M18 6 6 18" />);
 export const BackIcon = svg(<path d="M19 12H5m6-7-7 7 7 7" />);
+// Trailing chevron on a row that opens a submenu (YouTube's settings list).
+export const ChevronRightIcon = svg(<path d="m9 5 7 7-7 7" />);
 export const MoreIcon = svg(<>
   <circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none" />
   <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />

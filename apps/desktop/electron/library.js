@@ -93,6 +93,21 @@ function createStore(dataDir) {
   // byId() over history silently found nothing and broke resume/watched).
   const historyEntry = (videoId) => data.library.history.find((e) => e.video.videoId === videoId);
 
+  // The watch page opens with a "Loading…" stub before the real snapshot lands,
+  // so history entries merge field-by-field and a placeholder never overwrites a
+  // title we already know.
+  const isPlaceholderTitle = (t) => !t || /^loading/i.test(String(t).trim());
+  const mergeVideo = (old, next) => {
+    if (!old) return next;
+    const merged = { ...old, ...next };
+    if (isPlaceholderTitle(next.title) && !isPlaceholderTitle(old.title)) merged.title = old.title;
+    for (const key of ['channelId', 'channelName', 'channelAvatar', 'viewsText', 'publishedText']) {
+      if (!merged[key] && old[key]) merged[key] = old[key];
+    }
+    if (!(merged.durationSec > 0) && old.durationSec > 0) merged.durationSec = old.durationSec;
+    return merged;
+  };
+
   const store = {
     getState,
     // Change listeners. NB: kept separate from subscribe(channel) below — both
@@ -115,7 +130,7 @@ function createStore(dataDir) {
       if (data.library.historyPaused) return;
       const existing = historyEntry(video.videoId);
       const entry = {
-        video,
+        video: mergeVideo(existing ? existing.video : null, video),
         ts: Date.now(),
         positionMs: existing ? existing.positionMs : 0,
         durationMs: existing ? existing.durationMs : 0,
@@ -263,7 +278,7 @@ function createStore(dataDir) {
       const merge = (old) => {
         const m = {
           ...old,
-          title: old.title || video.title,
+          title: isPlaceholderTitle(old.title) ? (video.title || old.title) : old.title,
           channelId: old.channelId || video.channelId,
           channelName: old.channelName || video.channelName,
           channelAvatar: old.channelAvatar || video.channelAvatar,
