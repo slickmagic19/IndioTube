@@ -61,7 +61,7 @@ class PlaybackService : MediaSessionService() {
                         20_000, // min buffer
                         50_000, // max buffer
                         1_000,  // buffer needed to start/resume playback
-                        2_000,  // buffer needed to resume after a rebuffer
+                        800,    // buffer needed to resume after a rebuffer
                     )
                     .build(),
             )

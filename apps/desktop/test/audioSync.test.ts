@@ -1,6 +1,6 @@
-// The dual-track audio must never stutter or blurt the wrong position while
-// scrubbing through a still-loading video; these pin the decisions the
-// 250ms tick makes.
+// The dual-track audio must never stutter, go silent, or blurt the wrong
+// position while scrubbing through a still-loading video; these pin the
+// decisions the 120ms tick makes.
 import { describe, expect, it } from 'vitest';
 import { audioSyncAction } from '../src/player/syncLogic';
 
@@ -9,11 +9,11 @@ const base = {
   audioSeeking: false,
   videoReadyState: 4,
   videoPaused: false,
+  videoSeeking: false,
   audioPaused: false,
   audioTime: 10,
   videoTime: 10,
   muted: false,
-  lastSeekAt: 0,
   now: 10_000,
 };
 
@@ -31,34 +31,33 @@ describe('audioSyncAction', () => {
     expect(audioSyncAction({ ...base, audioSeeking: true })).toEqual({ muted: true });
   });
 
-  it('does not fight the user right after a seek (settle window)', () => {
-    const action = audioSyncAction({
-      ...base,
-      audioTime: 0,
-      videoTime: 120,
-      lastSeekAt: 10_000 - 300,
-      now: 10_000,
-    });
-    expect(action).toEqual({ muted: true });
+  it('mirrors play/pause even while the audio is loading', () => {
+    expect(audioSyncAction({ ...base, audioReadyState: 1, audioPaused: true }))
+      .toEqual({ muted: true, play: true });
+    expect(audioSyncAction({ ...base, audioSeeking: true, videoPaused: true }))
+      .toEqual({ muted: true, pause: true });
   });
 
-  it('re-seeks the audio once the settle window expires', () => {
-    const action = audioSyncAction({
-      ...base,
-      audioTime: 0,
-      videoTime: 120,
-      lastSeekAt: 10_000 - 900,
-      now: 10_000,
-    });
-    expect(action.seekTo).toBe(120);
-    expect(action.muted).toBe(true);
+  it('never chases the clock while the video itself is still seeking', () => {
+    const action = audioSyncAction({ ...base, videoSeeking: true, audioTime: 0, videoTime: 120 });
+    expect(action).toEqual({ muted: false });
+    expect(action.seekTo).toBeUndefined();
   });
 
-  it('mutes on large drift, keeps playing small drift', () => {
-    expect(audioSyncAction({ ...base, audioTime: 10.2, videoTime: 10 }).muted).toBe(false);
+  it('keeps the play mirror while the video is seeking', () => {
+    expect(audioSyncAction({ ...base, videoSeeking: true, audioPaused: true }))
+      .toEqual({ muted: false, play: true });
+  });
+
+  it('re-seeks large drift without muting the sound', () => {
     const big = audioSyncAction({ ...base, audioTime: 9, videoTime: 10 });
     expect(big.seekTo).toBe(10);
-    expect(big.muted).toBe(true);
+    // Muting here would swallow the words until the next tick.
+    expect(big.muted).toBe(false);
+  });
+
+  it('keeps playing small drift', () => {
+    expect(audioSyncAction({ ...base, audioTime: 10.2, videoTime: 10 }).muted).toBe(false);
   });
 
   it('leaves frame-level drift alone', () => {
@@ -103,7 +102,7 @@ describe('audioSyncAction', () => {
 
   it('holds (pauses) the audio while the video is rebuffering instead of re-seeking it', () => {
     // Audio has run ahead in its own buffer; without this rule the tick would
-    // yank it back every 250ms - the audible stutter while the video stalls.
+    // yank it back every tick - the audible stutter while the video stalls.
     const action = audioSyncAction({
       ...base,
       videoReadyState: 2,

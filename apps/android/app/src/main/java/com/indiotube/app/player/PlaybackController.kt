@@ -166,6 +166,9 @@ class PlaybackController(
     // If a caption file fails to load it must not take the video down with
     // it: drop captions and retry the stream once before touching quality.
     private var captionRetryAttempted = false
+    // Transient CDN failures are retried on the same item (with backoff)
+    // before anything is shown to the viewer.
+    private var streamRetryAttempts = 0
 
     // What is actually attached to the playing item. Media items that cross
     // the MediaSession boundary arrive without their local configuration
@@ -253,6 +256,8 @@ class PlaybackController(
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 _buffering.value = playbackState == Player.STATE_BUFFERING
+                // Playback is healthy again: start the retry budget over.
+                if (playbackState == Player.STATE_READY) streamRetryAttempts = 0
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -342,6 +347,22 @@ class PlaybackController(
                         "That quality wouldn't play — back to Auto"
                     }
                     scope.launch { applyQuality(c, idx, video, qualities, lower?.height) }
+                    return
+                }
+
+                // Everything above failed to rescue the item: retry it a few
+                // times with backoff before surfacing an error. Most failures
+                // here are a single CDN request timing out or a 5xx, and a
+                // prepared retry recovers from those without the viewer
+                // noticing anything.
+                if (video != null && streamRetryAttempts < 4) {
+                    streamRetryAttempts += 1
+                    _error.value = "Reconnecting…"
+                    scope.launch {
+                        delay(400L * streamRetryAttempts)
+                        c.prepare()
+                        c.play()
+                    }
                     return
                 }
 

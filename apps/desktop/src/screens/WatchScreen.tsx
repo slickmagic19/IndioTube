@@ -8,7 +8,7 @@ import { navigate } from '../router';
 import { useApp } from '../store';
 import { usePlayback } from '../player/PlaybackHost';
 import { RelatedCard, downloadVideo, openVideo } from '../components/VideoCard';
-import { Avatar, Menu } from '../components/ui';
+import { Avatar, Menu, Verified } from '../components/ui';
 import { WatchSkeleton } from '../components/Skeletons';
 import { ClockIcon, DownloadIcon, PanelRightIcon, PlaylistIcon, ThumbDownIcon, ThumbUpIcon } from '../components/icons';
 import { PlaylistPicker } from '../components/VideoCard';
@@ -168,7 +168,10 @@ export function WatchScreen({ videoId }: { videoId: string }) {
               <Avatar name={watch.channelName} src={watch.channelAvatar} size={40} />
             </div>
             <div>
-              <div className="name" onClick={() => watch.channelId && navigate(`/channel/${watch.channelId}`)}>{watch.channelName}</div>
+              <div className="name" onClick={() => watch.channelId && navigate(`/channel/${watch.channelId}`)}>
+                {watch.channelName}
+                {watch.channelVerified ? <Verified size={13} /> : null}
+              </div>
               <div className="subs">{watch.subscribersText || ''}</div>
             </div>
             {watch.channelId && (
@@ -246,22 +249,7 @@ export function WatchScreen({ videoId }: { videoId: string }) {
         {comments.length > 0 && (
           <div className="comments">
             <h3>{watch.commentsCountText || `${comments.length}+`} Comments</h3>
-            {comments.map((c) => (
-              <div className="comment" key={c.id}>
-                <div className="avatar"><Avatar name={c.author} src={c.avatar} size={36} /></div>
-                <div style={{ minWidth: 0 }}>
-                  <div className="who"><b>{c.author}</b> {c.publishedText || ''}</div>
-                  <div className="text">{c.text}</div>
-                  <div className="acts">
-                    <span className="like-act">
-                      <ThumbUpIcon size={14} />
-                      {c.likesText && c.likesText !== '0' ? c.likesText : ''}
-                    </span>
-                    {c.replyCountText && <span>{c.replyCountText}</span>}
-                  </div>
-                </div>
-              </div>
-            ))}
+            {comments.map((c) => <CommentThread key={c.id} c={c} />)}
             {commentsCont && <button className="btn ghost" onClick={loadMoreComments}>More comments</button>}
           </div>
         )}
@@ -283,6 +271,84 @@ export function WatchScreen({ videoId }: { videoId: string }) {
               {moreRelated ? 'Loading…' : relatedToken ? 'Show more videos' : 'No more videos'}
             </button>
           </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A comment's replies live behind their own continuation token: the line under
+// the comment fetches them on first open, then toggles what was fetched.
+function CommentThread({ c }: { c: CommentItem }) {
+  const [open, setOpen] = useState(false);
+  const [replies, setReplies] = useState<CommentItem[]>([]);
+  const [cont, setCont] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const load = async (token: string, append: boolean) => {
+    setLoading(true);
+    setFailed(false);
+    const page = await window.indio.comments(token).catch(() => null);
+    setLoading(false);
+    if (!page) { setFailed(true); return; }
+    setReplies((r) => (append ? [...r, ...page.comments] : page.comments));
+    setCont(page.continuation && page.continuation !== token ? page.continuation : null);
+  };
+
+  const toggle = () => {
+    if (!c.repliesToken || loading) return;
+    if (!open && !replies.length) load(c.repliesToken, false);
+    setOpen((o) => !o);
+  };
+
+  return (
+    <div className="comment">
+      <div className="avatar"><Avatar name={c.author} src={c.avatar} size={36} /></div>
+      <div style={{ minWidth: 0 }}>
+        <div className="who"><b>{c.author}</b> {c.publishedText || ''}</div>
+        <div className="text">{c.text}</div>
+        <div className="acts">
+          <span className="like-act">
+            <ThumbUpIcon size={14} />
+            {c.likesText && c.likesText !== '0' ? c.likesText : ''}
+          </span>
+          {c.replyCountText && (
+            c.repliesToken ? (
+              <button type="button" className="reply-btn" onClick={toggle} aria-expanded={open}>
+                {loading ? 'Loading replies…' : open ? 'Hide replies' : c.replyCountText}
+              </button>
+            ) : <span>{c.replyCountText}</span>
+          )}
+        </div>
+        {open && (
+          <div className="comment-replies">
+            {replies.map((r) => (
+              <div className="comment comment-reply" key={r.id}>
+                <div className="avatar"><Avatar name={r.author} src={r.avatar} size={26} /></div>
+                <div style={{ minWidth: 0 }}>
+                  <div className="who"><b>{r.author}</b> {r.publishedText || ''}</div>
+                  <div className="text">{r.text}</div>
+                  <div className="acts">
+                    <span className="like-act">
+                      <ThumbUpIcon size={13} />
+                      {r.likesText && r.likesText !== '0' ? r.likesText : ''}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {failed && (
+              <button type="button" className="reply-btn" onClick={() => load(c.repliesToken!, false)}>
+                Couldn't load replies — retry
+              </button>
+            )}
+            {cont && (
+              <button type="button" className="reply-btn" onClick={() => load(cont, true)}>
+                Show more replies
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>

@@ -206,6 +206,18 @@ function isShortish(el) {
 }
 
 // ---- renderer parsing (port of InnerTube.kt parse*) --------------------------
+// A verified channel carries a check-circle badge in its owner badges. The
+// renderer shapes differ across layouts, so the badge icon type is the one
+// stable marker ("Verified" only exists as its accessibility label).
+function isVerified(...nodes) {
+  for (const node of nodes) {
+    if (!node) continue;
+    try {
+      if (/CHECK_CIRCLE_THICK|BADGE_STYLE_TYPE_VERIFIED|"label":"Verified"/.test(JSON.stringify(node))) return true;
+    } catch { /* cyclic or exotic shape */ }
+  }
+  return false;
+}
 
 function lastThumbUrl(container) {
   const thumbs = container && typeof container === 'object' ? container.thumbnails : null;
@@ -274,6 +286,7 @@ function parseVideoRenderer(v) {
     channelName: channelName || undefined,
     channelId: channelId || undefined,
     channelAvatar: channelAvatar || undefined,
+    channelVerified: isVerified(v.ownerBadges, v.badges, v.videoOwnerRenderer && v.videoOwnerRenderer.badges) || undefined,
     thumbnail,
     durationSec: duration,
     viewsText: views || undefined,
@@ -355,6 +368,7 @@ function parseLockup(lockup) {
     channelName: channelName || undefined,
     channelId: channelId || undefined,
     channelAvatar: channelAvatar || undefined,
+    channelVerified: isVerified(meta) || undefined,
     thumbnail: thumbUrl || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
     durationSec: parseDuration(durationBadge),
     viewsText: views || undefined,
@@ -1010,6 +1024,7 @@ function parseWatch(root, videoId) {
     channelId: channelId || null,
     channelName: channelName || null,
     channelAvatar: channelAvatar || null,
+    channelVerified: isVerified(owner && owner.badges, owner && owner.attributedTitle) || false,
     subscribersText: subscribersText || null,
     viewsText: viewsText || null,
     publishedText: publishedText || null,

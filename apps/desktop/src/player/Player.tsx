@@ -8,6 +8,17 @@ import type { Qualities, VideoItem, WatchData, Settings } from '../types';
 import { formatDuration } from '../types';
 import { useApp } from '../store';
 import { audioSyncAction } from './syncLogic';
+import { canUseMse, useMseSource, type MseSource } from './mse';
+
+// What streams.playUrl resolves to: the two files plus their codecs.
+type StreamSrc = {
+  video: string;
+  audio: string | null;
+  height: number;
+  label?: string;
+  videoCodec?: string | null;
+  audioCodec?: string | null;
+};
 import {
   DEFAULT_SPONSOR_CATEGORIES, autoSkipTarget, segmentKey, sponsorLabel, sponsorSegmentNear,
   type SbSegment,
@@ -45,6 +56,8 @@ export function Player(props: PlayerProps) {
   const [srcs, setSrcs] = useState<{ video: string; audio: string | null } | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [loading, setLoading] = useState(true);
+  // True whenever the decoder is waiting for data (start, seek or rebuffer).
+  const [buffering, setBuffering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [stickyControls, setStickyControls] = useState(false);
@@ -83,8 +96,78 @@ export function Player(props: PlayerProps) {
   // Signed CDN URLs can fail transiently. Real YouTube reloads without asking;
   // retry once per video with freshly extracted URLs before showing an error.
   const recoveryRef = useRef<{ videoId: string; tries: number }>({ videoId: '', tries: 0 });
+  // One recovery at a time: an error storm must not spawn parallel retries.
+  const recoveringRef = useRef(false);
+  // Bumped on every seek so a stale "audio is ready, resume the picture"
+  // callback can never fire after the viewer has already skipped again.
+  const seekTokenRef = useRef(0);
+  // Watchdog state: how long the audio clock has failed to advance while the
+  // picture runs, and the last value it had. Any stuck state (paused, muted,
+  // lost seek) is repaired from this instead of being trusted.
+  const audioStallRef = useRef(0);
+  const lastAudioClockRef = useRef(-1);
+  // The user's mute switch, readable from callbacks that must not capture
+  // a stale render value when they unmute the audio.
+  const mutedRef = useRef(muted);
+  useEffect(() => { mutedRef.current = muted; }, [muted]);
 
   // ---- source resolution ---------------------------------------------------
+
+  // Above 360p YouTube hands out the picture and the sound as two files.
+  // Instead of running two elements and chasing their clocks, both tracks are
+  // appended to one <video> element through Media Source Extensions (how
+  // YouTube itself plays), so the browser keeps them sample-locked and a seek
+  // moves a single clock. If MSE cannot take the pair, the old two-element
+  // path is used instead.
+  const mseBlockedRef = useRef(false);
+  const lastSrcRef = useRef<StreamSrc | null>(null);
+  const [mseSrc, setMseSrc] = useState<MseSource | null>(null);
+  const mseStartRef = useRef(0);
+
+  const applySource = useCallback((src: StreamSrc, startAt?: number) => {
+    lastSrcRef.current = src;
+    if (!mseBlockedRef.current && canUseMse(src)) {
+      // Quality switches keep the position; a fresh video starts where it was
+      // last left off.
+      mseStartRef.current = startAt ?? (resumeRef.current || 0);
+      setSrcs(null);
+      setMseSrc({
+        video: src.video,
+        audio: src.audio as string,
+        videoCodec: src.videoCodec as string,
+        audioCodec: src.audioCodec as string,
+      });
+    } else {
+      setMseSrc(null);
+      setSrcs(src);
+    }
+  }, []);
+
+  const fetchRange = useCallback(async (url: string, start: number, endInclusive: number) => {
+    // The range travels in the path, not in a Range header: a custom header is
+    // not CORS-safelisted, so every segment would cost a preflight, and a
+    // failed preflight silently knocked the player back to the two-element
+    // fallback. A plain GET has no preflight at all.
+    const u = new URL(url);
+    u.pathname = '/r';
+    u.searchParams.set('s', String(start));
+    u.searchParams.set('e', String(endInclusive));
+    const res = await fetch(u.toString(), { cache: 'no-store' });
+    if (!res.ok) throw new Error(`stream range failed (${res.status})`);
+    return res.arrayBuffer();
+  }, []);
+
+  const onMseError = useCallback(() => {
+    // Unsupported codec, a corrupt index or a buffer error: play the same two
+    // files with the fallback rather than showing no video at all.
+    mseBlockedRef.current = true;
+    setMseSrc(null);
+    const src = lastSrcRef.current;
+    if (src) setSrcs(src);
+    setLoading(false);
+  }, []);
+
+  useMseSource(videoRef, mseSrc, fetchRange, onMseError, mseStartRef);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,8 +175,17 @@ export function Player(props: PlayerProps) {
     setError(null);
     setQualities(null);
     setSrcs(null);
+    setMseSrc(null);
     setCaptionUrl(null);
     setSegments([]);
+    // A different video must never be preceded by the old one's sound: the
+    // audio track is its own element and keeps playing until it is stopped.
+    videoRef.current?.pause();
+    const oldAudio = audioRef.current;
+    if (oldAudio) {
+      oldAudio.pause();
+      oldAudio.muted = true;
+    }
     if (video.membersOnly) {
       setError('Members-only video — sign-in is not supported, so it cannot play here.');
       setLoading(false);
@@ -112,7 +204,7 @@ export function Player(props: PlayerProps) {
         const target = height ?? settings?.defaultQuality ?? null;
         const src = await window.indio.streams.playUrl(video.videoId, target);
         if (cancelled) return;
-        setSrcs(src);
+        applySource(src);
         // Remembered caption language, then the remembered on/off switch.
         if (settings?.captionsEnabled) {
           const lang = settings.captionLang
@@ -135,12 +227,27 @@ export function Player(props: PlayerProps) {
             : String(e?.message || e));
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        // The overlay stays up until the first frame plays (see onPlaying):
+        // priming the audio track must never look like a frozen player.
       }
     })();
     return () => { cancelled = true; };
     // height intentionally omitted: the src effect below handles quality swaps
   }, [video.videoId, video.membersOnly, video.isLive]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Navigation starts before the new video's data arrives: silence the current
+  // one the moment the route points at a different video, instead of hearing it
+  // over the new page while the streams resolve.
+  useEffect(() => {
+    const onHash = () => {
+      const m = /^#\/watch\/([^?/]+)/.exec(window.location.hash);
+      if (!m || m[1] === video.videoId) return;
+      videoRef.current?.pause();
+      audioRef.current?.pause();
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [video.videoId]);
 
   // SponsorBlock fetch (best-effort; offline just means no skips). Only the
   // categories chosen in Settings are requested, exactly like the phone.
@@ -195,26 +302,44 @@ export function Player(props: PlayerProps) {
 
   // ---- playback plumbing -------------------------------------------------------
 
+  // Every stream failure retries itself. The ladder is: the same quality with a
+  // fresh extraction, then each lower rung, then Auto; each step waits a little
+  // longer. Only when all of that fails is an error shown, and even then the
+  // Retry button starts a fresh ladder instead of a dead end.
   const recoverStream = useCallback(async () => {
     if (recoveryRef.current.videoId !== video.videoId) {
       recoveryRef.current = { videoId: video.videoId, tries: 0 };
     }
-    if (recoveryRef.current.tries >= 1) {
-      setError('The stream failed to load. Try a lower quality.');
-      return;
-    }
-    recoveryRef.current.tries += 1;
-    setLoading(true);
-    setError(null);
+    if (recoveringRef.current) return;
+    recoveringRef.current = true;
     try {
-      const q = await window.indio.streams.qualities(video.videoId, true);
-      setQualities(q);
-      const src = await window.indio.streams.playUrl(video.videoId, height);
-      setSrcs(src);
-    } catch (e: any) {
-      setError(String(e?.message || e));
-    } finally {
+      while (recoveryRef.current.tries < 4) {
+        const attempt = recoveryRef.current.tries;
+        recoveryRef.current.tries += 1;
+        if (attempt === 0) setLoading(true);
+        setError(null);
+        try {
+          await new Promise((r) => setTimeout(r, 300 * 2 ** attempt));
+          const q = await window.indio.streams.qualities(video.videoId, true);
+          setQualities(q);
+          const rungs = [...q.options].sort((a, b) => b.height - a.height);
+          // Attempt 0 keeps the viewer's quality; later attempts walk down the
+          // ladder (Auto last) so one bad CDN edge cannot keep the video down.
+          const target = attempt === 0
+            ? height
+            : (rungs[Math.min(attempt - 1, rungs.length - 1)]?.height ?? null);
+          const src = await window.indio.streams.playUrl(video.videoId, target);
+          if (attempt > 0) setHeight(target);
+          applySource(src, videoRef.current?.currentTime || 0);
+          return;
+        } catch {
+          // Next rung.
+        }
+      }
+      setError('The stream failed to load. Check your connection and press Retry.');
       setLoading(false);
+    } finally {
+      recoveringRef.current = false;
     }
   }, [video.videoId, height]);
 
@@ -223,33 +348,96 @@ export function Player(props: PlayerProps) {
     const a = audioRef.current;
     if (!v) return;
     if (v.paused) {
+      if (a && srcs?.audio) {
+        // After a paused seek the audio may still be muted; unmute before the
+        // picture starts so the first word is not clipped.
+        if (a.readyState >= 2) {
+          a.muted = mutedRef.current;
+          lastSeekRef.current = 0;
+        }
+        playAudio(a, true);
+      }
       v.play().catch(() => setError('Playback was blocked — click to start.'));
-      if (a && srcs?.audio) a.play().catch(() => undefined);
     } else {
       v.pause();
       if (a) a.pause();
     }
   }, [srcs]);
 
+  // A skip moves both clocks and only resumes the picture once the audio can
+  // play from the new position. When the target is already buffered the sound
+  // is instant and the picture never stalls.
+  const seekAudioInStep = useCallback((pos: number, wasPlaying: boolean) => {
+    const v = videoRef.current;
+    const a = audioRef.current;
+    if (!v || !a || !srcs?.audio) return;
+    const token = (seekTokenRef.current += 1);
+    a.muted = true;
+    if (a.readyState >= 1) {
+      try { a.currentTime = pos; pendingAudioSeek.current = null; }
+      catch { pendingAudioSeek.current = pos; }
+    } else {
+      pendingAudioSeek.current = pos;
+    }
+    // Start fetching at the new offset immediately, in parallel with the video.
+    playAudio(a, false);
+    // Buffered target: nothing to wait for, unmute straight away. Clearing
+    // lastSeekAt tells the tick this seek is settled, so it cannot re-mute
+    // during its settle window right after the sound came back.
+    if (!a.seeking && a.readyState >= 2) {
+      if (wasPlaying) {
+        a.muted = mutedRef.current;
+        lastSeekRef.current = 0;
+        playAudio(a, true);
+      }
+      return;
+    }
+    if (!wasPlaying) return;
+    v.pause();
+    let done = false;
+    const finish = () => {
+      if (done || token !== seekTokenRef.current) return;
+      done = true;
+      window.clearTimeout(timer);
+      a.removeEventListener('seeked', check);
+      a.removeEventListener('canplay', check);
+      a.removeEventListener('loadeddata', check);
+      // A seek issued before the element had data can land nowhere; re-target
+      // the video's real position once so silence can never become permanent.
+      if (a.readyState < 2) {
+        try { a.currentTime = v.currentTime; } catch { /* the tick retries */ }
+      }
+      const ready = a.readyState >= 2 && !a.seeking;
+      if (!ready) {
+        a.muted = true;
+        if (v.paused) v.play().catch(() => undefined);
+        return;
+      }
+      // The audio is confirmed at the new position: settle the tick so it
+      // neither re-mutes nor re-seeks, unmute before the first audio frame so
+      // no syllable is clipped, and only move the picture once the sound is
+      // actually running.
+      lastSeekRef.current = 0;
+      a.muted = mutedRef.current;
+      const resumeVideo = () => { if (v.paused) v.play().catch(() => undefined); };
+      playAudio(a, true).then(resumeVideo);
+      window.setTimeout(resumeVideo, 500);
+    };
+    const check = () => { if (a.readyState >= 2 && !a.seeking) finish(); };
+    const timer = window.setTimeout(finish, 1200);
+    a.addEventListener('seeked', check);
+    a.addEventListener('canplay', check);
+    a.addEventListener('loadeddata', check);
+  }, [srcs]);
+
   const seekTo = useCallback((seconds: number) => {
     const v = videoRef.current;
     if (!v || !isFinite(v.duration)) return;
     const pos = Math.max(0, Math.min(v.duration - 0.5, seconds));
+    const wasPlaying = !v.paused;
     v.currentTime = pos;
     lastSeekRef.current = Date.now();
-    const a = audioRef.current;
-    if (a && srcs?.audio) {
-      // Muted until the sync tick proves the clock matches: the audio element
-      // must never be heard at last video's position after a seek/switch.
-      a.muted = true;
-      lastSeekRef.current = Date.now();
-      if (a.readyState >= 1) {
-        try { a.currentTime = pos; pendingAudioSeek.current = null; }
-        catch { pendingAudioSeek.current = pos; }
-      } else {
-        pendingAudioSeek.current = pos;
-      }
-    }
+    seekAudioInStep(pos, wasPlaying);
     setNow(pos);
   }, [srcs]);
 
@@ -264,11 +452,13 @@ export function Player(props: PlayerProps) {
       lastSeekRef.current = Date.now();
       pendingAudioSeek.current = t;
       if (audioRef.current) audioRef.current.muted = true;
-      setSrcs(src);
+      applySource(src, t);
       requestAnimationFrame(() => {
         const vv = videoRef.current;
         const aa = audioRef.current;
         if (!vv) return;
+        // A blob URL means Media Source: MseSession already resumed it.
+        if (vv.src.startsWith('blob:')) return;
         vv.currentTime = t;
         if (aa && src.audio) aa.currentTime = t;
         if (wasPlaying) { vv.play().catch(() => undefined); aa?.play().catch(() => undefined); }
@@ -278,13 +468,73 @@ export function Player(props: PlayerProps) {
     }
   }, [saveSettings, toast, video.videoId]);
 
+  // Chromium may reject an unmuted play() on the audio element (it is a second
+  // element the viewer never clicked). Muted playback is always allowed, so
+  // fall back to starting muted and unmuting in the same task: the element is
+  // never left paused while the picture runs, and no audio is skipped.
+  const playAudio = useCallback(async (a: HTMLAudioElement, unmute: boolean) => {
+    const target = unmute ? mutedRef.current : true;
+    if (!a.paused) {
+      a.muted = target;
+      return;
+    }
+    try {
+      await a.play();
+      a.muted = target;
+    } catch {
+      a.muted = true;
+      try {
+        await a.play();
+        a.muted = target;
+      } catch { /* the 120ms tick retries */ }
+    }
+  }, []);
+
+  // Split streams are two files: starting the video first is exactly why the
+  // first seconds had no sound and it faded in later. Wait (briefly) for the
+  // audio to be able to start, then start both in the same tick.
+  const startTogether = useCallback((hasAudio: boolean) => {
+    const v = videoRef.current;
+    const a = audioRef.current;
+    if (!v) return;
+    if (!hasAudio || !a) {
+      v.play().catch(() => undefined);
+      return;
+    }
+    let started = false;
+    const go = () => {
+      if (started) return;
+      started = true;
+      window.clearTimeout(timer);
+      a.removeEventListener('canplay', go);
+      a.removeEventListener('loadeddata', go);
+      try { a.currentTime = v.currentTime; } catch { /* the tick realigns */ }
+      // Unmute before the first audio frame: starting muted and unmuting a
+      // tick later is what clipped the first fraction of a second of sound.
+      a.muted = mutedRef.current;
+      lastSeekRef.current = 0;
+      const resumeVideo = () => { if (v.paused) v.play().catch(() => undefined); };
+      playAudio(a, true).then(resumeVideo);
+      // Never leave the picture waiting when the audio is slow to start.
+      window.setTimeout(resumeVideo, 500);
+    };
+    const timer = window.setTimeout(go, 600);
+    if (a.readyState >= 3) go();
+    else {
+      a.addEventListener('canplay', go);
+      a.addEventListener('loadeddata', go);
+    }
+  }, []);
+
   // Keep the media elements in sync when the source pair changes.
   useEffect(() => {
     const v = videoRef.current;
     const a = audioRef.current;
     if (!v || !srcs) return;
     const t = v.currentTime;
-    lastSeekRef.current = Date.now();
+    // No settle window at startup: nothing was seeked, so the audio may
+    // become audible as soon as it is ready.
+    lastSeekRef.current = 0;
     pendingAudioSeek.current = resumeRef.current > 0 ? resumeRef.current : t;
     v.src = srcs.video;
     if (a) {
@@ -293,6 +543,9 @@ export function Player(props: PlayerProps) {
       a.muted = true;
       a.load();
     }
+      // Buffer the audio track immediately (muted, so nothing is heard before
+      // the clocks agree) instead of waiting for the first sync tick.
+      if (srcs.audio) playAudio(a, false);
     v.load();
     if (resumeRef.current > 0 && t < 1) {
       const onMeta = () => {
@@ -303,8 +556,8 @@ export function Player(props: PlayerProps) {
       };
       v.addEventListener('loadedmetadata', onMeta);
     }
-    v.play().catch(() => undefined);
-    // No audio autoplay here: the tick starts it when it is in sync.
+    startTogether(Boolean(srcs.audio));
+    // From here the sync tick owns the audio clock (play/pause/drift).
   }, [srcs]);
 
   useEffect(() => {
@@ -334,16 +587,16 @@ export function Player(props: PlayerProps) {
           audioSeeking: a.seeking,
           videoReadyState: v.readyState,
           videoPaused: v.paused,
+          videoSeeking: v.seeking,
           audioPaused: a.paused,
           audioTime: a.currentTime,
           videoTime: v.currentTime,
           muted,
-          lastSeekAt: lastSeekRef.current,
           now: Date.now(),
           playbackRate: rate,
         });
         if (action.pause && !a.paused) a.pause();
-        if (action.play && a.paused) a.play().catch(() => undefined);
+        if (action.play && a.paused) playAudio(a, !action.muted);
         // Soft drift correction: a hair faster/slower until the clocks agree,
         // otherwise back to the user's chosen speed.
         const wantedRate = action.rate ?? rate;
@@ -352,6 +605,35 @@ export function Player(props: PlayerProps) {
           try { a.currentTime = action.seekTo; } catch { /* retry next tick */ }
         }
         if (a.muted !== action.muted) a.muted = action.muted;
+
+        // Watchdog: whenever the picture runs, the audible track must advance
+        // too. If it has not moved for ~700ms (or is muted when it should be
+        // heard), repair it from the picture's clock. This makes every missed
+        // event or rejected play() self-heal instead of going silent.
+        if (!v.paused) {
+          const clock = a.currentTime;
+          const progressed = Math.abs(clock - lastAudioClockRef.current) > 0.001;
+          lastAudioClockRef.current = clock;
+          if (progressed) {
+            audioStallRef.current = 0;
+          } else if (a.readyState >= 2 && !a.seeking) {
+            audioStallRef.current += 120;
+          } else {
+            audioStallRef.current = 0;
+          }
+          if (audioStallRef.current > 700) {
+            audioStallRef.current = 0;
+            lastSeekRef.current = 0;
+            a.muted = mutedRef.current;
+            try { a.currentTime = v.currentTime; } catch { /* next tick */ }
+            playAudio(a, true);
+          } else if (a.muted && !mutedRef.current && !a.seeking && a.readyState >= 2
+            && audioStallRef.current > 300) {
+            // Stuck silent while the picture moves: unmute and let it play.
+            a.muted = false;
+            playAudio(a, true);
+          }
+        }
       }
       if (v.buffered.length) setBuffered(v.buffered.end(v.buffered.length - 1));
       if (settings?.sponsorBlock && settings.sponsorBlockAutoSkip) {
@@ -606,6 +888,38 @@ export function Player(props: PlayerProps) {
     };
   }, [captionsOn, captionUrl, srcs]);
 
+  // A buffering stretch that never ends is treated like a load failure and
+  // retried; a normal rebuffer just shows the spinner and clears itself.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return undefined;
+    let stallTimer = 0;
+    const onWaiting = () => {
+      setBuffering(true);
+      window.clearTimeout(stallTimer);
+      stallTimer = window.setTimeout(() => {
+        if (!v.paused && !v.ended) recoverStream();
+      }, 12_000);
+    };
+    const onPlaying = () => {
+      setBuffering(false);
+      setLoading(false);
+      window.clearTimeout(stallTimer);
+    };
+    const onCanPlay = () => setBuffering(false);
+    v.addEventListener('waiting', onWaiting);
+    v.addEventListener('stalled', onWaiting);
+    v.addEventListener('playing', onPlaying);
+    v.addEventListener('canplay', onCanPlay);
+    return () => {
+      window.clearTimeout(stallTimer);
+      v.removeEventListener('waiting', onWaiting);
+      v.removeEventListener('stalled', onWaiting);
+      v.removeEventListener('playing', onPlaying);
+      v.removeEventListener('canplay', onCanPlay);
+    };
+  }, [recoverStream, srcs]);
+
   const sponsorNear = settings?.sponsorBlock ? sponsorSegmentNear(segments, now) : null;
   const showControls = !miniMode ? 'controls' : 'controls stick';
 
@@ -614,13 +928,19 @@ export function Player(props: PlayerProps) {
       <video
         ref={videoRef}
         onClick={togglePlay}
-        onSeeking={() => { lastSeekRef.current = Date.now(); }}
         onSeeked={() => {
-          lastSeekRef.current = Date.now();
+          // The seek is over: clear the settle marker so the tick does not
+          // mute the audio again for another 350ms after it came back.
+          lastSeekRef.current = 0;
           const a = audioRef.current;
           const v = videoRef.current;
-          if (a && v && srcs?.audio && a.readyState >= 1) {
-            try { a.currentTime = v.currentTime; } catch { /* settle window covers it */ }
+          if (a && v && srcs?.audio) {
+            // Re-align right after the video lands, then let the audio keep
+            // fetching from the new offset (the tick unmutes when it is ready).
+            if (a.readyState >= 1) {
+              try { a.currentTime = v.currentTime; } catch { /* tick retries */ }
+            }
+            if (!v.paused) playAudio(a, false);
           }
         }}
         onLoadedMetadata={() => {
@@ -635,7 +955,15 @@ export function Player(props: PlayerProps) {
           const v = videoRef.current;
           if (v && duration === 0 && Number.isFinite(v.duration)) setDuration(v.duration);
         }}
-        onPlay={() => setPlaying(true)}
+        onPlay={() => {
+          setPlaying(true);
+          // A frame actually reached the screen: the retry budget starts over.
+          recoveryRef.current = { videoId: video.videoId, tries: 0 };
+        }}
+        onPlaying={() => { setBuffering(false); setPlaying(true); setLoading(false); }}
+        onWaiting={() => setBuffering(true)}
+        onCanPlay={() => setBuffering(false)}
+        onStalled={() => setBuffering(true)}
         onPause={() => { setPlaying(false); saveProgress(); }}
         onEnded={() => { saveProgress(); if (settings?.autoplay && queue.length > queueIndex + 1) onNext(); }}
         onError={(e) => {
@@ -664,7 +992,9 @@ export function Player(props: PlayerProps) {
         ref={audioRef}
         playsInline
         preload="auto"
-        style={{ display: 'none' }}
+        // Off-screen rather than display:none: Chromium can suspend hidden
+        // media, and a suspended audio element is exactly the silence bug.
+        style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
         onError={(e) => {
           if (e.currentTarget.error?.code === 1) return;
           if (srcs?.audio) recoverStream();
@@ -677,7 +1007,8 @@ export function Player(props: PlayerProps) {
             try { a.currentTime = Math.min(pending, a.duration || pending); } catch { /* next tick retries */ }
           }
           pendingAudioSeek.current = null;
-          lastSeekRef.current = Date.now();
+          // Loading metadata is not a user seek; do not mute the track for it.
+          lastSeekRef.current = 0;
         }}
       />
 
@@ -686,8 +1017,15 @@ export function Player(props: PlayerProps) {
           {cueLines.map((line, i) => <span key={i}>{line}</span>)}
         </div>
       )}
-      {loading && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      {loading && !error && (
+        <div className="load-overlay">
+          {video.thumbnail && <img src={video.thumbnail} alt="" aria-hidden="true" />}
+          <div className="load-overlay-scrim" />
+          <Spinner />
+        </div>
+      )}
+      {!loading && buffering && !error && !pipActive && (
+        <div className="buffer-overlay" role="status" aria-live="polite">
           <Spinner />
         </div>
       )}
@@ -705,8 +1043,7 @@ export function Player(props: PlayerProps) {
                 const q = await window.indio.streams.qualities(video.videoId, true);
                 setQualities(q);
                 const src = await window.indio.streams.playUrl(video.videoId, height);
-                setSrcs(src);
-                setLoading(false);
+                applySource(src);
               } catch (e: any) { setError(String(e?.message || e)); setLoading(false); }
             }}>Retry</button>
           )}
@@ -783,34 +1120,38 @@ export function Player(props: PlayerProps) {
               Skip {sponsorLabel(sponsorNear.category)}
             </button>
           )}
-          <button
-            className={`tbtn${captionsOn ? ' on' : ''}`}
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              setGearView('captions');
-              setGearAnchor(gearAnchor && gearView === 'captions' ? null : rect);
-            }}
-            title="Captions (c)"
-            aria-label="Captions"
-            aria-haspopup="menu"
-            aria-expanded={Boolean(gearAnchor) && gearView === 'captions'}
-          >
-            <CaptionsIcon size={18} />
-          </button>
-          <button
-            className={`tbtn${gearAnchor && gearView === 'main' ? ' on' : ''}`}
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              setGearView('main');
-              setGearAnchor(gearAnchor && gearView === 'main' ? null : rect);
-            }}
-            title="Settings"
-            aria-label="Player settings"
-            aria-haspopup="menu"
-            aria-expanded={Boolean(gearAnchor) && gearView === 'main'}
-          >
-            <GearSmallIcon size={18} />
-          </button>
+          {!miniMode && (
+            <>
+            <button
+              className={`tbtn${captionsOn ? ' on' : ''}`}
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setGearView('captions');
+                setGearAnchor(gearAnchor && gearView === 'captions' ? null : rect);
+              }}
+              title="Captions (c)"
+              aria-label="Captions"
+              aria-haspopup="menu"
+              aria-expanded={Boolean(gearAnchor) && gearView === 'captions'}
+            >
+              <CaptionsIcon size={18} />
+            </button>
+            <button
+              className={`tbtn${gearAnchor && gearView === 'main' ? ' on' : ''}`}
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setGearView('main');
+                setGearAnchor(gearAnchor && gearView === 'main' ? null : rect);
+              }}
+              title="Settings"
+              aria-label="Player settings"
+              aria-haspopup="menu"
+              aria-expanded={Boolean(gearAnchor) && gearView === 'main'}
+            >
+              <GearSmallIcon size={18} />
+            </button>
+            </>
+          )}
           {gearAnchor && (
             <Menu anchor={gearAnchor} onClose={closeGear} width={320}
               placement="above" label={gearTitle} className="player-menu">

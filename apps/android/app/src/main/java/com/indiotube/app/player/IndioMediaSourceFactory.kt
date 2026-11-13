@@ -8,6 +8,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorsFactory
@@ -31,7 +32,12 @@ import com.indiotube.app.Container
 class IndioMediaSourceFactory(private val container: Container) : MediaSource.Factory {
 
     private val dataSourceFactory = IndioTubeDataSource.Factory(container)
-    private val base = DefaultMediaSourceFactory(dataSourceFactory)
+    private val base = DefaultMediaSourceFactory(dataSourceFactory).apply {
+        // A dropped CDN request is retried by the loader itself (with backoff)
+        // before it ever becomes a player error, so a transient blip does not
+        // stop playback.
+        setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(5))
+    }
     private val subtitleParserFactory = CenteringSubtitleParserFactory()
 
     override fun createMediaSource(mediaItem: MediaItem): MediaSource {

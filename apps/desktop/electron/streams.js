@@ -15,6 +15,7 @@ const { spawn } = require('node:child_process');
 const { Readable } = require('node:stream');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const { createDownloadManager } = require('./downloads');
 
 const CACHE_TTL_MS = 5 * 3600 * 1000; // URLs live ~6h, same as Android
 const MISS_TTL_MS = 60 * 1000;
@@ -188,9 +189,13 @@ function buildQualities(info) {
     if (!audio) return null;
     const cands = videoOnly.filter((f) => formatHeight(f) === h);
     if (!cands.length) return null;
+    // 30fps before 60fps at the same height: the higher frame rate roughly
+    // doubles the bitrate for the same picture, which is what makes a 720p
+    // start slow on an otherwise fast line. 60fps rungs stay available when
+    // they are the only ones offered.
     return cands.sort((a, b) =>
       codecRank(a) - codecRank(b)
-      || (b.fps || 0) - (a.fps || 0)
+      || ((a.fps || 30) > 30 ? 1 : 0) - ((b.fps || 30) > 30 ? 1 : 0)
       || (b.tbr || 0) - (a.tbr || 0))[0];
   };
 
@@ -283,7 +288,7 @@ function pickName(list) {
   return first.name || first.language_code || null;
 }
 
-function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
+function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile, queueFile, ffmpegPath }) {
   const cache = new Map();     // videoId -> { at, qualities }
   const misses = new Map();    // videoId -> at (negative cache)
   const inflight = new Map();  // videoId -> Promise
@@ -377,7 +382,7 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
   async function ffmpegAvailable() {
     if (hasFfmpeg !== null) return hasFfmpeg;
     hasFfmpeg = await new Promise((resolve) => {
-      const proc = spawn('ffmpeg', ['-version'], { windowsHide: true });
+      const proc = spawn(ffmpegPath || 'ffmpeg', ['-version'], { windowsHide: true });
       proc.on('error', () => resolve(false));
       proc.on('close', (code) => resolve(code === 0));
       if (proc.stdout) proc.stdout.resume();
@@ -464,13 +469,15 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
       // audio and video locked together. Prefer it whenever the rung has it;
       // only split into two elements when there is no single-file stream.
       if (option.muxed) {
-        return { video: option.muxed.url, audio: null, height: option.height, label: height == null ? 'Auto' : option.label };
+        return { video: option.muxed.url, audio: null, height: option.height, label: height == null ? 'Auto' : option.label,
+          videoCodec: option.muxed.codec, audioCodec: null };
       }
       if (option.videoOnly) {
-        return { video: option.videoOnly.url, audio: q.audio && q.audio.url, height: option.height, label: height == null ? 'Auto' : option.label };
+        return { video: option.videoOnly.url, audio: q.audio && q.audio.url, height: option.height, label: height == null ? 'Auto' : option.label,
+          videoCodec: option.videoOnly.codec, audioCodec: q.audio ? q.audio.codec : null };
       }
     }
-    if (q.auto) return { video: q.auto.url, audio: null, height: q.auto.height, label: 'Auto' };
+    if (q.auto) return { video: q.auto.url, audio: null, height: q.auto.height, label: 'Auto', videoCodec: q.auto.codec, audioCodec: null };
     throw new Error('This quality isn\'t available for this video');
   }
 
@@ -484,8 +491,11 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
     return token;
   }
 
-  function proxied(url) {
-    return `http://127.0.0.1:${port}/v?t=${tokenFor(url)}`;
+  function proxied(url, meta) {
+    const token = tokenFor(url);
+    const entry = tokens.get(token);
+    if (entry && meta) Object.assign(entry, meta);
+    return `http://127.0.0.1:${port}/v?t=${token}`;
   }
 
   // The player URLs a quality selection maps to - the desktop counterpart of
@@ -495,10 +505,12 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
     if (q.isLive) throw new Error('Live videos are not playable on desktop yet');
     const t = pickTracks(q, height);
     return {
-      video: proxied(t.video),
-      audio: t.audio ? proxied(t.audio) : null,
+      video: proxied(t.video, { videoId, role: 'video', height: t.height }),
+      audio: t.audio ? proxied(t.audio, { videoId, role: 'audio', height: t.height }) : null,
       height: t.height,
       label: t.label,
+      videoCodec: t.videoCodec || null,
+      audioCodec: t.audioCodec || null,
     };
   }
 
@@ -520,8 +532,8 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
   // is what makes a seek feel like a stutter: served from memory it is
   // instant. Total memory is capped, per-entry too (video 200s are huge).
   const mediaCache = new Map();
-  const CACHE_MAX_BYTES = 48 * 1024 * 1024;
-  const CACHE_MAX_ENTRY = 12 * 1024 * 1024;
+  const CACHE_MAX_BYTES = 96 * 1024 * 1024;
+  const CACHE_MAX_ENTRY = 24 * 1024 * 1024;
   let cacheBytes = 0;
 
   function cacheGet(key) {
@@ -607,10 +619,24 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
     res.on('close', () => { /* nothing to flush */ });
   }
 
-  async function proxyStream(url, req, res) {
-    const headers = { 'user-agent': PROXY_UA, referer: 'https://www.youtube.com/' };
-    if (req.headers.range) headers.range = req.headers.range;
-    const key = `${url}|${req.headers.range || ''}`;
+  async function proxyStream(entry, req, res, forcedRange) {
+    let url = entry.url;
+    // Segment fetches carry their range in the path: a Range header is not
+    // CORS-safelisted, so it costs a preflight on every segment (and a
+    // failed preflight silently breaks Media Source playback).
+    const rangeHeader = forcedRange && Number.isFinite(forcedRange.start) && Number.isFinite(forcedRange.end)
+      ? `bytes=${forcedRange.start}-${forcedRange.end}`
+      : req.headers.range;
+    const headers = {
+      'user-agent': PROXY_UA,
+      referer: 'https://www.youtube.com/',
+      // Media is already compressed; identity keeps byte ranges aligned with
+      // what the player asked for and skips a decode pass.
+      'accept-encoding': 'identity',
+      connection: 'keep-alive',
+    };
+    if (rangeHeader) headers.range = rangeHeader;
+    const key = `${url}|${rangeHeader || ''}`;
     const cached = cacheGet(key);
     if (cached) {
       res.writeHead(cached.status, {
@@ -627,7 +653,37 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
     const ac = new AbortController();
     req.on('close', () => { try { ac.abort(); } catch { /* gone */ } });
     try {
-      const up = await fetch(url, { headers, signal: ac.signal });
+      let up;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          up = await fetch(url, { headers, signal: ac.signal });
+          if (up.ok || up.status < 500) break;
+        } catch (e) {
+          if (ac.signal.aborted) throw e;
+          if (attempt === 2) throw e;
+        }
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+      }
+      if (!up) throw new Error('stream request failed');
+      // Signed googlevideo URLs expire (about six hours) and a cached ladder can
+      // outlive them. Re-extract once and repeat the same range instead of
+      // handing the player a 403 - which used to surface as a failed load or a
+      // silent track.
+      if ((up.status === 403 || up.status === 410) && entry.videoId && !entry.refreshing) {
+        entry.refreshing = true;
+        try {
+          const q = await qualities(entry.videoId, true);
+          const fresh = pickTracks(q, entry.height == null ? null : entry.height);
+          const next = entry.role === 'audio' ? fresh.audio : fresh.video;
+          if (next && next !== url) {
+            url = next;
+            entry.url = next;
+            up = await fetch(url, { headers, signal: ac.signal });
+          }
+        } catch { /* keep the CDN's answer */ } finally {
+          entry.refreshing = false;
+        }
+      }
       if (res.destroyed || res.writableEnded) { try { ac.abort(); } catch { /* gone */ } return; }
       const contentType = up.headers.get('content-type') || 'video/mp4';
       const contentRange = up.headers.get('content-range');
@@ -734,11 +790,26 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
     if (server) return;
     server = http.createServer((req, res) => {
       guardStreams(req, res);
+      // Media fetches send a Range header, which is not CORS-safelisted, so
+      // the browser preflights them: answer it or every range request fails.
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, { ...corsHeaders(), 'access-control-allow-methods': 'GET, HEAD, OPTIONS', 'access-control-allow-headers': 'range', 'access-control-max-age': '600' });
+        return res.end();
+      }
       const url = new URL(req.url, 'http://proxy.local');
+      if (url.pathname === '/r') {
+        const entry = tokens.get(url.searchParams.get('t') || '');
+        if (!entry) { res.writeHead(404); return res.end('stale token'); }
+        proxyStream(entry, req, res, {
+          start: Number(url.searchParams.get('s')),
+          end: Number(url.searchParams.get('e')),
+        }).catch(() => { try { res.destroy(); } catch { /* gone */ } });
+        return;
+      }
       if (url.pathname === '/v') {
         const entry = tokens.get(url.searchParams.get('t') || '');
         if (!entry) { res.writeHead(404); return res.end('stale token'); }
-        proxyStream(entry.url, req, res).catch(() => { try { res.destroy(); } catch { /* gone */ } });
+        proxyStream(entry, req, res).catch(() => { try { res.destroy(); } catch { /* gone */ } });
         return;
       }
       if (url.pathname === '/subs') {
@@ -765,98 +836,26 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
     }));
   }
 
-  // ---- downloads ---------------------------------------------------------------
-
-  function downloadFileName(info, out) {
-    const m = /\[download\] Destination: (.+)$|(\S+\.(mp4|webm|mkv|m4a)) saved/m.exec(out || '');
-    if (m) return (m[1] || m[2] || '').trim();
-    return '';
-  }
-
-  async function startDownload(video, height) {
-    const videoId = video.videoId;
-    if (downloads.has(videoId)) return { started: false, reason: 'already downloading' };
-    const ffmpeg = await ffmpegAvailable();
-    const h = height && height > 0 ? height : 1080;
-    const fmt = ffmpeg ? `bv*[height<=${h}]+ba/b[height<=${h}]` : `b[height<=${h}]/b`;
-    const outTpl = path.join(downloadDir, '%(title)s [%(id)s].%(ext)s');
-    const args = [
-      '--no-warnings', '--no-playlist', '--newline', '--progress',
-      '-f', fmt,
-    ];
-    if (ffmpeg) args.push('--merge-output-format', 'mp4');
-    args.push('-o', outTpl, `https://www.youtube.com/watch?v=${videoId}`);
-
-    const proc = spawn(ytdlpPath, args, { windowsHide: true });
-    const entry = { proc, file: '', totalBytes: 0, receivedBytes: 0 };
-    downloads.set(videoId, entry);
-    const emit = (patch) => {
-      if (onDownloadEvent) onDownloadEvent({ videoId, ...patch });
-    };
-    emit({ status: 'started', height: h });
-
-    let buf = '';
-    proc.stdout.on('data', (d) => {
-      buf += d.toString();
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        const pct = /\[download\]\s+(\d+(?:\.\d+)?)%/.exec(line);
-        const total = /of\s+~?([\d.]+)([KMGT]i?)B/i.exec(line);
-        if (total) {
-          const mult = { k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 }[total[2][0].toLowerCase()] || 1;
-          entry.totalBytes = Math.round(parseFloat(total[1]) * mult);
-        }
-        if (pct && entry.totalBytes) {
-          entry.receivedBytes = Math.round((parseFloat(pct[1]) / 100) * entry.totalBytes);
-          emit({ status: 'progress', percent: parseFloat(pct[1]), receivedBytes: entry.receivedBytes, totalBytes: entry.totalBytes });
-        } else if (pct) {
-          emit({ status: 'progress', percent: parseFloat(pct[1]) });
-        }
-        const dest = /\[download\] Destination: (.+)$/.exec(line);
-        if (dest) entry.file = dest[1].trim();
-        if (line.includes('has already been downloaded')) {
-          const m = /Destination: (.+)$/.exec(line);
-          if (m) entry.file = m[1].trim();
-        }
-        const merged = /\[Merger\] Merging files into (.+)$/.exec(line);
-        if (merged) entry.file = merged[1].trim();
-      }
-    });
-    proc.stderr.on('data', () => { /* yt-dlp progress noise; failures land in close */ });
-    proc.on('error', (e) => {
-      downloads.delete(videoId);
-      emit({ status: 'error', error: `yt-dlp failed to start: ${e.message}` });
-    });
-    proc.on('close', (code) => {
-      downloads.delete(videoId);
-      if (code === 0 && entry.file && fs.existsSync(entry.file)) {
-        let bytes = 0;
-        try { bytes = fs.statSync(entry.file).size; } catch { /* fine */ }
-        emit({ status: 'done', file: entry.file, bytes, height: h });
-      } else if (code === 0) {
-        emit({ status: 'error', error: 'Download finished but the file was not found', height: h });
-      } else {
-        emit({ status: 'error', error: `Download failed (yt-dlp exit ${code})`, height: h });
-      }
-    });
-    return { started: true };
-  }
-
-  function cancelDownload(videoId) {
-    const d = downloads.get(videoId);
-    if (!d) return false;
-    try { d.proc.kill(); } catch { /* gone */ }
-    downloads.delete(videoId);
-    if (onDownloadEvent) onDownloadEvent({ videoId, status: 'cancelled' });
-    return true;
-  }
-
   function localFileUrl(file) {
     return `http://127.0.0.1:${port}/file?p=${encodeURIComponent(file)}`;
   }
+
+  // Downloads live in their own manager (queue, pause/resume, retries).
+  const manager = createDownloadManager({
+    ytdlpPath,
+    downloadDir: () => downloadDir,
+    queueFile,
+    ffmpegPath,
+    emit: onDownloadEvent,
+    ffmpegAvailable,
+  });
+
+  function startDownload(video, height) { return manager.start(video, height); }
+  function cancelDownload(videoId) { return manager.cancel(videoId); }
+  function pauseDownload(videoId) { return manager.pause(videoId); }
+  function resumeDownload(videoId) { return manager.resume(videoId); }
+  function listDownloads() { return manager.list(); }
+  function pumpDownloads() { manager.pump(); }
 
   return {
     startProxy,
@@ -867,6 +866,10 @@ function createStreams({ ytdlpPath, downloadDir, onDownloadEvent, cacheFile }) {
     localFileUrl,
     startDownload,
     cancelDownload,
+    pauseDownload,
+    resumeDownload,
+    listDownloads,
+    pumpDownloads,
     ffmpegAvailable,
     _cache: cache,
   };

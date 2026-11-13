@@ -11,6 +11,10 @@ const { createLocalFeed } = require('./localFeed');
 const { createStreams } = require('./streams');
 const sync = require('./sync');
 
+// The picture and the sound are separate media elements; Chromium's default
+// policy can refuse an unmuted play() on the one the viewer has not clicked.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
 const DEV_URL = process.env.INDIOTUBE_DEV_URL || 'http://127.0.0.1:5174';
 // Cap on a local "load more" page, so a renderer bug cannot ask for the whole
 // candidate pool at once.
@@ -80,6 +84,22 @@ function saveSettings() {
 }
 
 // ---- yt-dlp sidecar location ------------------------------------------------------
+
+// ffmpeg merges the split video/audio streams YouTube serves. Vendored like
+// yt-dlp (scripts/fetch-ffmpeg.js): without it a download can only keep a
+// single-file format, and logged-out YouTube offers very few of those.
+function resolveFfmpeg() {
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe')]
+    : [
+      path.join(__dirname, '..', 'vendor', 'ffmpeg', 'ffmpeg.exe'),
+      path.join(app.getPath('userData'), 'ffmpeg', 'ffmpeg.exe'),
+    ];
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return c; } catch { /* keep looking */ }
+  }
+  return null;
+}
 
 function resolveYtdlp() {
   const candidates = app.isPackaged
@@ -172,6 +192,9 @@ function registerIpc() {
   ipcMain.handle('streams:ffmpeg', () => wrap(async () => ({ available: await streams.ffmpegAvailable() })));
   ipcMain.handle('downloads:start', (_e, p) => wrap(() => streams.startDownload(p.video, p.height)));
   ipcMain.handle('downloads:cancel', (_e, p) => ok({ cancelled: streams.cancelDownload(p.videoId) }));
+  ipcMain.handle('downloads:list', () => ok({ tasks: streams.listDownloads() }));
+  ipcMain.handle('downloads:pause', (_e, p) => ok({ paused: streams.pauseDownload(p.videoId) }));
+  ipcMain.handle('downloads:resume', (_e, p) => ok({ resumed: streams.resumeDownload(p.videoId) }));
   ipcMain.handle('downloads:pickDir', async () => {
     const res = await dialog.showOpenDialog(win, {
       title: 'Choose a downloads folder',
@@ -678,11 +701,15 @@ app.whenReady().then(async () => {
   const ytdlpPath = resolveYtdlp();
   streams = createStreams({
     ytdlpPath: ytdlpPath || 'yt-dlp.exe',
+    ffmpegPath: resolveFfmpeg(),
     downloadDir: settings.downloadDir,
     cacheFile: path.join(app.getPath('userData'), 'streams-cache.json'),
+    queueFile: path.join(app.getPath('userData'), 'downloads.json'),
     onDownloadEvent: (evt) => broadcast('download:event', evt),
   });
   await streams.startProxy();
+  // Pick up downloads that were queued when the app last closed.
+  streams.pumpDownloads();
   if (!ytdlpPath) {
     console.warn('[indiotube] yt-dlp.exe not found - run `npm run fetch:ytdlp`. Playback will report a helpful error.');
   }

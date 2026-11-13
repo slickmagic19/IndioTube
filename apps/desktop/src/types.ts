@@ -7,6 +7,8 @@ export interface VideoItem {
   channelName?: string | null;
   channelId?: string | null;
   channelAvatar?: string | null;
+  /** True when YouTube marks the channel as verified (check-circle badge). */
+  channelVerified?: boolean;
   thumbnail?: string | null;
   durationSec: number;
   viewsText?: string | null;
@@ -101,6 +103,7 @@ export interface WatchData {
   channelId: string | null;
   channelName: string | null;
   channelAvatar: string | null;
+  channelVerified?: boolean;
   subscribersText: string | null;
   viewsText: string | null;
   publishedText: string | null;
@@ -247,7 +250,10 @@ export interface IndioBridge {
   playlistCont(token: string): Promise<PlaylistPage>;
   streams: {
     qualities(videoId: string, force?: boolean): Promise<Qualities>;
-    playUrl(videoId: string, height: number | null): Promise<{ video: string; audio: string | null; height: number; label?: string }>;
+    playUrl(videoId: string, height: number | null): Promise<{
+      video: string; audio: string | null; height: number; label?: string;
+      videoCodec?: string | null; audioCodec?: string | null;
+    }>;
     subtitleUrl(videoId: string, lang: string): Promise<string | null>;
     localUrl(file: string): Promise<string>;
     ffmpeg(): Promise<boolean>;
@@ -255,6 +261,9 @@ export interface IndioBridge {
   downloads: {
     start(video: VideoItem, height: number | null): Promise<{ started: boolean; reason?: string }>;
     cancel(videoId: string): Promise<unknown>;
+    list(): Promise<DownloadTask[]>;
+    pause(videoId: string): Promise<unknown>;
+    resume(videoId: string): Promise<unknown>;
     pickDir(): Promise<{ dir: string }>;
     reveal(file: string): Promise<unknown>;
     onEvent(cb: (e: DownloadEvent) => void): () => void;
@@ -287,14 +296,35 @@ export interface IndioBridge {
 
 export interface DownloadEvent {
   videoId: string;
-  status: 'started' | 'progress' | 'done' | 'error' | 'cancelled';
+  status: 'started' | 'progress' | 'queued' | 'paused' | 'resumed' | 'done' | 'error' | 'cancelled';
   percent?: number;
   receivedBytes?: number;
   totalBytes?: number;
+  speed?: number;
+  eta?: number | null;
   file?: string;
   bytes?: number;
   height?: number;
   error?: string;
+  attempts?: number;
+}
+
+/** A row of the download queue as the main process reports it. */
+export interface DownloadTask {
+  videoId: string;
+  video: VideoItem;
+  height: number | null;
+  status: 'queued' | 'downloading' | 'paused' | 'error';
+  percent: number;
+  receivedBytes: number;
+  totalBytes: number;
+  speed: number;
+  eta: number | null;
+  file: string;
+  bytes: number;
+  error: string | null;
+  attempts: number;
+  at: number;
 }
 
 declare global {

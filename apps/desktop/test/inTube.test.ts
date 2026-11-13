@@ -326,3 +326,35 @@ describe('small helpers', () => {
     expect(parseDuration(null)).toBe(0);
   });
 });
+
+// Verified channels: the badge is the check-circle icon in the owner badges;
+// the accessibility label ("Verified") is the fallback marker.
+describe('verified channels', () => {
+  const base = {
+    videoId: 'v1',
+    title: { runs: [{ text: 'A video' }] },
+    lengthText: { simpleText: '10:00' },
+    ownerText: { runs: [{ text: 'A channel', navigationEndpoint: { browseEndpoint: { browseId: 'UC1' } } }] },
+  };
+
+  it('flags a renderer whose owner carries the check-circle badge', () => {
+    const v = parseVideoRenderer({
+      ...base,
+      ownerBadges: [{ metadataBadgeRenderer: { icon: { iconType: 'CHECK_CIRCLE_THICK' } } }],
+    });
+    expect(v.channelVerified).toBe(true);
+  });
+
+  it('flags the accessibility-label form too', () => {
+    const v = parseVideoRenderer({
+      ...base,
+      ownerBadges: [{ metadataBadgeRenderer: { accessibilityData: { label: 'Verified' } } }],
+    });
+    expect(v.channelVerified).toBe(true);
+  });
+
+  it('leaves ordinary channels unflagged', () => {
+    const v = parseVideoRenderer(base);
+    expect(v.channelVerified).toBeUndefined();
+  });
+});

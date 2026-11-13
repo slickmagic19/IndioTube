@@ -1,6 +1,16 @@
 // Small shared UI primitives: menu popup, image with fallback, spinner.
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { VerifiedIcon } from './icons';
+
+/** The check badge YouTube puts next to a verified channel's name. */
+export function Verified({ size = 12, label = 'Verified' }: { size?: number; label?: string }) {
+  return (
+    <span className="verified-badge" role="img" aria-label={label} title={label}>
+      <VerifiedIcon size={size} />
+    </span>
+  );
+}
 
 export function Spinner() {
   return <div className="spin" aria-label="loading" />;
@@ -152,16 +162,24 @@ export function Thumb({ src, alt, live, duration, members, fraction, fallbackSrc
 
 export function Avatar({ name, src, size = 36 }: { name?: string | null; src?: string | null; size?: number }) {
   const [failed, setFailed] = useState(false);
-  const letter = (name || '?').trim().charAt(0).toUpperCase() || '?';
-  if (src && !failed) {
-    return <img src={src} alt="" style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover' }}
-      onError={() => setFailed(true)} />;
-  }
+  // Channel handles arrive as "@name": the initial should be the name's first
+  // letter, not the "@".
+  const letter = (name || '?').trim().replace(/^@+/, '').charAt(0).toUpperCase() || '?';
+  // The initial is always painted underneath the photo. A profile picture that
+  // 404s, loads blank, or is still loading therefore shows the letter instead
+  // of an empty circle (that is what made reply avatars look broken).
   return (
     <div style={{
-      width: size, height: size, minWidth: size, borderRadius: '50%', background: 'var(--chip)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600,
-      fontSize: size * 0.42, color: 'var(--text-dim)',
-    }}>{letter}</div>
+      position: 'relative', width: size, height: size, minWidth: size, borderRadius: '50%',
+      overflow: 'hidden', background: 'var(--chip)', display: 'flex', alignItems: 'center',
+      justifyContent: 'center', fontWeight: 600, fontSize: size * 0.42, color: 'var(--text-dim)',
+      flexShrink: 0,
+    }}>
+      <span aria-hidden="true">{letter}</span>
+      {src && !failed && (
+        <img src={src} alt="" onError={() => setFailed(true)}
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
+      )}
+    </div>
   );
 }

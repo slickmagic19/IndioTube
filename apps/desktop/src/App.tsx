@@ -18,15 +18,14 @@ import {
   PlayIcon, SearchIcon, SettingsIcon, SubsIcon, ThumbUpIcon,
 } from './components/icons';
 
-// Clicking the logo or Home asks the feed to revalidate, exactly like
-// YouTube: on Home it refreshes in place, elsewhere it navigates home.
+// Clicking the logo or Home navigates back to the feed. Coming from another
+// page shows the feed already cached (no reload, no flicker); clicking it
+// again while on Home is what asks for a fresh mix, exactly like YouTube.
 function homeClick() {
   const hash = window.location.hash;
   const onHome = hash === '' || hash === '#/' || hash === '#/home';
-  navigate('/home');
-  if (onHome) window.dispatchEvent(new Event('indio-feed-refresh'));
-  // Freshly mounted feeds get their refresh once they are listening.
-  else setTimeout(() => window.dispatchEvent(new Event('indio-feed-refresh')), 0);
+  if (!onHome) { navigate('/home'); return; }
+  window.dispatchEvent(new Event('indio-feed-refresh'));
 }
 
 // ---- top bar ------------------------------------------------------------------
@@ -139,6 +138,10 @@ function Shell() {
   const route = useRoute();
   const [fs, setFs] = useState(false);
   const [navOpen, setNavOpen] = useState(true);
+  const contentRef = useRef<HTMLDivElement>(null);
+  // On a video the guide is an overlay drawer (YouTube behaviour): opening it
+  // must not resize the player, so it floats above the content with a scrim.
+  const overlayNav = route.page === 'watch' && navOpen;
 
   useEffect(() => {
     window.indio.window.isFullscreen().then(setFs).catch(() => undefined);
@@ -151,6 +154,20 @@ function Shell() {
   useEffect(() => {
     if (route.page === 'watch') setNavOpen(false);
   }, [route.page]);
+
+  // Opening a video always starts at the top of the page, even when the click
+  // came from far down the feed.
+  useEffect(() => {
+    if (route.page === 'watch') contentRef.current?.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+  }, [route.page, route.id]);
+
+  // A feed refresh (logo / Home clicked while on Home) brings the viewer back
+  // to the top so the new mix is visible from its first row.
+  useEffect(() => {
+    const onRefresh = () => contentRef.current?.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+    window.addEventListener('indio-feed-refresh', onRefresh);
+    return () => window.removeEventListener('indio-feed-refresh', onRefresh);
+  }, []);
 
   // The player layer is a sibling of the shell, so fullscreen is flagged on
   // the document for it to react to.
@@ -180,8 +197,16 @@ function Shell() {
     <div className={`shell${fs ? ' fs' : ''}`} style={{ flexDirection: 'column' }}>
       <TopBar onMenu={() => setNavOpen((o) => !o)} />
       <div className="main">
-        {navOpen && <SideNav onClose={() => undefined} />}
-        <div className="content">{screen}</div>
+        {navOpen && !overlayNav && <SideNav onClose={() => undefined} />}
+        <div className="content" ref={contentRef}>{screen}</div>
+        {overlayNav && (
+          <>
+            <div className="nav-scrim" onClick={() => setNavOpen(false)} />
+            <div className="nav-drawer" role="dialog" aria-label="Navigation">
+              <SideNav onClose={() => setNavOpen(false)} />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

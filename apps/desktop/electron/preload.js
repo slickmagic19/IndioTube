@@ -40,7 +40,10 @@ contextBridge.exposeInMainWorld('indio', {
     qualities: async (videoId, force) => (await invoke('streams:qualities', { videoId, force })).qualities,
     playUrl: async (videoId, height) => {
       const res = await invoke('streams:playUrl', { videoId, height });
-      return { video: res.video, audio: res.audio || null, height: res.height, label: res.label };
+      // The codecs are what the MSE player needs to build its mime types; the
+      // IPC rebuild used to drop them, which silently disabled MSE entirely.
+      return { video: res.video, audio: res.audio || null, height: res.height, label: res.label,
+        videoCodec: res.videoCodec || null, audioCodec: res.audioCodec || null };
     },
     subtitleUrl: async (videoId, lang) => (await invoke('streams:subtitleUrl', { videoId, lang })).url,
     localUrl: async (file) => (await invoke('streams:localUrl', { file })).url,
@@ -50,6 +53,9 @@ contextBridge.exposeInMainWorld('indio', {
   downloads: {
     start: async (video, height) => (await invoke('downloads:start', { video, height })),
     cancel: async (videoId) => invoke('downloads:cancel', { videoId }),
+    list: async () => (await invoke('downloads:list', {})).tasks || [],
+    pause: async (videoId) => invoke('downloads:pause', { videoId }),
+    resume: async (videoId) => invoke('downloads:resume', { videoId }),
     pickDir: () => invoke('downloads:pickDir'),
     reveal: (file) => invoke('downloads:reveal', { file }),
     onEvent: (cb) => on('download:event', cb),

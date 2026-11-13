@@ -7,7 +7,7 @@ import { formatDuration, metaLine, watchedFraction } from '../types';
 import { navigate } from '../router';
 import { useApp } from '../store';
 import { usePlayback } from '../player/PlaybackHost';
-import { Avatar, Menu, MenuHead, MenuSep, Thumb } from './ui';
+import { Avatar, Menu, MenuHead, MenuSep, Thumb, Verified } from './ui';
 import {
   BlockIcon, CheckCircleIcon, CheckIcon, ClockIcon, DownloadIcon, EyeOffIcon, MoreIcon,
   PlaylistPlayIcon, PlusIcon, QueueIcon, ThumbUpIcon,
@@ -84,7 +84,10 @@ export function VideoCard({ video, showChannel = true, fraction }: {
         )}
         <div style={{ minWidth: 0, flex: 1 }}>
           <div className="title">{video.title}</div>
-          <div className="sub">{metaLine(video)}</div>
+          <div className="sub">
+            {video.channelVerified ? <Verified size={12} /> : null}
+            {metaLine(video)}
+          </div>
         </div>
         <button
           className="icon-btn" style={{ width: 30, height: 30 }}

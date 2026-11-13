@@ -1,7 +1,7 @@
 {
   "name": "indiotube-desktop",
   "private": true,
-  "version": "0.1.37",
+  "version": "0.1.38",
   "description": "IndioTube — ad-free YouTube desktop player with phone sync.",
   "author": "IndioTube",
   "main": "electron/main.js",
@@ -42,6 +42,14 @@
       {
         "from": "vendor/ytdlp/yt-dlp.exe",
         "to": "ytdlp/yt-dlp.exe"
+      },
+      {
+        "from": "vendor/ffmpeg/ffmpeg.exe",
+        "to": "ffmpeg/ffmpeg.exe"
+      },
+      {
+        "from": "vendor/ffmpeg/ffprobe.exe",
+        "to": "ffmpeg/ffprobe.exe"
       }
     ],
     "win": {

@@ -130,6 +130,11 @@ export const CheckIcon = svg(<path d="m5 12.5 4.5 4.5L19 7" />);
 export const CheckCircleIcon = svg(<>
   <circle cx="12" cy="12" r="8.4" /><path d="m8.4 12.3 2.6 2.6 4.9-5.4" />
 </>);
+// YouTube's verified-channel badge: a scalloped disc with a check cut out.
+export const VerifiedIcon = svg(<>
+  <path d="M12 2.2l2.1 1.9 2.8-.4 1 2.7 2.5 1.4-.8 2.7.8 2.7-2.5 1.4-1 2.7-2.8-.4L12 21.8l-2.1-1.9-2.8.4-1-2.7-2.5-1.4.8-2.7-.8-2.7 2.5-1.4 1-2.7 2.8.4z" />
+  <path d="m8.3 12.2 2.5 2.5 4.9-5.3" stroke="#0f0f0f" strokeWidth="1.9" />
+</>, true);
 export const PlaylistPlayIcon = svg(<>
   <path d="M4 7h12M4 12h12M4 17h8" />
   <path d="M17 13.5v5.5l4-2.75z" fill="currentColor" stroke="none" />

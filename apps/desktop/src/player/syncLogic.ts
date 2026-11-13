@@ -22,11 +22,11 @@ export interface AudioSyncInput {
   audioSeeking: boolean;
   videoReadyState: number;   // < 3 means the video is rebuffering
   videoPaused: boolean;
+  videoSeeking: boolean;     // the video's own seek has not landed yet
   audioPaused: boolean;
   audioTime: number;
   videoTime: number;
   muted: boolean;            // the user's mute switch
-  lastSeekAt: number;        // ms timestamp of the last user seek
   now: number;               // current ms timestamp
   playbackRate?: number;     // the user's chosen speed (default 1)
 }
@@ -40,9 +40,7 @@ export interface AudioSyncAction {
   muted: boolean;
 }
 
-const SEEK_SETTLE_MS = 350;
 const DRIFT_SEEK = 0.25;
-const DRIFT_MUTE = 0.6;
 const SOFT_DRIFT = 0.04;
 const MAX_NUDGE = 0.05;
 
@@ -51,24 +49,41 @@ export function audioSyncAction(i: AudioSyncInput): AudioSyncAction {
   const audioTime = Number.isFinite(i.audioTime) ? i.audioTime : 0;
   const videoTime = Number.isFinite(i.videoTime) ? i.videoTime : 0;
 
-  if (i.audioReadyState < 2 || i.audioSeeking) return { muted: true };
-  if (i.now - i.lastSeekAt < SEEK_SETTLE_MS) return { muted: true };
+  if (i.audioReadyState < 2 || i.audioSeeking) {
+    // Muted, but still mirror play/pause: a seek that takes a moment must not
+    // leave the audio element paused after the picture resumes, which is what
+    // made a skip occasionally stay silent until the next skip.
+    const hold: AudioSyncAction = { muted: true };
+    if (i.videoPaused && !i.audioPaused) hold.pause = true;
+    if (!i.videoPaused && i.audioPaused) hold.play = true;
+    return hold;
+  }
+  // The video is still seeking: its currentTime is the target, not the frame
+  // on screen, so correcting the audio to it now would rewind the sound.
+  if (i.videoSeeking) {
+    const hold: AudioSyncAction = { muted: i.muted };
+    if (i.videoPaused && !i.audioPaused) hold.pause = true;
+    if (!i.videoPaused && i.audioPaused) hold.play = true;
+    return hold;
+  }
 
   // The video is rebuffering: hold the audio where it is (a muxed stream
   // would simply stall) instead of re-seeking it every tick.
   if (!i.videoPaused && i.videoReadyState < 3) {
-    return { pause: true, muted: false };
+    return { pause: true, muted: i.muted };
   }
 
   const drift = Math.abs(audioTime - videoTime);
-  const action: AudioSyncAction = { muted: i.muted || drift > DRIFT_MUTE };
+  // Sound is never muted to hide a drift: muting an element that is already
+  // playing loses the words until it is unmuted, which is the skipped-audio
+  // bug. Correct the clock instead.
+  const action: AudioSyncAction = { muted: i.muted };
 
   if (i.videoPaused && !i.audioPaused) action.pause = true;
   if (!i.videoPaused && i.audioPaused) action.play = true;
 
   if (drift > DRIFT_SEEK) {
     action.seekTo = videoTime;
-    action.muted = true;
   } else if (!i.videoPaused && drift > SOFT_DRIFT) {
     // Behind (audioTime < videoTime) speeds up a hair, ahead slows down a
     // hair; the correction is small enough to be inaudible but converges in

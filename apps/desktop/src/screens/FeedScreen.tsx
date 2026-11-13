@@ -13,10 +13,11 @@ import { GridSkeleton } from '../components/Skeletons';
 import { useApp } from '../store';
 import { useInfiniteScroll } from '../useInfiniteScroll';
 
-// Last rendered feed per mode: returning to Home/Trending paints instantly
-// from here while a fresh request revalidates in the background.
+// Last rendered feed per mode. Coming back Home paints this immediately and
+// does NOT re-request it: the feed is only reloaded when the viewer asks for
+// it (logo / Home while already on Home) or when it is older than 30 minutes.
 const feedCache: Record<string, { at: number; feed: Feed; popular: boolean }> = {};
-const CACHE_TTL = 10 * 60_000;
+const CACHE_TTL = 30 * 60_000;
 const LOCAL_PAGE_SIZE = 40;
 
 export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
@@ -43,9 +44,19 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       setChipIdx(-1);
       setExhausted(false);
     }
-    setLoading(true);
     setError(null);
     setExhausted(false);
+    // Returning to a feed we loaded recently: show it as it was, untouched.
+    // `force` is bumped by a logo/Home click, which is the only other reason
+    // to go back to the network.
+    const cached = feedCache[mode];
+    if (force === 0 && cached && Date.now() - cached.at < CACHE_TTL) {
+      setFeed(cached.feed);
+      setPopular(cached.popular);
+      setLoading(false);
+      return () => { cancelled = true; };
+    }
+    setLoading(true);
     const params = chipIdx >= 0 ? feed?.chips[chipIdx]?.params || null : null;
     // Home and Trending go out together: a signed-out Home is usually empty
     // and the popular mix is the fallback, so racing them removes a whole
@@ -90,7 +101,9 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       .then((f) => {
         setFeed(f);
         setFeedVersion((v) => v + 1);
-        feedCache[mode] = { at: Date.now(), feed: f, popular };
+        // A category feed is not what Home shows on return, so it must not
+        // replace the cached unfiltered feed.
+        if (chipIdx === -1) feedCache[mode] = { at: Date.now(), feed: f, popular };
       })
       .catch((e) => setError(String(e?.message || e)))
       .finally(() => setLoading(false));
@@ -118,7 +131,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
         }
         const next = { ...feed, videos: [...feed.videos, ...fresh] };
         setFeed(next);
-        feedCache[mode] = { at: Date.now(), feed: next, popular };
+        if (chipIdx === -1) feedCache[mode] = { at: Date.now(), feed: next, popular };
         return;
       }
       const page = result as Feed;
@@ -137,11 +150,11 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
         local: false,
       };
       setFeed(next);
-      feedCache[mode] = { at: Date.now(), feed: next, popular };
+      if (chipIdx === -1) feedCache[mode] = { at: Date.now(), feed: next, popular };
       if (!nextToken) setExhausted(true);
     }).catch(() => setExhausted(true))
       .finally(() => setLoadingMore(false));
-  }, [feed, mode, loadingMore, exhausted, popular]);
+  }, [feed, mode, loadingMore, exhausted, popular, chipIdx]);
 
   const sentinelRef = useInfiniteScroll(loadMore, [
     feed?.videos.length || 0,
@@ -204,11 +217,6 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       {popular && mode === 'home' && (
         <div style={{ color: 'var(--text-dim)', padding: '2px 2px 12px' }}>
           Popular right now — signed-out Home is empty on YouTube, so this is the trending mix.
-        </div>
-      )}
-      {feed?.local && mode === 'home' && (
-        <div style={{ color: 'var(--text-dim)', padding: '2px 2px 12px' }}>
-          Recommended for you — built from your history and subscriptions. Reload Home for a fresh mix.
         </div>
       )}
       {!visible.length ? (
