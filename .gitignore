@@ -26,3 +26,6 @@ captures/
 *.keystore
 *.jks
 apps/android/app/keystore/
+
+# rust
+apps/desktop/rust/**/target/
