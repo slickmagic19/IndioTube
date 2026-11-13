@@ -15,6 +15,16 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::channel::{
+    parse_about_token, parse_channel_about, parse_channel_header, parse_channel_page,
+    parse_channel_playlists_page, parse_channel_tabs, ChannelAbout, ChannelPage,
+    ChannelPlaylistsPage, ChannelTab,
+};
+use crate::playlist::{parse_playlist, PlaylistPage};
+use crate::watch::{
+    parse_comments, parse_watch, parse_watch_continuation, CommentsPage, WatchContinuation, WatchInfo,
+};
+
 pub const UA_DESKTOP: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0";
 
@@ -98,7 +108,7 @@ pub fn runs_text(el: Option<&Value>) -> Option<String> {
     }
 }
 
-fn text_either(el: Option<&Value>) -> Option<String> {
+pub(crate) fn text_either(el: Option<&Value>) -> Option<String> {
     let el = el?;
     at_str(el, "simpleText").or_else(|| runs_text(Some(el)))
 }
@@ -205,7 +215,7 @@ pub fn build_search_params(filters: SearchFilters) -> Option<String> {
 
 // ---- badge + shape helpers ---------------------------------------------------
 
-fn has_members_badge(el: &Value, max_depth: usize) -> bool {
+pub(crate) fn has_members_badge(el: &Value, max_depth: usize) -> bool {
     let texts: Vec<String> = [
         ("metadataBadgeRenderer", "label"),
         ("thumbnailBadgeViewModel", "text"),
@@ -260,7 +270,7 @@ pub fn is_verified(nodes: &[&Value]) -> bool {
         .any(|n| re.is_match(&n.to_string()))
 }
 
-fn last_thumb_url(container: Option<&Value>) -> Option<String> {
+pub(crate) fn last_thumb_url(container: Option<&Value>) -> Option<String> {
     let thumbs = container?.get("thumbnails")?.as_array()?;
     thumbs
         .iter()
@@ -268,7 +278,7 @@ fn last_thumb_url(container: Option<&Value>) -> Option<String> {
         .find_map(|t| normalize_image_url(at_str(t, "url").as_deref()))
 }
 
-fn xth_first_url(container: Option<&Value>) -> Option<String> {
+pub(crate) fn xth_first_url(container: Option<&Value>) -> Option<String> {
     let Some(container) = container else { return None };
     let sources: Vec<Value> = find_all(container, "sources", 6, 4)
         .into_iter()
@@ -489,7 +499,9 @@ pub fn parse_lockup(lockup: &Value) -> Option<VideoItem> {
             return None;
         }
     }
-    let thumb = xth_first_url(thumb_container);
+    // Only the still image: the same container also holds moving-preview
+    // sources, and picking the last source overall yielded an animated webp.
+    let thumb = xth_first_url(thumb_container.and_then(|tc| at(tc, "image")));
 
     let mut duration_badge: Option<String> = None;
     let mut is_live = false;
@@ -510,7 +522,7 @@ pub fn parse_lockup(lockup: &Value) -> Option<VideoItem> {
 
     let mut members_only = has_members_badge(lockup, 10);
     let avatar_vm = at(meta, "image.decoratedAvatarViewModel");
-    let mut channel_avatar = xth_first_url(avatar_vm);
+    let mut channel_avatar = xth_first_url(avatar_vm.and_then(|a| at(a, "avatar")));
     let channel_id = at_str(
         avatar_vm.unwrap_or(&Value::Null),
         "rendererContext.commandContext.onTap.innertubeCommand.browseEndpoint.browseId",
@@ -654,7 +666,7 @@ fn feed_contents(root: &Value) -> Vec<Value> {
     out
 }
 
-fn feed_continuation(root: &Value) -> Option<String> {
+pub(crate) fn feed_continuation(root: &Value) -> Option<String> {
     for cont in find_all(root, "continuationItemRenderer", 14, 12) {
         if let Some(t) = extract_continuation(&cont) {
             return Some(t);
@@ -668,7 +680,7 @@ fn feed_continuation(root: &Value) -> Option<String> {
     None
 }
 
-fn continuation_action_items(root: &Value) -> Vec<Value> {
+pub(crate) fn continuation_action_items(root: &Value) -> Vec<Value> {
     fn add(el: &Value, out: &mut Vec<Value>) {
         if !el.is_object() {
             return;
@@ -1002,6 +1014,152 @@ impl<T: Transport> InnerTube<T> {
 
     pub fn invalidate(&mut self) {
         self.cache.clear();
+    }
+
+    // ---- watch ----
+
+    fn next_post(&self, body: Value) -> Result<Value, ClientError> {
+        self.post("next", &body)
+    }
+
+    pub fn watch(&self, video_id: &str) -> Result<WatchInfo, ClientError> {
+        let mut body = json!({ "context": self.context(), "videoId": video_id });
+        if let Some(v) = &self.config.visitor {
+            body["context"]["client"]["visitorData"] = json!(v);
+        }
+        Ok(parse_watch(&self.next_post(body)?, video_id))
+    }
+
+    pub fn watch_continuation(&self, token: &str) -> Result<WatchContinuation, ClientError> {
+        let body = json!({ "context": self.context(), "continuation": token });
+        Ok(parse_watch_continuation(&self.next_post(body)?))
+    }
+
+    pub fn comments(&self, token: &str) -> Result<CommentsPage, ClientError> {
+        let body = json!({ "context": self.context(), "continuation": token });
+        Ok(parse_comments(&self.next_post(body)?))
+    }
+
+    // ---- channel ----
+
+    fn cached_root(&mut self, key: &str, ttl: Duration, force: bool) -> Option<Value> {
+        if force {
+            self.cache.remove(key);
+        }
+        self.cache
+            .get(key)
+            .filter(|(at, _)| at.elapsed() < ttl)
+            .map(|(_, data)| data.clone())
+    }
+
+    fn store_root(&mut self, key: &str, root: &Value) {
+        self.cache
+            .insert(key.to_string(), (Instant::now(), root.clone()));
+    }
+
+    pub fn channel_videos(
+        &mut self,
+        channel_id: &str,
+        params: Option<&str>,
+        force: bool,
+    ) -> Result<ChannelPage, ClientError> {
+        const TTL: Duration = Duration::from_secs(600);
+        let key = format!("channel:{channel_id}:{}", params.unwrap_or(""));
+        let root = match self.cached_root(&key, TTL, force) {
+            Some(root) => root,
+            None => {
+                let fresh = self.browse(channel_id, params, None)?;
+                self.store_root(&key, &fresh);
+                fresh
+            }
+        };
+        Ok(parse_channel_page(&root, Some(channel_id)))
+    }
+
+    pub fn channel_continuation(&self, token: &str, channel_id: &str) -> Result<ChannelPage, ClientError> {
+        let root = self.browse("", None, Some(token))?;
+        Ok(parse_channel_page(&root, Some(channel_id)))
+    }
+
+    pub fn channel_tabs(&mut self, channel_id: &str, force: bool) -> Result<Vec<ChannelTab>, ClientError> {
+        const TTL: Duration = Duration::from_secs(1800);
+        let key = format!("channelTabs:{channel_id}");
+        let root = match self.cached_root(&key, TTL, force) {
+            Some(root) => root,
+            None => {
+                let fresh = self.browse(channel_id, None, None)?;
+                self.store_root(&key, &fresh);
+                fresh
+            }
+        };
+        Ok(parse_channel_tabs(&root))
+    }
+
+    pub fn channel_playlists_page(
+        &mut self,
+        channel_id: &str,
+        params: Option<&str>,
+        force: bool,
+    ) -> Result<ChannelPlaylistsPage, ClientError> {
+        const TTL: Duration = Duration::from_secs(1800);
+        let key = format!("channelPlaylistsPage:{channel_id}");
+        let root = match self.cached_root(&key, TTL, force) {
+            Some(root) => root,
+            None => {
+                let fresh = self.browse(channel_id, params, None)?;
+                self.store_root(&key, &fresh);
+                fresh
+            }
+        };
+        Ok(parse_channel_playlists_page(&root))
+    }
+
+    pub fn channel_playlists_continuation(
+        &self,
+        token: &str,
+    ) -> Result<ChannelPlaylistsPage, ClientError> {
+        Ok(parse_channel_playlists_page(&self.browse("", None, Some(token))?))
+    }
+
+    /// Resolves the About panel token from the channel page, then fetches it.
+    pub fn channel_about(
+        &mut self,
+        channel_id: &str,
+        token: Option<&str>,
+        force: bool,
+    ) -> Result<Option<ChannelAbout>, ClientError> {
+        const TTL: Duration = Duration::from_secs(1800);
+        let key = format!("channelAbout:{channel_id}");
+        if let Some(root) = self.cached_root(&key, TTL, force) {
+            return Ok(parse_channel_about(&root));
+        }
+        let about_token = match token {
+            Some(t) => Some(t.to_string()),
+            None => {
+                let page = self.browse(channel_id, Some(CHANNEL_TAB_VIDEOS), None)?;
+                let name = parse_channel_header(&page, Some(channel_id)).name;
+                parse_about_token(&page, &name)
+            }
+        };
+        let Some(about_token) = about_token else { return Ok(None) };
+        let root = self.browse("", None, Some(&about_token))?;
+        self.store_root(&key, &root);
+        Ok(parse_channel_about(&root))
+    }
+
+    // ---- playlists ----
+
+    pub fn playlist(&self, playlist_id: &str) -> Result<PlaylistPage, ClientError> {
+        let browse_id = if playlist_id.starts_with("VL") {
+            playlist_id.to_string()
+        } else {
+            format!("VL{playlist_id}")
+        };
+        Ok(parse_playlist(&self.browse(&browse_id, None, None)?))
+    }
+
+    pub fn playlist_continuation(&self, token: &str) -> Result<PlaylistPage, ClientError> {
+        Ok(parse_playlist(&self.browse("", None, Some(token))?))
     }
 }
 

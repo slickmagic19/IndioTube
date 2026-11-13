@@ -12,6 +12,9 @@
 
 pub mod downloads;
 pub mod innertube;
+pub mod channel;
+pub mod playlist;
+pub mod watch;
 pub mod quality;
 pub mod proxy;
 pub mod range;
@@ -20,6 +23,9 @@ pub use innertube::{
     build_search_params, default_config, parse_feed, parse_search, parse_video_renderer, ClientError, Config,
     Feed, InnerTube, SearchEntry, SearchFilters, SearchResults, Transport, VideoItem,
 };
+pub use watch::{parse_chapters, parse_comments, parse_watch, parse_watch_continuation, Chapter, Comment, CommentsPage, WatchContinuation, WatchInfo};
+pub use channel::{parse_channel_about, parse_channel_header, parse_channel_page, parse_channel_playlists_page, parse_channel_tabs, parse_playlist_lockup, Channel, ChannelAbout, ChannelLink, ChannelPage, ChannelPlaylistsPage, ChannelTab};
+pub use playlist::{parse_playlist, PlaylistPage};
 pub use proxy::{json3_to_vtt, ttml_to_vtt, Proxy, Request, Response, Upstream, UpstreamResponse};
 pub use downloads::{after_failure, parse_download_line, parse_size, AfterFailure, Progress, Status};
 pub use quality::{

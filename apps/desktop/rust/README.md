@@ -12,6 +12,9 @@ running app keeps working while the core grows.
 | `range` | `/r` in `electron/streams.js`, `DownloadTransfer.kt` | byte ranges for the media proxy and the segmented downloader, `Content-Range` validation, seeded resume plans |
 | `innertube` | `electron/inTube.js` | the InnerTube client: request contexts, protobuf search filters, visitor/API config handling, a TTL response cache, and the parsers for feed, search, `videoRenderer`, `lockupViewModel`, channel and playlist results |
 | `proxy` | `electron/streams.js` | the 127.0.0.1 media server: opaque CDN tokens, `/v` `/r` `/subs` `/file` routing, CORS preflight, three-attempt retry, a 96 MB / 24 MB-entry LRU of range responses, json3 and TTML captions converted to WebVTT, `Range` handling for local files |
+| `watch` | `parseWatch`, `parseWatchContinuation`, `parseChapters`, `parseComments` | the watch header (title, channel, views, likes, description), members-only detection from the playability reason, the Up next rail plus its token, chapters (deduped and sorted), and comments assembled from `frameworkUpdates` entities with reply tokens and the old `commentRenderer` fallback |
+| `channel` | `parseChannelHeader`, `parseChannelPage`, `parseChannelPlaylistsPage`, `parseChannelTabs`, `parseChannelAbout`, `parseAboutToken`, `parsePlaylistLockup` | channel header from `pageHeaderRenderer` or the legacy `c4TabbedHeaderRenderer`, videos with the header channel stamped onto them, the About panel and its token, tabs and the playlists grid |
+| `playlist` | `parsePlaylist` | playlist title/author/count from `playlistHeaderRenderer` or `pageHeaderViewModel`, items from `playlistVideoRenderer` or lockups, and both continuation shapes |
 
 ## Toolchain on this machine
 
@@ -52,5 +55,22 @@ cargo run --example parse_fixture -- \
   ../fixture-search.json search           # same items, Rust side
 ```
 
-A run on 2026-11-13 produced 19 search entries from both sides with identical
-ids, titles, channel ids, durations and verified flags (0 mismatches).
+`compare-parity.js` then diffs the two outputs (ignoring `null` vs missing keys
+and rounding numbers), for every mode `parity-check.js` captured:
+
+```bash
+node parity-check.js                      # writes fixture-*.json and js-*.json
+# for each mode: search, watch, comments, channel, playlists, playlist
+cargo run --example parse_fixture -- ../fixture-watch.json watch <videoId> \
+  > ../rust-watch.json
+node compare-parity.js search watch comments channel playlists playlist
+```
+
+A run on 2026-11-13 matched on all six modes against live YouTube responses: a
+search page, a watch page with its Up next rail and chapters, the comment
+threads behind that video, a channel page, that channel's playlists tab and a
+playlist header. That run caught one real bug — the lockup thumbnail took the
+last source of *any* `sources` array, which was an animated preview webp instead
+of the still image — which is fixed here. Playlist *items* were not exercised
+live: the continuation response came back empty, so only the header was
+compared; the item renderers are covered by unit tests.

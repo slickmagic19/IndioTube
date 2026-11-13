@@ -29,3 +29,10 @@ apps/android/app/keystore/
 
 # rust
 apps/desktop/rust/**/target/
+
+# rust parity-check fixtures
+apps/desktop/rust/fixture-*.json
+apps/desktop/rust/parity-*.txt
+apps/desktop/rust/parity-*.json
+apps/desktop/rust/js-*.json
+apps/desktop/rust/rust-*.json
