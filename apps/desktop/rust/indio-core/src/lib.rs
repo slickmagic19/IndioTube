@@ -11,9 +11,16 @@
 //! * [`range`] - byte ranges for the media proxy and the segmented downloader.
 
 pub mod downloads;
+pub mod innertube;
 pub mod quality;
+pub mod proxy;
 pub mod range;
 
+pub use innertube::{
+    build_search_params, default_config, parse_feed, parse_search, parse_video_renderer, ClientError, Config,
+    Feed, InnerTube, SearchEntry, SearchFilters, SearchResults, Transport, VideoItem,
+};
+pub use proxy::{json3_to_vtt, ttml_to_vtt, Proxy, Request, Response, Upstream, UpstreamResponse};
 pub use downloads::{after_failure, parse_download_line, parse_size, AfterFailure, Progress, Status};
 pub use quality::{
     build_qualities, nearest, resolve_auto_height, subtitle_vtt_url, AudioTrack, QualityLadder,
