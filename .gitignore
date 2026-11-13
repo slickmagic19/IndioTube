@@ -36,3 +36,5 @@ apps/desktop/rust/parity-*.txt
 apps/desktop/rust/parity-*.json
 apps/desktop/rust/js-*.json
 apps/desktop/rust/rust-*.json
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/

@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::range::ByteRange;
@@ -289,16 +289,28 @@ fn ttml_clock(value: &str) -> String {
 
 // ---- proxy -------------------------------------------------------------------
 
+struct CacheInner {
+    map: HashMap<String, CachedResponse>,
+    bytes: usize,
+}
+
+/// Shared through an `Arc` by the accept loop: each connection gets its own
+/// thread, so tokens and the range cache need interior mutability rather than
+/// `&mut self` (a single mutex around the whole proxy would serialise the
+/// video and audio streams and make playback stutter).
 pub struct Proxy<U: Upstream> {
     upstream: U,
     download_dir: PathBuf,
-    tokens: HashMap<String, TokenEntry>,
-    cache: HashMap<String, CachedResponse>,
-    cache_bytes: usize,
+    tokens: Mutex<HashMap<String, TokenEntry>>,
+    cache: Mutex<CacheInner>,
     cache_max_bytes: usize,
     cache_max_entry: usize,
     tokens_max: usize,
-    next_token: u64,
+    next_token: AtomicU64,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl<U: Upstream> Proxy<U> {
@@ -306,13 +318,15 @@ impl<U: Upstream> Proxy<U> {
         Self {
             upstream,
             download_dir: download_dir.into(),
-            tokens: HashMap::new(),
-            cache: HashMap::new(),
-            cache_bytes: 0,
+            tokens: Mutex::new(HashMap::new()),
+            cache: Mutex::new(CacheInner {
+                map: HashMap::new(),
+                bytes: 0,
+            }),
             cache_max_bytes: CACHE_MAX_BYTES,
             cache_max_entry: CACHE_MAX_ENTRY,
             tokens_max: TOKENS_MAX,
-            next_token: 1,
+            next_token: AtomicU64::new(1),
         }
     }
 
@@ -324,24 +338,23 @@ impl<U: Upstream> Proxy<U> {
     }
 
     /// Register a signed CDN URL and hand back an opaque token.
-    pub fn add_token(&mut self, url: &str, entry: TokenEntry) -> String {
-        let token = format!("{:016x}", self.next_token);
-        self.next_token += 1;
-        self.tokens.insert(
+    pub fn add_token(&self, url: &str, entry: TokenEntry) -> String {
+        let token = format!("{:016x}", self.next_token.fetch_add(1, Ordering::SeqCst));
+        let mut tokens = lock(&self.tokens);
+        tokens.insert(
             token.clone(),
             TokenEntry {
                 url: url.to_string(),
                 ..entry
             },
         );
-        while self.tokens.len() > self.tokens_max {
-            let oldest = self
-                .tokens
+        while tokens.len() > self.tokens_max {
+            let oldest = tokens
                 .iter()
                 .min_by_key(|(_, e)| e.at)
                 .map(|(k, _)| k.clone());
             if let Some(k) = oldest {
-                self.tokens.remove(&k);
+                tokens.remove(&k);
             } else {
                 break;
             }
@@ -349,35 +362,41 @@ impl<U: Upstream> Proxy<U> {
         token
     }
 
-    pub fn token(&self, token: &str) -> Option<&TokenEntry> {
-        self.tokens.get(token)
+    pub fn token(&self, token: &str) -> Option<TokenEntry> {
+        lock(&self.tokens).get(token).cloned()
+    }
+
+    pub fn token_count(&self) -> usize {
+        lock(&self.tokens).len()
     }
 
     pub fn cache_len(&self) -> usize {
-        self.cache.len()
+        lock(&self.cache).map.len()
     }
 
-    fn cache_get(&mut self, key: &str) -> Option<CachedResponse> {
-        let hit = self.cache.remove(key)?;
-        self.cache.insert(key.to_string(), hit.clone());
+    fn cache_get(&self, key: &str) -> Option<CachedResponse> {
+        let mut cache = lock(&self.cache);
+        let hit = cache.map.remove(key)?;
+        cache.map.insert(key.to_string(), hit.clone());
         Some(hit)
     }
 
-    fn cache_set(&mut self, key: String, entry: CachedResponse) {
+    fn cache_set(&self, key: String, entry: CachedResponse) {
         if entry.body.len() > self.cache_max_entry {
             return;
         }
-        if let Some(prev) = self.cache.remove(&key) {
-            self.cache_bytes = self.cache_bytes.saturating_sub(prev.body.len());
+        let mut cache = lock(&self.cache);
+        if let Some(prev) = cache.map.remove(&key) {
+            cache.bytes = cache.bytes.saturating_sub(prev.body.len());
         }
-        self.cache_bytes += entry.body.len();
-        self.cache.insert(key, entry);
-        while self.cache_bytes > self.cache_max_bytes && self.cache.len() > 1 {
-            let oldest = self.cache.keys().next().cloned();
+        cache.bytes += entry.body.len();
+        cache.map.insert(key, entry);
+        while cache.bytes > self.cache_max_bytes && cache.map.len() > 1 {
+            let oldest = cache.map.keys().next().cloned();
             match oldest {
                 Some(k) => {
-                    if let Some(gone) = self.cache.remove(&k) {
-                        self.cache_bytes = self.cache_bytes.saturating_sub(gone.body.len());
+                    if let Some(gone) = cache.map.remove(&k) {
+                        cache.bytes = cache.bytes.saturating_sub(gone.body.len());
                     }
                 }
                 None => break,
@@ -385,7 +404,7 @@ impl<U: Upstream> Proxy<U> {
         }
     }
 
-    pub fn handle(&mut self, req: &Request) -> Response {
+    pub fn handle(&self, req: &Request) -> Response {
         if req.method == "OPTIONS" {
             return Response::new(204, "")
                 .with("access-control-allow-methods", "GET, HEAD, OPTIONS")
@@ -423,11 +442,11 @@ impl<U: Upstream> Proxy<U> {
         }
     }
 
-    fn proxy_stream(&mut self, token: &str, range_header: Option<String>) -> Response {
-        let Some(entry) = self.tokens.get(token) else {
+    fn proxy_stream(&self, token: &str, range_header: Option<String>) -> Response {
+        let Some(entry) = self.token(token) else {
             return Response::new(404, "stale token");
         };
-        let url = entry.url.clone();
+        let url = entry.url;
         let key = format!("{}|{}", url, range_header.clone().unwrap_or_default());
         if let Some(hit) = self.cache_get(&key) {
             let mut res = Response {
@@ -493,11 +512,11 @@ impl<U: Upstream> Proxy<U> {
             .with("content-type", "text/plain")
     }
 
-    fn serve_subtitle(&mut self, token: &str) -> Response {
-        let Some(entry) = self.tokens.get(token) else {
+    fn serve_subtitle(&self, token: &str) -> Response {
+        let Some(entry) = self.token(token) else {
             return Response::new(404, "stale token");
         };
-        let url = entry.url.clone();
+        let url = entry.url;
         let mut attempt = 0;
         while attempt < 3 {
             match self.upstream.get(&url, None) {
@@ -639,7 +658,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Request> {
 
 /// Serve one connection, then close it. Kept separate from the accept loop so
 /// tests can drive a single request over a real socket.
-pub fn serve_connection<U: Upstream>(proxy: &mut Proxy<U>, mut stream: TcpStream) -> std::io::Result<()> {
+pub fn serve_connection<U: Upstream>(proxy: &Proxy<U>, mut stream: TcpStream) -> std::io::Result<()> {
     let req = match read_request(&stream) {
         Ok(r) => r,
         Err(_) => return Ok(()),
@@ -664,16 +683,22 @@ pub fn serve_connection<U: Upstream>(proxy: &mut Proxy<U>, mut stream: TcpStream
     Ok(())
 }
 
-/// Blocking accept loop. `stop` lets the Tauri shell shut it down.
-pub fn serve<U: Upstream>(proxy: Arc<std::sync::Mutex<Proxy<U>>>, listener: TcpListener, stop: Arc<AtomicBool>) {
+/// Blocking accept loop, one thread per connection so a long video range does
+/// not hold up the audio stream. `stop` lets the shell shut it down.
+pub fn serve<U: Upstream + Send + Sync + 'static>(
+    proxy: Arc<Proxy<U>>,
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+) {
     for incoming in listener.incoming() {
         if stop.load(Ordering::SeqCst) {
             break;
         }
         let Ok(stream) = incoming else { continue };
-        if let Ok(mut guard) = proxy.lock() {
-            let _ = serve_connection(&mut guard, stream);
-        }
+        let proxy = Arc::clone(&proxy);
+        std::thread::spawn(move || {
+            let _ = serve_connection(&proxy, stream);
+        });
     }
 }
 
@@ -754,7 +779,7 @@ mod tests {
     #[test]
     fn options_preflight_answers_without_touching_upstream() {
         let upstream = FakeUpstream::new(b"", "video/mp4");
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let mut req = Request::get("/v?t=x");
         req.method = "OPTIONS".to_string();
         let res = proxy.handle(&req);
@@ -767,7 +792,7 @@ mod tests {
     #[test]
     fn stale_tokens_are_404() {
         let upstream = FakeUpstream::new(b"", "video/mp4");
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         assert_eq!(proxy.handle(&Request::get("/v?t=missing")).status, 404);
         assert_eq!(proxy.handle(&Request::get("/r?t=missing&s=0&e=9")).status, 404);
         assert_eq!(proxy.handle(&Request::get("/subs?t=missing")).status, 404);
@@ -776,7 +801,7 @@ mod tests {
     #[test]
     fn range_requests_go_through_the_path_query_and_are_cached() {
         let upstream = FakeUpstream::new(b"0123456789", "video/mp4");
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/media", entry());
         let req = Request::get(&format!("/r?t={token}&s=0&e=9"));
 
@@ -800,7 +825,7 @@ mod tests {
     #[test]
     fn the_v_route_forwards_the_players_range_header() {
         let upstream = FakeUpstream::new(b"0123456789", "video/mp4");
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/media", entry());
         let mut req = Request::get(&format!("/v?t={token}"));
         req.range_header = Some("bytes=2-5".to_string());
@@ -817,7 +842,7 @@ mod tests {
     fn retries_a_5xx_three_times_then_reports_502_with_cors() {
         let mut upstream = FakeUpstream::new(b"", "video/mp4");
         upstream.statuses = vec![503, 503, 503];
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/media", entry());
         let res = proxy.handle(&Request::get(&format!("/v?t={token}")));
         assert_eq!(res.status, 502);
@@ -829,7 +854,7 @@ mod tests {
     fn a_failing_attempt_is_retried_and_then_succeeds() {
         let mut upstream = FakeUpstream::new(b"payload", "video/mp4");
         upstream.statuses = vec![500];
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/media", entry());
         let res = proxy.handle(&Request::get(&format!("/v?t={token}")));
         assert_eq!(res.status, 200);
@@ -845,7 +870,7 @@ mod tests {
             {"tStartMs":2000,"dDurationMs":1000,"segs":[{"utf8":"second line"}]}
         ]}"#;
         let upstream = FakeUpstream::new(json3.as_bytes(), "application/json");
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/cap", entry());
         let res = proxy.handle(&Request::get(&format!("/subs?t={token}")));
         assert_eq!(res.status, 200);
@@ -858,7 +883,7 @@ mod tests {
     #[test]
     fn webvtt_passes_through_and_ttml_is_converted() {
         let upstream = FakeUpstream::new(b"WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\nhi", "text/vtt");
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/cap", entry());
         let res = proxy.handle(&Request::get(&format!("/subs?t={token}")));
         assert!(String::from_utf8(res.body).unwrap().starts_with("WEBVTT"));
@@ -879,7 +904,7 @@ mod tests {
         std::fs::write(&outside, b"nope").unwrap();
 
         let upstream = FakeUpstream::new(b"", "video/mp4");
-        let mut proxy = Proxy::new(upstream, &dir);
+        let proxy = Proxy::new(upstream, &dir);
 
         let ok = proxy.handle(&Request::get(&format!(
             "/file?p={}",
@@ -932,18 +957,18 @@ mod tests {
     #[test]
     fn tokens_are_bounded() {
         let upstream = FakeUpstream::new(b"", "video/mp4");
-        let mut proxy = Proxy::new(upstream, ".").with_limits(CACHE_MAX_BYTES, CACHE_MAX_ENTRY, 2);
+        let proxy = Proxy::new(upstream, ".").with_limits(CACHE_MAX_BYTES, CACHE_MAX_ENTRY, 2);
         let a = proxy.add_token("u1", entry());
         let _b = proxy.add_token("u2", entry());
         let _c = proxy.add_token("u3", entry());
         assert!(proxy.token(&a).is_none(), "the oldest token is evicted");
-        assert_eq!(proxy.tokens.len(), 2);
+        assert_eq!(proxy.token_count(), 2);
     }
 
     #[test]
     fn serves_a_real_http_request_over_a_socket() {
         let upstream = FakeUpstream::new(b"0123456789", "video/mp4");
-        let mut proxy = Proxy::new(upstream, ".");
+        let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/media", entry());
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -951,7 +976,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             for incoming in listener.incoming().take(1) {
                 let stream = incoming.unwrap();
-                serve_connection(&mut proxy, stream).unwrap();
+                serve_connection(&proxy, stream).unwrap();
             }
         });
 

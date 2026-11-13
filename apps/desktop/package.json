@@ -11,7 +11,9 @@
     "check": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "dist:portable": "node ../../scripts/fetch-ytdlp.js && npm run build && electron-builder --win portable"
+    "dist:portable": "node ../../scripts/fetch-ytdlp.js && npm run build && electron-builder --win portable",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "devDependencies": {
     "@types/qrcode": "^1.5.5",
@@ -24,10 +26,12 @@
     "react-dom": "^18.3.1",
     "typescript": "^5.5.0",
     "vite": "^5.4.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "@tauri-apps/cli": "^2"
   },
   "dependencies": {
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "@tauri-apps/api": "^2"
   },
   "build": {
     "appId": "com.indiotube.desktop",
