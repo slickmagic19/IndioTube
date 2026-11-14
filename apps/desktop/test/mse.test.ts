@@ -1,7 +1,16 @@
 // The MSE player is driven entirely by the fragmented-MP4 index, so these pin
 // the byte-offset maths against a hand-built box layout.
 import { describe, expect, it } from 'vitest';
-import { canUseMse, mimeForCodec, parseTrackIndex, readBoxes, segmentIndexAt } from '../src/player/mse';
+import {
+  BUFFER_AHEAD_SECONDS,
+  BUFFER_BEHIND_SECONDS,
+  canUseMse,
+  evictionCutoff,
+  mimeForCodec,
+  parseTrackIndex,
+  readBoxes,
+  segmentIndexAt,
+} from '../src/player/mse';
 
 function box(type: string, payload: number): Uint8Array {
   const b = new Uint8Array(8 + payload);
@@ -78,6 +87,21 @@ describe('fragmented MP4 index', () => {
     let o = 0;
     for (const p of parts) { out.set(p, o); o += p.length; }
     expect(parseTrackIndex(out)).toBeNull();
+  });
+});
+
+describe('SourceBuffer memory policy', () => {
+  it('keeps half a minute on each side of the playhead, like YouTube', () => {
+    // The old 40 s ahead / 90 s behind held several times more decoded media.
+    expect(BUFFER_AHEAD_SECONDS).toBe(30);
+    expect(BUFFER_BEHIND_SECONDS).toBe(30);
+  });
+
+  it('only evicts once there is more than the retained window behind', () => {
+    expect(evictionCutoff(10)).toBeNull();
+    expect(evictionCutoff(BUFFER_BEHIND_SECONDS)).toBe(0);
+    expect(evictionCutoff(BUFFER_BEHIND_SECONDS + 12.5)).toBeCloseTo(12.5, 6);
+    expect(evictionCutoff(600)).toBeCloseTo(570, 6);
   });
 });
 

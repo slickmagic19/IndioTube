@@ -20,9 +20,18 @@ use std::time::{Duration, Instant};
 
 use crate::range::ByteRange;
 
-pub const CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
-pub const CACHE_MAX_ENTRY: usize = 24 * 1024 * 1024;
+// The range cache exists to absorb the player's back-and-forth around a seek,
+// not to archive the video: 30 s of a 4K stream is only a handful of
+// megabytes. Holding 96 MB of entries kept every byte of several videos alive
+// at once, which is exactly the memory the cache was supposed to save.
+pub const CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub const CACHE_MAX_ENTRY: usize = 8 * 1024 * 1024;
 pub const TOKENS_MAX: usize = 400;
+
+/// A direct `/v` source must never make the CDN send a whole file in one
+/// response. Eight megabytes is several seconds of 4K video and the largest
+/// body the cache will accept.
+pub const MAX_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenEntry {
@@ -39,7 +48,9 @@ pub struct CachedResponse {
     pub status: u16,
     pub content_type: String,
     pub content_range: Option<String>,
-    pub body: Vec<u8>,
+    /// Shared with the response being written. Serving a cache hit used to
+    /// clone the whole body, doubling the bytes held for every seek.
+    pub body: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,7 +165,7 @@ pub struct FileBody {
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    pub body: Arc<Vec<u8>>,
     pub file: Option<FileBody>,
 }
 
@@ -163,7 +174,7 @@ impl Response {
         Self {
             status,
             headers: cors(),
-            body: body.as_bytes().to_vec(),
+            body: Arc::new(body.as_bytes().to_vec()),
             file: None,
         }
     }
@@ -451,10 +462,14 @@ impl<U: Upstream> Proxy<U> {
                 };
                 self.proxy_stream(&token, Some(range.header()))
             }
-            // `/v` forwards the player's own Range header untouched, the same
-            // way the JavaScript proxy does for a direct <video> source.
+            // `/v` serves a direct <video> source. The player's Range header is
+            // honoured, but capped to one chunk: an open-ended `bytes=0-` used
+            // to make the CDN stream the entire file into memory before the
+            // first frame, which is what spiked RAM on every video open.
             "/v" => match req.param("t") {
-                Some(token) => self.proxy_stream(&token, req.range_header.clone()),
+                Some(token) => {
+                    self.proxy_stream(&token, Some(clamp_chunk_range(req.range_header.as_deref())))
+                }
                 None => Response::new(404, "stale token"),
             },
             "/subs" => match req.param("t") {
@@ -498,10 +513,13 @@ impl<U: Upstream> Proxy<U> {
         while attempt < 3 {
             match self.upstream.get(&url, range_header.as_deref()) {
                 Ok(up) if up.status < 500 => {
+                    // One allocation, shared by the response and the cache. A
+                    // full body clone here doubled every uncached range.
+                    let body = Arc::new(up.body);
                     let mut res = Response {
                         status: up.status,
                         headers: cors(),
-                        body: up.body.clone(),
+                        body: Arc::clone(&body),
                         file: None,
                     };
                     res = res
@@ -519,7 +537,7 @@ impl<U: Upstream> Proxy<U> {
                                 status: up.status,
                                 content_type: up.content_type,
                                 content_range: up.content_range,
-                                body: up.body,
+                                body,
                             },
                         );
                     }
@@ -564,7 +582,7 @@ impl<U: Upstream> Proxy<U> {
                         Some(vtt) => Response {
                             status: 200,
                             headers: cors(),
-                            body: vtt.into_bytes(),
+                            body: Arc::new(vtt.into_bytes()),
                             file: None,
                         }
                         .with("content-type", &up.content_type)
@@ -621,7 +639,7 @@ impl<U: Upstream> Proxy<U> {
         let mut res = Response {
             status,
             headers: cors(),
-            body: Vec::new(),
+            body: Arc::new(Vec::new()),
             file: Some(FileBody {
                 path: resolved.clone(),
                 start,
@@ -640,6 +658,54 @@ impl<U: Upstream> Proxy<U> {
         }
         res
     }
+}
+
+/// Cap a player Range header to at most [`MAX_CHUNK_BYTES`].
+///
+/// Direct `/v` playback talks to the CDN through this proxy, so an
+/// open-ended request (or no header at all, where the player means "the whole
+/// file") would make `ureq` buffer gigabytes before writing the first byte.
+/// A missing or unrecognised header becomes the first chunk, which is what the
+/// media element needs to start anyway.
+pub fn clamp_chunk_range(header: Option<&str>) -> String {
+    let first = format!("bytes=0-{}", MAX_CHUNK_BYTES - 1);
+    let Some(header) = header else { return first };
+    // Single, byte, no suffix ranges: the only form a media element emits.
+    let Some(caps) = regex::Regex::new(r"^\s*bytes=(\d*)-(\d*)\s*$")
+        .unwrap()
+        .captures(header)
+    else {
+        return first;
+    };
+    let start_raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+    let end_raw = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+    // `bytes=-N`: the last N bytes. It is already bounded by the file, but a
+    // silly N would still be the whole file, so cap it like everything else.
+    if start_raw.is_empty() && !end_raw.is_empty() {
+        return match end_raw.parse::<u64>() {
+            Ok(n) if n > 0 => format!("bytes=-{}", n.min(MAX_CHUNK_BYTES)),
+            _ => first,
+        };
+    }
+    let start: u64 = match start_raw {
+        "" => 0,
+        value => match value.parse() {
+            Ok(value) => value,
+            Err(_) => return first,
+        },
+    };
+    let last = start.saturating_add(MAX_CHUNK_BYTES - 1);
+    let end: u64 = match end_raw {
+        "" => last,
+        value => match value.parse::<u64>() {
+            Ok(value) => value.min(last),
+            Err(_) => last,
+        },
+    };
+    if end < start {
+        return first;
+    }
+    format!("bytes={start}-{end}")
 }
 
 /// `bytes=start-end` against a file of `total` bytes. `Ok(None)` means "the
@@ -703,7 +769,7 @@ pub fn serve_connection<U: Upstream>(proxy: &Proxy<U>, mut stream: TcpStream) ->
     if let Some(file) = &res.file {
         copy_file_range(&mut stream, file)?;
     } else {
-        stream.write_all(&res.body)?;
+        stream.write_all(res.body.as_slice())?;
     }
     stream.flush()?;
     Ok(())
@@ -875,7 +941,7 @@ mod tests {
         assert_eq!(first.status, 206);
         assert_eq!(first.header("access-control-allow-origin"), Some("*"));
         assert_eq!(first.header("accept-ranges"), Some("bytes"));
-        assert_eq!(first.body, b"0123456789");
+        assert_eq!(first.body.as_slice(), b"0123456789");
         assert_eq!(
             proxy.upstream.calls.borrow()[0].1.as_deref(),
             Some("bytes=0-9")
@@ -883,7 +949,7 @@ mod tests {
 
         // The same window again is served from memory: no second upstream call.
         let second = proxy.handle(&req);
-        assert_eq!(second.body, b"0123456789");
+        assert_eq!(second.body.as_slice(), b"0123456789");
         assert_eq!(proxy.upstream.calls.borrow().len(), 1);
         assert_eq!(proxy.cache_len(), 1);
     }
@@ -923,9 +989,60 @@ mod tests {
         let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/media", entry());
         let res = proxy.handle(&Request::get(&format!("/v?t={token}")));
-        assert_eq!(res.status, 200);
-        assert_eq!(res.body, b"payload");
+        // `/v` always asks for a byte window, so the retry's success is a 206.
+        assert_eq!(res.status, 206);
+        assert_eq!(res.body.as_slice(), b"payload");
         assert_eq!(proxy.upstream.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn chunk_ranges_are_capped_and_default_to_the_first_chunk() {
+        let first = format!("bytes=0-{}", MAX_CHUNK_BYTES - 1);
+        assert_eq!(clamp_chunk_range(None), first);
+        assert_eq!(clamp_chunk_range(Some("bytes=0-")), first);
+        assert_eq!(clamp_chunk_range(Some("bytes=0-999")), "bytes=0-999");
+        assert_eq!(
+            clamp_chunk_range(Some("bytes=100-")),
+            format!("bytes=100-{}", 100 + MAX_CHUNK_BYTES - 1)
+        );
+        // A player asking for the rest of the file only gets one chunk.
+        assert_eq!(clamp_chunk_range(Some("bytes=0-999999999")), first);
+        // A suffix range keeps asking for the tail, within the chunk cap.
+        assert_eq!(clamp_chunk_range(Some("bytes=-500")), "bytes=-500");
+        assert_eq!(
+            clamp_chunk_range(Some("bytes=-999999999")),
+            format!("bytes=-{}", MAX_CHUNK_BYTES)
+        );
+        // Anything that is not a byte range falls back to the start.
+        assert_eq!(clamp_chunk_range(Some("nonsense")), first);
+        assert_eq!(clamp_chunk_range(Some("bytes=5-2")), first);
+    }
+
+    #[test]
+    fn a_direct_source_without_a_range_downloads_one_chunk_at_a_time() {
+        let upstream = FakeUpstream::new(b"0123456789", "video/mp4");
+        let proxy = Proxy::new(upstream, ".");
+        let token = proxy.add_token("https://cdn.example/media", entry());
+        let res = proxy.handle(&Request::get(&format!("/v?t={token}")));
+        let expected = format!("bytes=0-{}", MAX_CHUNK_BYTES - 1);
+        assert_eq!(
+            proxy.upstream.calls.borrow()[0].1.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(res.status, 206);
+    }
+
+    #[test]
+    fn cache_hits_share_the_cached_body() {
+        let upstream = FakeUpstream::new(b"0123456789", "video/mp4");
+        let proxy = Proxy::new(upstream, ".");
+        let token = proxy.add_token("https://cdn.example/media", entry());
+        let req = Request::get(&format!("/r?t={token}&s=0&e=9"));
+        let first = proxy.handle(&req);
+        let second = proxy.handle(&req);
+        // The second request must not allocate another copy of the bytes.
+        assert!(Arc::ptr_eq(&first.body, &second.body));
+        assert_eq!(proxy.cache_len(), 1);
     }
 
     #[test]
@@ -940,7 +1057,7 @@ mod tests {
         let token = proxy.add_token("https://cdn.example/cap", entry());
         let res = proxy.handle(&Request::get(&format!("/subs?t={token}")));
         assert_eq!(res.status, 200);
-        let body = String::from_utf8(res.body.clone()).unwrap();
+        let body = String::from_utf8(res.body.as_ref().clone()).unwrap();
         assert!(body.starts_with("WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.500\nhello world"));
         assert!(body.contains("00:00:02.000 --> 00:00:03.000\nsecond line"));
         assert_eq!(res.header("cache-control"), Some("no-store"));
@@ -952,7 +1069,7 @@ mod tests {
         let proxy = Proxy::new(upstream, ".");
         let token = proxy.add_token("https://cdn.example/cap", entry());
         let res = proxy.handle(&Request::get(&format!("/subs?t={token}")));
-        assert!(String::from_utf8(res.body).unwrap().starts_with("WEBVTT"));
+        assert!(String::from_utf8(res.body.as_ref().clone()).unwrap().starts_with("WEBVTT"));
 
         let ttml = r#"<tt><body><div><p begin="0:00:01.500" end="0:00:03.000">Line<br/>two</p></div></body></tt>"#;
         let out = ttml_to_vtt(ttml).unwrap();

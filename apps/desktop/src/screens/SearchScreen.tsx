@@ -9,6 +9,7 @@ import { ListSkeleton } from '../components/Skeletons';
 import { SettingsIcon } from '../components/icons';
 import { useApp } from '../store';
 import { formatDuration } from '../types';
+import { withSearchRetry } from '../searchLogic';
 
 interface Filters { type?: number | null; sort?: number | null; uploadDate?: number | null; duration?: number | null }
 
@@ -27,21 +28,31 @@ export function SearchScreen() {
   const [filters, setFilters] = useState<Filters>({});
   const [filterAnchor, setFilterAnchor] = useState<DOMRect | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const sentinel = useRef<HTMLDivElement>(null);
   const activeFilters = Object.values(filters).filter((v) => v != null).length;
 
   useEffect(() => {
-    if (!query) { setResults(null); return; }
+    if (!query) {
+      setResults(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError(null);
+    // A failed query must never leave the previous query's rows on screen:
+    // that is what made a flaky request look like "search returned nothing"
+    // or, worse, the wrong results.
+    setResults(null);
     op('noteSearch', query).catch(() => undefined);
-    window.indio.search(query, filters as any)
+    withSearchRetry(() => window.indio.search(query, filters as any))
       .then((r) => { if (!cancelled) setResults(r); })
       .catch((e) => { if (!cancelled) setError(String(e?.message || e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [query, filters]);
+  }, [query, filters, attempt]);
 
   useEffect(() => {
     const el = sentinel.current;
@@ -49,7 +60,7 @@ export function SearchScreen() {
     const io = new IntersectionObserver((entries) => {
       if (!entries[0].isIntersecting || loadingMore) return;
       setLoadingMore(true);
-      window.indio.searchCont(results.continuation!)
+      withSearchRetry(() => window.indio.searchCont(results.continuation!))
         .then((r) => setResults((cur) => cur && ({
           entries: [...cur.entries, ...r.entries],
           continuation: r.continuation === cur.continuation ? null : r.continuation,
@@ -72,7 +83,13 @@ export function SearchScreen() {
   }
   if (loading) return <ListSkeleton count={6} />;
   if (error && !results) {
-    return <div className="state"><div>Search failed: {error}</div><button onClick={() => setFilters({ ...filters })}>Retry</button></div>;
+    return (
+      <div className="state">
+        <div>Search failed: {error}</div>
+        <div>Check your connection, then try again.</div>
+        <button onClick={() => setAttempt((n) => n + 1)}>Retry</button>
+      </div>
+    );
   }
 
   const entries = results?.entries || [];
@@ -131,9 +148,22 @@ function ResultRow({ entry }: { entry: SearchEntry }) {
         <div className="grow">
           <div className="t" style={{ whiteSpace: 'normal', fontSize: 15, fontWeight: 600 }}>{v.title}</div>
           <div className="s">{[v.viewsText, v.publishedText].filter(Boolean).join(' • ')}</div>
-          <div className="s" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}
-            onClick={(e) => { e.stopPropagation(); if (v.channelId) navigate(`/channel/${v.channelId}`); }}>
-            <Avatar name={v.channelName} src={v.channelAvatar} size={24} /> {v.channelName}
+          <div className="s" style={{ display: 'flex', alignItems: 'center', marginTop: 6 }}>
+            <span
+              className="channel-link"
+              role="link"
+              tabIndex={0}
+              title={v.channelName ? `Open ${v.channelName}` : undefined}
+              onClick={(e) => { e.stopPropagation(); if (v.channelId) navigate(`/channel/${v.channelId}`); }}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.stopPropagation();
+                e.preventDefault();
+                if (v.channelId) navigate(`/channel/${v.channelId}`);
+              }}
+            >
+              <Avatar name={v.channelName} src={v.channelAvatar} size={24} /> {v.channelName}
+            </span>
           </div>
           <div className="s" style={{ marginTop: 6 }}>{(v as any).descriptionSnippet || ''}</div>
         </div>

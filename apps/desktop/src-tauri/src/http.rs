@@ -46,6 +46,12 @@ impl Transport for UreqTransport {
     }
 }
 
+/// A defensive ceiling on one upstream body. The proxy only asks for 8 MB
+/// chunks and 2 MB stream headers, so anything near this means the CDN ignored
+/// the Range; reading it into memory is exactly the spike this proxy exists to
+/// avoid. The one-byte slack lets the caller tell "at the limit" from "over".
+const MAX_UPSTREAM_BODY: u64 = 16 * 1024 * 1024;
+
 /// The player asks for byte windows; the CDN answers 206 with a Content-Range.
 pub struct UreqUpstream {
     agent: ureq::Agent,
@@ -95,8 +101,15 @@ impl Upstream for UreqUpstream {
         let content_range = resp.header("content-range").map(str::to_string);
         let mut body = Vec::new();
         resp.into_reader()
+            .take(MAX_UPSTREAM_BODY + 1)
             .read_to_end(&mut body)
             .map_err(|e| format!("could not read upstream body: {e}"))?;
+        if body.len() as u64 > MAX_UPSTREAM_BODY {
+            return Err(format!(
+                "upstream sent more than {} bytes for one range",
+                MAX_UPSTREAM_BODY
+            ));
+        }
         Ok(UpstreamResponse {
             status,
             content_type,

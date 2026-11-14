@@ -535,9 +535,11 @@ pub async fn warm_streams(
     Ok(json!({ "queued": queued }))
 }
 
-/// Rest between background lookups, so a page of eight warm-ups is spread over
-/// a minute instead of arriving as eight CPUs' worth of Python.
-const WARM_GAP: Duration = Duration::from_millis(1_200);
+/// Rest between background lookups. Each yt-dlp run already takes seconds, so a
+/// short gap is enough to keep the CPU free for the lookup the viewer is
+/// actually waiting on; the old 1.2 s pause just delayed the stream they were
+/// about to click. The page only warms two videos now (see warmStreams.ts).
+const WARM_GAP: Duration = Duration::from_millis(500);
 
 fn drain_warm(app: tauri::AppHandle) {
     let state = app.state::<AppState>();

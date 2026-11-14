@@ -12,9 +12,13 @@
 //!
 //! Optional: `INDIOTUBE_SMOKE_MEDIA=1` (probe the video/audio clocks),
 //! `INDIOTUBE_SMOKE_WINDOW=1` (prove the mini-player and fullscreen commands),
+//! `INDIOTUBE_SMOKE_UI=1` (fade the controls, wake them again, and open Stats
+//! for nerds through the real menu),
 //! `INDIOTUBE_SMOKE_CLICK=1` (click the first card once the feed appears, which
-//! is how the load timings are read), `INDIOTUBE_SMOKE_WAIT=<ms>` (how long to
-//! wait before reporting).
+//! is how the load timings are read), `INDIOTUBE_SMOKE_NAV=1` (drive the top
+//! bar's Back/Forward buttons), `INDIOTUBE_SMOKE_SEARCH_CLICK=1` (click the
+//! empty side of a search row and its channel line, and check where each one
+//! went), `INDIOTUBE_SMOKE_WAIT=<ms>` (how long to wait before reporting).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -52,7 +56,7 @@ pub fn install(app: AppHandle) {
     let _ = SMOKE.set(Arc::clone(&smoke));
     println!("[smoke] armed; waiting for the renderer's report");
     let watch_app = app.clone();
-    let budget_ms = env_number("INDIOTUBE_SMOKE_WAIT", 8_000) + 45_000;
+    let budget_ms = env_number("INDIOTUBE_SMOKE_WAIT", 8_000) + 75_000;
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(budget_ms));
         if !smoke.reported.load(Ordering::SeqCst) {
@@ -70,7 +74,10 @@ pub fn smoke_config() -> Value {
         "route": std::env::var("INDIOTUBE_SMOKE_ROUTE").unwrap_or_default(),
         "media": std::env::var("INDIOTUBE_SMOKE_MEDIA").as_deref() == Ok("1"),
         "window": std::env::var("INDIOTUBE_SMOKE_WINDOW").as_deref() == Ok("1"),
+        "ui": std::env::var("INDIOTUBE_SMOKE_UI").as_deref() == Ok("1"),
         "click": std::env::var("INDIOTUBE_SMOKE_CLICK").as_deref() == Ok("1"),
+        "nav": std::env::var("INDIOTUBE_SMOKE_NAV").as_deref() == Ok("1"),
+        "searchClick": std::env::var("INDIOTUBE_SMOKE_SEARCH_CLICK").as_deref() == Ok("1"),
         "waitMs": env_number("INDIOTUBE_SMOKE_WAIT", 8_000),
     });
     println!("[smoke] config -> {config}");

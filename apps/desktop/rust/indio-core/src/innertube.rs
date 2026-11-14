@@ -873,6 +873,37 @@ impl std::fmt::Display for ClientError {
 }
 impl std::error::Error for ClientError {}
 
+/// How many times one search request is attempted before the UI sees an error.
+const SEARCH_ATTEMPTS: u32 = 3;
+
+/// Backoff before retry N is `SEARCH_RETRY_BASE * N`; short enough that a
+/// failed search still feels immediate, long enough to outlast a blip.
+const SEARCH_RETRY_BASE: Duration = Duration::from_millis(150);
+
+/// Run a fallible request until it succeeds, at most `attempts` times, calling
+/// `backoff` with the zero-based number of the attempt that failed. The last
+/// error is returned when every attempt fails.
+pub fn with_retry<T, E>(
+    attempts: u32,
+    mut call: impl FnMut() -> Result<T, E>,
+    mut backoff: impl FnMut(u32),
+) -> Result<T, E> {
+    let attempts = attempts.max(1);
+    let mut last = None;
+    for attempt in 0..attempts {
+        match call() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last = Some(error);
+                if attempt + 1 < attempts {
+                    backoff(attempt);
+                }
+            }
+        }
+    }
+    Err(last.expect("with_retry runs at least one attempt"))
+}
+
 pub struct InnerTube<T: Transport> {
     transport: T,
     config: Config,
@@ -969,12 +1000,22 @@ impl<T: Transport> InnerTube<T> {
         if let Some(p) = params {
             body["params"] = json!(p);
         }
-        Ok(parse_search(&self.post("search", &body)?))
+        let root = with_retry(
+            SEARCH_ATTEMPTS,
+            || self.post("search", &body),
+            |attempt| std::thread::sleep(SEARCH_RETRY_BASE * (attempt + 1)),
+        )?;
+        Ok(parse_search(&root))
     }
 
     pub fn search_continuation(&self, token: &str) -> Result<SearchResults, ClientError> {
         let body = json!({ "context": self.context(), "continuation": token });
-        Ok(parse_search(&self.post("search", &body)?))
+        let root = with_retry(
+            SEARCH_ATTEMPTS,
+            || self.post("search", &body),
+            |attempt| std::thread::sleep(SEARCH_RETRY_BASE * (attempt + 1)),
+        )?;
+        Ok(parse_search(&root))
     }
 
     /// Cached home feed: ten minutes, the same TTL as the JavaScript side.
@@ -1409,5 +1450,112 @@ mod tests {
         let cfg = default_config((2026, 1, 5));
         assert_eq!(cfg.version, "2.20260105.00.00");
         assert!(cfg.key.starts_with("AIza"));
+    }
+
+    #[test]
+    fn with_retry_stops_at_the_first_success_and_surfaces_the_last_error() {
+        let calls = RefCell::new(0);
+        let ok = with_retry(
+            3,
+            || {
+                *calls.borrow_mut() += 1;
+                if *calls.borrow() < 2 { Err("blip") } else { Ok("page") }
+            },
+            |_| {},
+        );
+        assert_eq!(ok, Ok("page"));
+        assert_eq!(*calls.borrow(), 2);
+
+        let failing = RefCell::new(0);
+        let error = with_retry::<(), _>(
+            3,
+            || {
+                *failing.borrow_mut() += 1;
+                Err(format!("attempt {}", *failing.borrow()))
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error, "attempt 3");
+        assert_eq!(*failing.borrow(), 3);
+    }
+
+    fn search_response() -> String {
+        json!({
+            "contents": { "twoColumnSearchResultsRenderer": { "primaryContents": { "sectionListRenderer": { "contents": [
+                { "itemSectionRenderer": { "contents": [ { "videoRenderer": renderer(json!({})) } ] } }
+            ] } } } }
+        })
+        .to_string()
+    }
+
+    /// Answers with an error for the first `failures` posts, then a search page.
+    struct FlakyTransport {
+        calls: RefCell<u32>,
+        failures: u32,
+        response: String,
+    }
+
+    impl Transport for FlakyTransport {
+        fn post(&self, _url: &str, _headers: &[(String, String)], _body: &str) -> Result<String, String> {
+            let mut calls = self.calls.borrow_mut();
+            *calls += 1;
+            if *calls <= self.failures {
+                Err(format!("transient failure {}", *calls))
+            } else {
+                Ok(self.response.clone())
+            }
+        }
+    }
+
+    #[test]
+    fn a_transient_search_failure_is_retried_and_succeeds() {
+        let tube = InnerTube::new(
+            FlakyTransport {
+                calls: RefCell::new(0),
+                failures: 1,
+                response: search_response(),
+            },
+            default_config((2026, 11, 14)),
+            "en",
+            "US",
+        );
+        let results = tube.raw_search("cats", None).unwrap();
+        assert_eq!(results.entries.len(), 1);
+        assert_eq!(*tube.transport.calls.borrow(), 2);
+    }
+
+    #[test]
+    fn search_reports_the_error_after_three_failed_attempts() {
+        let tube = InnerTube::new(
+            FlakyTransport {
+                calls: RefCell::new(0),
+                failures: 99,
+                response: search_response(),
+            },
+            default_config((2026, 11, 14)),
+            "en",
+            "US",
+        );
+        let error = tube.raw_search("cats", None).unwrap_err();
+        assert!(error.to_string().contains("transient failure"));
+        assert_eq!(*tube.transport.calls.borrow(), SEARCH_ATTEMPTS);
+    }
+
+    #[test]
+    fn search_continuations_share_the_same_retry_policy() {
+        let tube = InnerTube::new(
+            FlakyTransport {
+                calls: RefCell::new(0),
+                failures: 1,
+                response: search_response(),
+            },
+            default_config((2026, 11, 14)),
+            "en",
+            "US",
+        );
+        let results = tube.search_continuation("token").unwrap();
+        assert_eq!(results.entries.len(), 1);
+        assert_eq!(*tube.transport.calls.borrow(), 2);
     }
 }

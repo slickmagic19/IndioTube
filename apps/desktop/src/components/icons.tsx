@@ -119,6 +119,8 @@ export const PanelRightIcon = svg(<>
 export const PlusIcon = svg(<path d="M12 5v14M5 12h14" />);
 export const CloseIcon = svg(<path d="M6 6l12 12M18 6 6 18" />);
 export const BackIcon = svg(<path d="M19 12H5m6-7-7 7 7 7" />);
+// Mirror of BackIcon for the top bar's forward button.
+export const ForwardIcon = svg(<path d="M5 12h14m-6-7 7 7-7 7" />);
 // Trailing chevron on a row that opens a submenu (YouTube's settings list).
 export const ChevronRightIcon = svg(<path d="m9 5 7 7-7 7" />);
 export const MoreIcon = svg(<>

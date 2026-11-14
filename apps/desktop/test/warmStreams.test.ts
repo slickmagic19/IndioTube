@@ -23,6 +23,14 @@ describe('warming the videos a page shows', () => {
     expect(seen).toEqual([['a', 'b']]);
   });
 
+  it('warms only the first two videos by default', () => {
+    // Every warm-up is a yt-dlp run holding a resolved stream in memory; two
+    // are enough to make the likely click instant without competing with it.
+    const count = warmPage([{ videoId: 'a' }, { videoId: 'b' }, { videoId: 'c' }, { videoId: 'd' }]);
+    expect(count).toBe(2);
+    expect(seen).toEqual([['a', 'b']]);
+  });
+
   it('skips what the player cannot open', () => {
     const count = warmPage([
       { videoId: 'live', isLive: true },

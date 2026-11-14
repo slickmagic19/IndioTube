@@ -1,7 +1,7 @@
 // App shell: hash-route switch, top bar with type-ahead, side navigation,
 // and the always-on-top mini-player mode.
 import React, { useEffect, useRef, useState } from 'react';
-import { useRoute, navigate } from './router';
+import { useRoute, navigate, useNavHistory, historyBack, historyForward } from './router';
 import { useApp, AppProvider } from './store';
 import { FeedScreen } from './screens/FeedScreen';
 import { SearchScreen } from './screens/SearchScreen';
@@ -14,7 +14,7 @@ import { DownloadsScreen, LocalPlayerScreen } from './screens/DownloadsScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { PlaybackHost } from './player/PlaybackHost';
 import {
-  ClockIcon, DownloadIcon, FireIcon, HistoryIcon, HomeIcon, MenuIcon, PlaylistIcon,
+  BackIcon, ClockIcon, DownloadIcon, FireIcon, ForwardIcon, HistoryIcon, HomeIcon, MenuIcon, PlaylistIcon,
   PlayIcon, SearchIcon, SettingsIcon, SubsIcon, ThumbUpIcon,
 } from './components/icons';
 
@@ -32,6 +32,7 @@ function homeClick() {
 
 function TopBar({ onMenu }: { onMenu(): void }) {
   const route = useRoute();
+  const nav = useNavHistory();
   const [text, setText] = useState(route.page === 'search' ? route.query : '');
   const [suggests, setSuggests] = useState<string[]>([]);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -90,7 +91,22 @@ function TopBar({ onMenu }: { onMenu(): void }) {
           </div>
         )}
       </div>
-      <div className="tb-right mini-hide" />
+      <div className="tb-right mini-hide">
+        <button
+          className="icon-btn"
+          title="Back"
+          aria-label="Go back"
+          disabled={!nav.canBack}
+          onClick={historyBack}
+        ><BackIcon size={22} /></button>
+        <button
+          className="icon-btn"
+          title="Forward"
+          aria-label="Go forward"
+          disabled={!nav.canForward}
+          onClick={historyForward}
+        ><ForwardIcon size={22} /></button>
+      </div>
     </div>
   );
 }

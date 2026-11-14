@@ -16,7 +16,7 @@
  */
 export function warmPage(
   videos: { videoId: string; isLive?: boolean; membersOnly?: boolean }[],
-  count = 6,
+  count = 2,
 ): number {
   const ids = videos
     .filter((video) => video && video.videoId && !video.isLive && !video.membersOnly)

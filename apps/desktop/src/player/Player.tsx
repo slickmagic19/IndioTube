@@ -9,6 +9,12 @@ import { formatDuration } from '../types';
 import { useApp } from '../store';
 import { audioSyncAction } from './syncLogic';
 import { canUseMse, useMseSource, type MseSource } from './mse';
+import { releasePlayback } from './mediaLifecycle';
+import {
+  CONTROLS_HIDE_DELAY_AFTER_LEAVE_MS, CONTROLS_HIDE_DELAY_MS,
+  cursorHidden,
+} from './controlsLogic';
+import { StatsForNerds } from './StatsForNerds';
 
 // What streams.playUrl resolves to: the two files plus their codecs.
 type StreamSrc = {
@@ -49,21 +55,31 @@ export function Player(props: PlayerProps) {
   const { settings, saveSettings, op, toast } = useApp();
   const videoRef = useRef<HTMLVideoElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
-  const hideTimer = useRef<number>(0);
 
   const [qualities, setQualities] = useState<Qualities | null>(null);
   const [height, setHeight] = useState<number | null>(settings?.defaultQuality ?? null);
   const [srcs, setSrcs] = useState<{ video: string; audio: string | null } | null>(null);
+  // What is actually decoding right now, for Stats for nerds. `height` is the
+  // requested rung; a fallback or Auto can resolve to a different one.
+  const [sourceInfo, setSourceInfo] = useState<{
+    height: number;
+    videoCodec: string | null;
+    audioCodec: string | null;
+  } | null>(null);
+  const [statsOpen, setStatsOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [loading, setLoading] = useState(true);
   // True whenever the decoder is waiting for data (start, seek or rebuffer).
   const [buffering, setBuffering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
-  const [stickyControls, setStickyControls] = useState(false);
   const [now, setNow] = useState(0);
   const [duration, setDuration] = useState(0);
   const [buffered, setBuffered] = useState(0);
+  // The tick runs 8 times a second; repainting the whole player on every tick
+  // is wasted work (and allocation). Only publish visible progress changes.
+  const lastNowUiRef = useRef(-1);
+  const lastBufferedUiRef = useRef(-1);
   const [volume, setVolume] = useState(settings?.volume ?? 1);
   const [muted, setMuted] = useState(false);
   const [rate, setRate] = useState(settings?.playbackRate ?? 1);
@@ -126,6 +142,16 @@ export function Player(props: PlayerProps) {
 
   const applySource = useCallback((src: StreamSrc, startAt?: number) => {
     lastSrcRef.current = src;
+    setSourceInfo((prev) => (
+      prev && prev.height === src.height && prev.videoCodec === (src.videoCodec ?? null)
+        && prev.audioCodec === (src.audioCodec ?? null)
+        ? prev
+        : {
+          height: src.height,
+          videoCodec: src.videoCodec ?? null,
+          audioCodec: src.audioCodec ?? null,
+        }
+    ));
     if (!mseBlockedRef.current && canUseMse(src)) {
       // Quality switches keep the position; a fresh video starts where it was
       // last left off.
@@ -143,7 +169,9 @@ export function Player(props: PlayerProps) {
     }
   }, []);
 
-  const fetchRange = useCallback(async (url: string, start: number, endInclusive: number) => {
+  const fetchRange = useCallback(async (
+    url: string, start: number, endInclusive: number, signal?: AbortSignal,
+  ) => {
     // The range travels in the path, not in a Range header: a custom header is
     // not CORS-safelisted, so every segment would cost a preflight, and a
     // failed preflight silently knocked the player back to the two-element
@@ -152,7 +180,9 @@ export function Player(props: PlayerProps) {
     u.pathname = '/r';
     u.searchParams.set('s', String(start));
     u.searchParams.set('e', String(endInclusive));
-    const res = await fetch(u.toString(), { cache: 'no-store' });
+    // The signal lets a replaced MSE session cancel segments that are still in
+    // flight instead of downloading them into memory nobody reads.
+    const res = await fetch(u.toString(), { cache: 'no-store', signal });
     if (!res.ok) throw new Error(`stream range failed (${res.status})`);
     return res.arrayBuffer();
   }, []);
@@ -167,7 +197,11 @@ export function Player(props: PlayerProps) {
     setLoading(false);
   }, []);
 
-  useMseSource(videoRef, mseSrc, fetchRange, onMseError, mseStartRef);
+  const { sessionRef: mseSessionRef } = useMseSource(videoRef, mseSrc, fetchRange, onMseError, mseStartRef);
+
+  // Closing playback unmounts this component; stop the media pipeline too, in
+  // case the element is still attached for a frame.
+  useEffect(() => () => releasePlayback(videoRef.current, audioRef.current), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -178,14 +212,13 @@ export function Player(props: PlayerProps) {
     setMseSrc(null);
     setCaptionUrl(null);
     setSegments([]);
-    // A different video must never be preceded by the old one's sound: the
-    // audio track is its own element and keeps playing until it is stopped.
-    videoRef.current?.pause();
-    const oldAudio = audioRef.current;
-    if (oldAudio) {
-      oldAudio.pause();
-      oldAudio.muted = true;
-    }
+    setSourceInfo(null);
+    lastNowUiRef.current = -1;
+    lastBufferedUiRef.current = -1;
+    // Release the outgoing video before anything else: its decoder, packets
+    // and buffered bytes must not stay alive next to the new video's. That
+    // overlap is what made memory spike when opening another video.
+    releasePlayback(videoRef.current, audioRef.current);
     if (video.membersOnly) {
       setError('Members-only video — sign-in is not supported, so it cannot play here.');
       setLoading(false);
@@ -196,17 +229,23 @@ export function Player(props: PlayerProps) {
       setLoading(false);
       return;
     }
+    const target = height ?? settings?.defaultQuality ?? null;
     (async () => {
       try {
-        const q = await window.indio.streams.qualities(video.videoId);
+        // The ladder and the playable source are independent requests (the
+        // shell resolves both from one shared extraction). Asking for them at
+        // the same time removes a whole IPC round trip from the start.
+        const [qualityResult, sourceResult] = await Promise.allSettled([
+          window.indio.streams.qualities(video.videoId),
+          window.indio.streams.playUrl(video.videoId, target),
+        ]);
         if (cancelled) return;
-        setQualities(q);
-        const target = height ?? settings?.defaultQuality ?? null;
-        const src = await window.indio.streams.playUrl(video.videoId, target);
-        if (cancelled) return;
-        applySource(src);
+        const q = qualityResult.status === 'fulfilled' ? qualityResult.value : null;
+        if (q) setQualities(q);
+        if (sourceResult.status === 'rejected') throw sourceResult.reason;
+        applySource(sourceResult.value);
         // Remembered caption language, then the remembered on/off switch.
-        if (settings?.captionsEnabled) {
+        if (settings?.captionsEnabled && q) {
           const lang = settings.captionLang
             || q.subtitles.find((s) => s.autoGenerated)?.languageTag
             || q.subtitles[0]?.languageTag || '';
@@ -438,6 +477,7 @@ export function Player(props: PlayerProps) {
     v.currentTime = pos;
     lastSeekRef.current = Date.now();
     seekAudioInStep(pos, wasPlaying);
+    lastNowUiRef.current = pos;
     setNow(pos);
   }, [srcs]);
 
@@ -576,7 +616,11 @@ export function Player(props: PlayerProps) {
     if (!v) return;
     const onTick = () => {
       const t = v.currentTime;
-      setNow(t);
+      // 200 ms is smooth on a seek bar and halves the number of React renders.
+      if (Math.abs(t - lastNowUiRef.current) >= 0.2) {
+        lastNowUiRef.current = t;
+        setNow(t);
+      }
       // Dual-track sync: the audio element shadows the video clock. The
       // decision table lives in syncLogic.ts (muted while loading/seeking,
       // settle window after a user seek, drift correction, play/pause mirror).
@@ -635,7 +679,13 @@ export function Player(props: PlayerProps) {
           }
         }
       }
-      if (v.buffered.length) setBuffered(v.buffered.end(v.buffered.length - 1));
+      if (v.buffered.length) {
+        const end = v.buffered.end(v.buffered.length - 1);
+        if (Math.abs(end - lastBufferedUiRef.current) >= 0.05) {
+          lastBufferedUiRef.current = end;
+          setBuffered(end);
+        }
+      }
       if (settings?.sponsorBlock && settings.sponsorBlockAutoSkip) {
         const target = autoSkipTarget(segments, t, skippedRef.current, true);
         if (target) {
@@ -718,6 +768,72 @@ export function Player(props: PlayerProps) {
     };
   }, [srcs]);
 
+  // ---- YouTube-style control fade ---------------------------------------------
+  // The CSS used to show the controls for as long as the pointer was anywhere
+  // over the player, so a resting mouse kept them on screen forever. Now every
+  // input wakes them and a timer fades them out three seconds later while the
+  // video plays; pausing or opening a menu keeps them up.
+  const [controlsShown, setControlsShown] = useState(true);
+  const controlsShownRef = useRef(true);
+  const controlsTimer = useRef(0);
+  const lastWakeRef = useRef(0);
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  const menuOpenRef = useRef(false);
+  menuOpenRef.current = Boolean(gearAnchor);
+
+  const setControlsShownNow = useCallback((shown: boolean) => {
+    if (controlsShownRef.current === shown) return;
+    controlsShownRef.current = shown;
+    setControlsShown(shown);
+  }, []);
+
+  const scheduleControlsHide = useCallback((delay: number) => {
+    window.clearTimeout(controlsTimer.current);
+    controlsTimer.current = 0;
+    if (!playingRef.current || menuOpenRef.current) return;
+    controlsTimer.current = window.setTimeout(
+      () => setControlsShownNow(false),
+      delay,
+    );
+  }, [setControlsShownNow]);
+
+  const wakeControls = useCallback(() => {
+    // A mouse can fire dozens of moves a second; one timer reset every 100 ms
+    // is enough to keep the controls awake without re-rendering constantly.
+    const at = Date.now();
+    if (at - lastWakeRef.current < 100) return;
+    lastWakeRef.current = at;
+    setControlsShownNow(true);
+    scheduleControlsHide(CONTROLS_HIDE_DELAY_MS);
+  }, [scheduleControlsHide, setControlsShownNow]);
+
+  const hideControlsSoonAfterLeave = useCallback(() => {
+    window.clearTimeout(controlsTimer.current);
+    if (!playingRef.current || menuOpenRef.current) return;
+    controlsTimer.current = window.setTimeout(
+      () => setControlsShownNow(false),
+      CONTROLS_HIDE_DELAY_AFTER_LEAVE_MS,
+    );
+  }, [setControlsShownNow]);
+
+  // Playback starting arms the fade-out, pausing or a menu cancels it.
+  useEffect(() => {
+    window.clearTimeout(controlsTimer.current);
+    controlsTimer.current = 0;
+    if (!playing || gearAnchor) {
+      setControlsShownNow(true);
+      return undefined;
+    }
+    controlsTimer.current = window.setTimeout(
+      () => setControlsShownNow(false),
+      CONTROLS_HIDE_DELAY_MS,
+    );
+    return () => window.clearTimeout(controlsTimer.current);
+  }, [playing, gearAnchor, setControlsShownNow]);
+
+  useEffect(() => () => window.clearTimeout(controlsTimer.current), []);
+
   // ---- keyboard shortcuts --------------------------------------------------------
 
   useEffect(() => {
@@ -727,6 +843,7 @@ export function Player(props: PlayerProps) {
       if (document.querySelector('.menu')) return; // a menu owns the keyboard
       const v = videoRef.current;
       if (!v) return;
+      wakeControls();
       switch (e.key) {
         case ' ': case 'k': e.preventDefault(); togglePlay(); break;
         case 'ArrowRight': seekTo(v.currentTime + 5); break;
@@ -753,7 +870,7 @@ export function Player(props: PlayerProps) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [togglePlay, seekTo, rate, queue.length, queueIndex, onNext, onPrev, saveSettings, toggleFullscreen, miniMode, isFullscreen]);
+  }, [togglePlay, seekTo, rate, queue.length, queueIndex, onNext, onPrev, saveSettings, toggleFullscreen, miniMode, isFullscreen, wakeControls]);
 
   // ---- chapters ------------------------------------------------------------------
 
@@ -921,10 +1038,26 @@ export function Player(props: PlayerProps) {
   }, [recoverStream, srcs]);
 
   const sponsorNear = settings?.sponsorBlock ? sponsorSegmentNear(segments, now) : null;
-  const showControls = !miniMode ? 'controls' : 'controls stick';
+  const showControls = `controls${controlsShown ? ' visible' : ''}`;
+  const statsVideo = sourceInfo?.height ?? height;
+  const mseNetwork = useCallback(
+    () => mseSessionRef.current?.stats() ?? null,
+    [mseSessionRef],
+  );
 
   return (
-    <div ref={frameRef} className={`player-frame${(!playing && !loading && !error) ? ' paused' : ''}`}>
+    <div
+      ref={frameRef}
+      className={`player-frame${(!playing && !loading && !error) ? ' paused' : ''}${
+        controlsShown ? ' controls-open' : ''
+      }${cursorHidden(playing, controlsShown) ? ' hide-cursor' : ''}`}
+      onMouseMove={wakeControls}
+      onMouseEnter={wakeControls}
+      onMouseLeave={hideControlsSoonAfterLeave}
+      onPointerDown={wakeControls}
+      onTouchStart={wakeControls}
+      onFocusCapture={wakeControls}
+    >
       <video
         ref={videoRef}
         onClick={togglePlay}
@@ -974,7 +1107,9 @@ export function Player(props: PlayerProps) {
         crossOrigin="anonymous"
         // Show the thumbnail while the first bytes arrive instead of a black
         // box, and let Chromium fill the buffer as soon as a source is set.
-        poster={video.thumbnail}
+        // Once a frame is on screen the poster is dropped so its decoded image
+        // is not kept alive for the whole session.
+        poster={loading ? (video.thumbnail || undefined) : undefined}
         preload="auto"
         playsInline
       >
@@ -1011,6 +1146,18 @@ export function Player(props: PlayerProps) {
           lastSeekRef.current = 0;
         }}
       />
+
+      {statsOpen && !miniMode && (
+        <StatsForNerds
+          videoId={video.videoId}
+          videoRef={videoRef}
+          sourceHeight={statsVideo}
+          videoCodec={sourceInfo?.videoCodec ?? null}
+          audioCodec={sourceInfo?.audioCodec ?? null}
+          getNetwork={mseNetwork}
+          onClose={() => setStatsOpen(false)}
+        />
+      )}
 
       {captionsOn && cueLines.length > 0 && (
         <div className="caption-layer" aria-live="polite" aria-atomic="true">
@@ -1072,8 +1219,7 @@ export function Player(props: PlayerProps) {
         </button>
       )}
 
-      <div className={showControls} onMouseEnter={() => { setStickyControls(true); clearTimeout(hideTimer.current); }}
-        onMouseLeave={() => { setStickyControls(false); }}>
+      <div className={showControls} onMouseEnter={() => { wakeControls(); }}>
         <div className="seek" onClick={(e) => {
           const rect = e.currentTarget.getBoundingClientRect();
           const frac = (e.clientX - rect.left) / rect.width;
@@ -1196,6 +1342,14 @@ export function Player(props: PlayerProps) {
                       <span className="ps-row-end">
                         <span className="ps-row-value">{captionLabel}</span>
                         <ChevronRightIcon size={18} />
+                      </span>
+                    </button>
+                    <button type="button" className="ps-row" aria-pressed={statsOpen}
+                      onClick={() => { setStatsOpen((open) => !open); closeGear(); }}>
+                      <span className="ps-row-label">Stats for nerds</span>
+                      <span className="ps-row-end">
+                        <span className="ps-row-value">{statsOpen ? 'On' : 'Off'}</span>
+                        {statsOpen ? <CheckIcon size={18} /> : <ChevronRightIcon size={18} />}
                       </span>
                     </button>
                   </div>

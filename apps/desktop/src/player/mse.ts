@@ -11,7 +11,7 @@
 // of each segment, so any position can be fetched directly with a Range
 // request; no manifest, no re-muxing, no ffmpeg.
 import { useEffect, useRef, useState } from 'react';
-import type { RefObject } from 'react';
+import type { MutableRefObject, RefObject } from 'react';
 
 export interface Segment {
   /** Absolute byte offset in the file. */
@@ -39,7 +39,7 @@ export interface MseSource {
 }
 
 export interface FetchRange {
-  (url: string, start: number, endInclusive: number): Promise<ArrayBuffer>;
+  (url: string, start: number, endInclusive: number, signal?: AbortSignal): Promise<ArrayBuffer>;
 }
 
 const u32 = (b: Uint8Array, o: number) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
@@ -180,9 +180,19 @@ interface Track {
   gen: number;
 }
 
-const BUFFER_AHEAD = 40;     // seconds kept in front of the playhead
-const BUFFER_BEHIND = 90;    // seconds kept behind it
-const MAX_INIT_BYTES = 4 * 1024 * 1024;
+// Chromium's decoded media plus these SourceBuffer windows is the player's
+// biggest memory cost. YouTube itself keeps roughly half a minute on each side
+// of the playhead; holding 40 s ahead and 90 s behind was four times that and
+// is what made memory climb the longer a video stayed open. The windows are
+// exported so the policy is pinned by a unit test.
+export const BUFFER_AHEAD_SECONDS = 30;
+export const BUFFER_BEHIND_SECONDS = 30;
+const MAX_INIT_BYTES = 2 * 1024 * 1024;
+
+/** Byte offset below which buffered data can be dropped, or null to keep it. */
+export function evictionCutoff(now: number, behind = BUFFER_BEHIND_SECONDS): number | null {
+  return now >= behind ? Math.max(0, now - behind) : null;
+}
 
 /**
  * Owns one MediaSource with a SourceBuffer per track and keeps them fed.
@@ -200,6 +210,10 @@ export class MseSession {
 
   private pendingSeek: number | null = null;
   private pumpTimer = 0;
+  /** Cancels every in-flight byte request when this session is replaced. */
+  private abort = new AbortController();
+  private fetchedBytes = 0;
+  private fetchedRequests = 0;
 
   private onSeeking = () => {
     if (this.disposed) return;
@@ -272,6 +286,13 @@ export class MseSession {
   }
 
   async start(atSeconds: number): Promise<void> {
+    // Opening the MediaSource is independent of downloading the two stream
+    // headers, so start both now: the element is ready by the time the index
+    // arrives instead of adding the source-open delay on top of the network.
+    const opening = this.open();
+    // If a header fetch fails first, `opening` is never awaited; keep its
+    // eventual failure from surfacing as an unhandled rejection.
+    opening.catch(() => undefined);
     const [videoBuf, audioBuf] = await Promise.all([
       this.fetchHead(this.source.video),
       this.fetchHead(this.source.audio),
@@ -289,8 +310,21 @@ export class MseSession {
       { url: this.source.audio, mime: audioMime, index: audioIndex, buffer: null, next: 0, gen: 0 },
     ];
 
-    await this.open();
+    await opening;
     if (this.disposed) return;
+
+    // SourceBuffers can only be added once the MediaSource is open, and the
+    // tracks only exist once both indexes have parsed. Adding them here keeps
+    // the source-open and header-download overlap above without the race where
+    // `sourceopen` fired while `this.tracks` was still empty and the session
+    // sat with no buffers at all (a forever-black player).
+    for (const track of this.tracks) {
+      if (!MediaSource.isTypeSupported(track.mime)) throw new Error('unsupported codecs');
+      const sb = this.ms.addSourceBuffer(track.mime);
+      sb.mode = 'segments';
+      sb.addEventListener('error', () => this.fail('source buffer error'));
+      track.buffer = sb;
+    }
 
     const total = Math.max(videoIndex.duration, audioIndex.duration);
     // A saved position in the last seconds means the video was finished:
@@ -302,9 +336,12 @@ export class MseSession {
     const at = wanted > total - 10 ? 0 : wanted;
     this.pendingSeek = null;
     // Init segments first, one per track, then the segment containing `at`.
-    for (const [i, track] of this.tracks.entries()) {
+    // The two tracks have their own SourceBuffers, so the appends can overlap.
+    await Promise.all(this.tracks.map((track, i) => {
       const head = i === 0 ? videoBuf : audioBuf;
-      await this.append(track, toArrayBuffer(head, 0, track.index.initEnd));
+      return this.append(track, toArrayBuffer(head, 0, track.index.initEnd));
+    }));
+    for (const track of this.tracks) {
       track.next = segmentIndexAt(track.index, at);
     }
     // The media element attaches asynchronously; duration is only settable
@@ -324,10 +361,15 @@ export class MseSession {
       this.pump();
       this.snapForward();
       this.recoverStall();
-    }, 600);
+    }, 500);
     // An element fed by MediaSource has no autoplay of its own: it must be
     // asked to play, otherwise it sits on a frozen first frame.
     try { await this.video.play(); } catch { /* blocked: a click starts it */ }
+  }
+
+  /** Bytes fetched by this session, for the Stats for nerds overlay. */
+  stats(): { fetchedBytes: number; fetchedRequests: number } {
+    return { fetchedBytes: this.fetchedBytes, fetchedRequests: this.fetchedRequests };
   }
 
   seek(t: number): void {
@@ -342,6 +384,9 @@ export class MseSession {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // Stop downloading segments for a video that is no longer on screen; a
+    // fast skip used to leave several megabytes arriving into a dead session.
+    try { this.abort.abort(); } catch { /* already gone */ }
     try { this.video.removeEventListener('seeking', this.onSeeking); } catch { /* gone */ }
     try { this.video.removeEventListener('waiting', this.onWaiting); } catch { /* gone */ }
     try { this.video.removeEventListener('stalled', this.onWaiting); } catch { /* gone */ }
@@ -350,38 +395,28 @@ export class MseSession {
     try { URL.revokeObjectURL(this.objectUrl); } catch { /* gone */ }
   }
 
+  private async fetchBytes(url: string, start: number, endInclusive: number): Promise<ArrayBuffer> {
+    const data = await this.fetchRange(url, start, endInclusive, this.abort.signal);
+    this.fetchedBytes += data.byteLength;
+    this.fetchedRequests += 1;
+    return data;
+  }
+
   private async fetchHead(url: string): Promise<Uint8Array> {
-    const buf = new Uint8Array(await this.fetchRange(url, 0, 256 * 1024 - 1));
+    const buf = new Uint8Array(await this.fetchBytes(url, 0, 256 * 1024 - 1));
     // The index must be complete before we can trust the offsets.
     const idx = parseTrackIndex(buf);
     if (idx) return buf;
-    const big = new Uint8Array(await this.fetchRange(url, 0, MAX_INIT_BYTES - 1));
+    const big = new Uint8Array(await this.fetchBytes(url, 0, MAX_INIT_BYTES - 1));
     if (!parseTrackIndex(big)) throw new Error('stream index unavailable');
     return big;
   }
 
   private open(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const fail = () => reject(new Error('media source failed to open'));
-      this.ms.addEventListener('sourceopen', () => {
-        try {
-          for (const track of this.tracks) {
-            if (!MediaSource.isTypeSupported(track.mime)) {
-              fail();
-              return;
-            }
-            const sb = this.ms.addSourceBuffer(track.mime);
-            sb.mode = 'segments';
-            sb.addEventListener('error', () => this.fail('source buffer error'));
-            track.buffer = sb;
-          }
-          resolve();
-        } catch (e) {
-          reject(e as Error);
-        }
-      }, { once: true });
+      this.ms.addEventListener('sourceopen', () => resolve(), { once: true });
       this.ms.addEventListener('sourceclose', () => { /* teardown */ }, { once: true });
-      window.      setTimeout(() => reject(new Error('media source timed out')), 8000);
+      window.setTimeout(() => reject(new Error('media source timed out')), 8000);
       // Point the element at the MediaSource exactly once: assigning src twice
       // reloads the resource and closes the MediaSource that just opened.
       if (this.video.src !== this.objectUrl) this.video.src = this.objectUrl;
@@ -416,7 +451,9 @@ export class MseSession {
       };
       sb.addEventListener('updateend', done);
       sb.addEventListener('error', done);
-      try { sb.appendBuffer(new Uint8Array(data)); } catch { done(); }
+      // appendBuffer accepts the ArrayBuffer directly; wrapping it in another
+      // Uint8Array copied every segment before it was handed to the decoder.
+      try { sb.appendBuffer(data); } catch { done(); }
     });
   }
 
@@ -438,7 +475,7 @@ export class MseSession {
           pending.sort((a, b) => a.index.segments[a.next].time - b.index.segments[b.next].time);
           const track = pending[0];
           const seg = track.index.segments[track.next];
-          if (seg.time > now + BUFFER_AHEAD) {
+          if (seg.time > now + BUFFER_AHEAD_SECONDS) {
             // Everything needed ahead is buffered; trim what is far behind.
             this.evict(now);
             return;
@@ -448,7 +485,7 @@ export class MseSession {
             continue;
           }
           const gen = track.gen;
-          const data = await this.fetchRange(track.url, seg.start, seg.start + seg.size - 1);
+          const data = await this.fetchBytes(track.url, seg.start, seg.start + seg.size - 1);
           if (this.disposed) return;
           // The viewer seeked again while this segment was downloading: append
           // it (still useful) but never move the new position's index past the
@@ -481,11 +518,12 @@ export class MseSession {
   }
 
   private evict(now: number): void {
-    if (now < BUFFER_BEHIND) return;
+    const cutoff = evictionCutoff(now, BUFFER_BEHIND_SECONDS);
+    if (cutoff == null) return;
     for (const track of this.tracks) {
       const sb = track.buffer;
       if (!sb || sb.updating || this.disposed) continue;
-      try { sb.remove(0, now - BUFFER_BEHIND); } catch { /* retry next pump */ }
+      try { sb.remove(0, cutoff); } catch { /* retry next pump */ }
     }
   }
 }
@@ -501,7 +539,7 @@ export function useMseSource(
   fetchRange: FetchRange,
   onError: (reason: string) => void,
   startAtRef: RefObject<number>,
-): { active: boolean } {
+): { active: boolean; sessionRef: MutableRefObject<MseSession | null> } {
   const [active, setActive] = useState(false);
   const sessionRef = useRef<MseSession | null>(null);
   const errorRef = useRef(onError);
@@ -526,5 +564,5 @@ export function useMseSource(
     };
   }, [source, fetchRange, videoRef, startAtRef]);
 
-  return { active };
+  return { active, sessionRef };
 }

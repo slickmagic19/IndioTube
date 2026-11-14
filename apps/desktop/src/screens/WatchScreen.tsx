@@ -87,7 +87,7 @@ export function WatchScreen({ videoId }: { videoId: string }) {
         setRelatedToken(w.relatedToken || null);
         // The first couple of up-next videos are what this viewer is likely to
         // play next, so the shell is told to have them ready while they watch.
-        warmPage(w.related, 3);
+        warmPage(w.related, 2);
         const full: VideoItem = {
           videoId,
           title: w.title,

@@ -175,7 +175,13 @@ type SmokeConfig = {
   route: string;
   media: boolean;
   window: boolean;
+  /** Fade/wake the controls and open Stats for nerds in the real window. */
+  ui?: boolean;
   click?: boolean;
+  /** Drive the top bar's Back/Forward buttons through real clicks. */
+  nav?: boolean;
+  /** Click a search row's empty side and its channel line. */
+  searchClick?: boolean;
   waitMs: number;
 };
 
@@ -240,6 +246,207 @@ async function probeWindow(): Promise<unknown> {
     setMini,
     inMini,
     after: { size: [window.innerWidth, window.innerHeight] },
+  };
+}
+
+/**
+ * The player chrome: it must fade after a few idle seconds of playback, wake
+ * on pointer movement, and the settings menu must actually open the Stats for
+ * nerds panel. Everything here goes through the same DOM a viewer uses, so a
+ * broken CSS class or menu row shows up in the report instead of in a screenshot
+ * someone forgets to take.
+ */
+async function probePlayerUi(): Promise<unknown> {
+  const frame = document.querySelector('.player-frame') as HTMLElement | null;
+  const controls = document.querySelector('.controls') as HTMLElement | null;
+  if (!frame || !controls) return { skipped: 'no player' };
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  await wait(3_600);
+  const hiddenAfterIdle = !controls.classList.contains('visible');
+  frame.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+  await wait(250);
+  const shownAfterMove = controls.classList.contains('visible');
+
+  let stats: string | null = null;
+  let menuOpened = false;
+  const gear = controls.querySelector('button[title="Settings"]') as HTMLElement | null;
+  if (gear) {
+    gear.click();
+    await wait(350);
+    menuOpened = Boolean(document.querySelector('.player-menu'));
+    const row = Array.from(document.querySelectorAll('.ps-row'))
+      .find((el) => (el.textContent || '').includes('Stats for nerds')) as HTMLElement | null;
+    row?.click();
+    await wait(800);
+    const panel = document.querySelector('[data-testid="stats-for-nerds"]');
+    stats = panel ? (panel.textContent || '').replace(/\s+/g, ' ').slice(0, 360) : null;
+  }
+  return { hiddenAfterIdle, shownAfterMove, menuOpened, stats };
+}
+
+/**
+ * A search result is one big video row with a small channel line inside it.
+ * This drives the real DOM: the far side of the channel line must open the
+ * video, and only the avatar/name may open the channel. A regression in the
+ * hit areas shows up here instead of as a misclick in a screenshot.
+ */
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function until<T>(find: () => T | null, timeoutMs = 10_000): Promise<T | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = find();
+    if (found) return found;
+    if (Date.now() >= deadline) return null;
+    await wait(100);
+  }
+}
+
+type SearchClickProbe = {
+  skipped?: string;
+  failures: string[];
+  rowWidth?: number;
+  linkWidth?: number;
+  emptySideIsChannel?: boolean;
+  reloadMs?: number;
+  start?: string;
+  emptySideHash?: string;
+  channelHash?: string;
+  restoredHash?: string;
+};
+
+async function probeSearchClick(): Promise<SearchClickProbe> {
+  const videoRow = await until<HTMLElement>(() =>
+    (Array.from(document.querySelectorAll('.list-row'))
+      .find((row) => row.querySelector('.channel-link')) as HTMLElement | undefined) ?? null);
+  if (!videoRow) {
+    return { skipped: 'no video result appeared', failures: ['no video result appeared on the search page'] };
+  }
+  const failures: string[] = [];
+  const link = videoRow.querySelector('.channel-link') as HTMLElement;
+  videoRow.scrollIntoView({ block: 'center' });
+  await wait(150);
+
+  const rowRect = videoRow.getBoundingClientRect();
+  const linkRect = link.getBoundingClientRect();
+  const y = linkRect.top + linkRect.height / 2;
+  // Well to the right of the name but still on the channel line: the space
+  // that used to be part of the channel link.
+  const x = Math.max(linkRect.right + 24, (linkRect.right + rowRect.right) / 2);
+  const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+  const emptySideIsChannel = Boolean(hit && (hit === link || link.contains(hit)));
+
+  const start = location.hash;
+  (hit ?? videoRow).click();
+  await wait(400);
+  const emptySideHash = location.hash;
+  if (!emptySideHash.startsWith('#/watch/')) {
+    failures.push(`the empty side of the channel line opened ${emptySideHash || 'nothing'} instead of the video`);
+  }
+
+  history.back();
+  const backAt = Date.now();
+  const linkAfterBack = await until<HTMLElement>(() =>
+    document.querySelector('.list-row .channel-link') as HTMLElement | null, 25_000);
+  const reloadMs = Date.now() - backAt;
+  if (!linkAfterBack) {
+    failures.push('the search page did not come back after going back from the video');
+  } else {
+    linkAfterBack.click();
+    await wait(400);
+  }
+  const channelHash = location.hash;
+  if (!channelHash.startsWith('#/channel/')) {
+    failures.push(`clicking the channel name opened ${channelHash || 'nothing'} instead of the channel`);
+  }
+
+  history.back();
+  const restored = await until<boolean>(() => location.hash === start, 8_000);
+  if (!restored) failures.push(`the search page did not return to ${start}`);
+  return {
+    failures,
+    rowWidth: Math.round(rowRect.width),
+    linkWidth: Math.round(linkRect.width),
+    emptySideIsChannel,
+    reloadMs,
+    start,
+    emptySideHash,
+    channelHash,
+    restoredHash: location.hash,
+  };
+}
+
+type NavigationProbe = {
+  skipped?: string;
+  failures: string[];
+  start?: string;
+  backInitiallyDisabled?: boolean;
+  afterNav?: { hash: string; backEnabled: boolean; forwardEnabled: boolean };
+  afterBack?: { hash: string; backEnabled: boolean; forwardEnabled: boolean };
+  afterForward?: { hash: string; backEnabled: boolean; forwardEnabled: boolean };
+};
+
+/**
+ * The top bar's Back/Forward buttons, clicked exactly as a viewer would. The
+ * browser does not expose history availability, so this is the only place the
+ * router's index/top model meets real traversal.
+ */
+async function probeNavigation(): Promise<NavigationProbe> {
+  const back = await until<HTMLButtonElement>(() =>
+    document.querySelector('button[title="Back"]') as HTMLButtonElement | null, 3_000);
+  const forward = await until<HTMLButtonElement>(() =>
+    document.querySelector('button[title="Forward"]') as HTMLButtonElement | null, 3_000);
+  if (!back || !forward) return { skipped: 'the nav buttons are not in the top bar', failures: [] };
+
+  const failures: string[] = [];
+  const start = location.hash;
+  const backInitiallyDisabled = back.disabled;
+  if (!backInitiallyDisabled) failures.push('Back was enabled before anything had been opened');
+
+  const trending = Array.from(document.querySelectorAll('.sidenav .item'))
+    .find((el) => (el.textContent || '').trim().toLowerCase().startsWith('trending')) as HTMLElement | undefined;
+  if (!trending) {
+    // Opening a video collapses the guide, and it stays collapsed after going
+    // back; the hamburger is how a viewer brings it back.
+    const menu = document.querySelector('.tb-left .icon-btn') as HTMLElement | null;
+    menu?.click();
+    await wait(300);
+  }
+  const item = Array.from(document.querySelectorAll('.sidenav .item'))
+    .find((el) => (el.textContent || '').trim().toLowerCase().startsWith('trending')) as HTMLElement | undefined;
+  if (!item) return { skipped: 'the side navigation is not open', failures };
+
+  item.click();
+  await wait(500);
+  const afterNav = { hash: location.hash, backEnabled: !back.disabled, forwardEnabled: !forward.disabled };
+  if (afterNav.hash !== '#/trending') failures.push(`Trending opened ${afterNav.hash || 'nothing'}`);
+  if (!afterNav.backEnabled) failures.push('Back stayed disabled after opening Trending');
+  if (afterNav.forwardEnabled) failures.push('Forward was enabled on the newest page');
+
+  back.click();
+  await wait(600);
+  const afterBack = { hash: location.hash, backEnabled: !back.disabled, forwardEnabled: !forward.disabled };
+  if (afterBack.hash !== start) failures.push(`Back opened ${afterBack.hash || 'nothing'} instead of ${start}`);
+  if (!afterBack.forwardEnabled) failures.push('Forward stayed disabled after going back');
+
+  forward.click();
+  await wait(600);
+  const afterForward = { hash: location.hash, backEnabled: !back.disabled, forwardEnabled: !forward.disabled };
+  if (afterForward.hash !== '#/trending') failures.push(`Forward opened ${afterForward.hash || 'nothing'} instead of Trending`);
+
+  // Leave the app on the page the probe started from.
+  back.click();
+  await wait(400);
+  return {
+    failures,
+    start,
+    backInitiallyDisabled,
+    afterNav,
+    afterBack,
+    afterForward,
   };
 }
 
@@ -332,6 +539,11 @@ async function runSmoke(): Promise<void> {
   const content = document.querySelector('.content');
   const media = config.media ? await probeMedia() : null;
   const modes = config.window ? await probeWindow() : null;
+  const playerUi = config.ui ? await probePlayerUi() : null;
+  const searchClick = config.searchClick ? await probeSearchClick() : null;
+  const navigation = config.nav ? await probeNavigation() : null;
+  if (searchClick) errors.push(...searchClick.failures.map((f) => `search click: ${f}`));
+  if (navigation) errors.push(...navigation.failures.map((f) => `navigation: ${f}`));
   const report = {
     title: document.title,
     hash: location.hash,
@@ -345,6 +557,9 @@ async function runSmoke(): Promise<void> {
     clicked,
     ...(media ? { media } : {}),
     ...(modes ? { modes } : {}),
+    ...(playerUi ? { playerUi } : {}),
+    ...(searchClick ? { searchClick } : {}),
+    ...(navigation ? { navigation } : {}),
   };
   try {
     await invoke('smoke_report', { report });
