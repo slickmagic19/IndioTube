@@ -3,11 +3,12 @@
 Unofficial YouTube client. No ads, no Shorts, no sign-in required. Dark theme only.
 
 Two front ends, one library each: the Android app (Kotlin + Compose) and a Windows desktop app
-(Electron + React). They keep their history, likes, playlists and subscriptions on the device, and
+(Rust/Tauri + React). They keep their history, likes, playlists and subscriptions on the device, and
 can be merged with each other over your own network — no account, no server in the middle.
 
 **Stack:** Kotlin + Jetpack Compose + Media3 (ExoPlayer) + NewPipeExtractor + InnerTube (WEB) for
-metadata; Electron + React + Vite + InnerTube + a bundled yt-dlp for the desktop build.
+metadata; Rust (Tauri + `indio-core`) + React + Vite + InnerTube + a bundled yt-dlp for the desktop
+build.
 
 **Features**
 - Ad-free video playback (NewPipeExtractor resolves clean progressive streams)
@@ -89,12 +90,16 @@ cd apps/android
 # desktop, from the repository root
 npm install
 npm run fetch:ytdlp      # pins yt-dlp.exe into apps/desktop/vendor
-npm run dist:portable    # -> release/IndioTube-<version>-win.exe
+npm run dist             # -> apps/desktop/src-tauri/target/release/bundle
 
-npm run dev              # vite dev server on 127.0.0.1:5174
-npm run electron:dev     # the desktop app against it
-npm test                 # desktop unit tests (vitest)
+npm run tauri:dev        # vite + the Rust shell, one command
+npm test                 # renderer unit tests (vitest)
+npm run test:rust        # Rust unit tests (indio-core + the Tauri shell)
 ```
+
+The desktop app has no Electron in it: the window is Tauri, and the main-process
+work (InnerTube, the media proxy, the library store, the download queue, the LAN
+sync server, the local Home recommender) is Rust in `apps/desktop`.
 
 ## Legal note
 Streams resolve publicly-accessible YouTube media for personal local playback only (same as browser + ad-blocker). No DRM bypass. Uses unofficial APIs — Google can break it.

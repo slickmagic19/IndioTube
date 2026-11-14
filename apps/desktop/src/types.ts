@@ -255,6 +255,9 @@ export interface IndioBridge {
       videoCodec?: string | null; audioCodec?: string | null;
     }>;
     subtitleUrl(videoId: string, lang: string): Promise<string | null>;
+    /** Tell the shell these videos are on screen. Fire and forget: it returns
+     *  how many were handed over and never waits for the work. */
+    warm(videoIds: string[]): number;
     localUrl(file: string): Promise<string>;
     ffmpeg(): Promise<boolean>;
   };

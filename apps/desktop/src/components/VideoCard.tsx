@@ -13,8 +13,12 @@ import {
   PlaylistPlayIcon, PlusIcon, QueueIcon, ThumbUpIcon,
 } from './icons';
 import { videoCache } from '../screens/DownloadsScreen';
+import { rememberVideo } from '../videoHints';
 
 export function openVideo(video: VideoItem) {
+  // The card already shows the title, channel and length the watch page is
+  // about to ask YouTube for; hand them over so the page paints at once.
+  rememberVideo(video);
   navigate(`/watch/${video.videoId}`);
 }
 
@@ -27,7 +31,7 @@ export function downloadVideo(video: VideoItem, height: number | null, toast: (m
 }
 
 // Hovering a card warms the stream ladder (yt-dlp is the slow part of
-// starting a video); one extraction per video, cached in the main process.
+// starting a video); one extraction per video, shared and cached in the shell.
 const prefetched = new Set<string>();
 
 export function VideoCard({ video, showChannel = true, fraction }: {

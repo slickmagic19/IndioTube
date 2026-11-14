@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { SearchEntry, SearchResults } from '../types';
 import { navigate, useRoute } from '../router';
-import { VideoCard } from '../components/VideoCard';
+import { VideoCard, openVideo } from '../components/VideoCard';
 import { Avatar, Menu, MenuHead, Thumb } from '../components/ui';
 import { ListSkeleton } from '../components/Skeletons';
 import { SettingsIcon } from '../components/icons';
@@ -124,7 +124,7 @@ function ResultRow({ entry }: { entry: SearchEntry }) {
     // Search videos render as wide rows, like YouTube desktop.
     const v = entry.video;
     return (
-      <div className="list-row" style={{ padding: '10px 6px' }} onClick={() => navigate(`/watch/${v.videoId}`)}>
+      <div className="list-row" style={{ padding: '10px 6px' }} onClick={() => openVideo(v)}>
         <div className="thumb" style={{ width: 220, minWidth: 220 }}>
           <Thumb src={v.thumbnail} alt={v.title} live={v.isLive} duration={v.isLive ? undefined : formatDuration(v.durationSec)} members={v.membersOnly} />
         </div>

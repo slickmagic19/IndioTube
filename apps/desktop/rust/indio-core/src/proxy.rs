@@ -10,7 +10,8 @@
 //! handling and caption conversion are all testable without a network.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -140,11 +141,21 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+/// A body that lives on disk: served straight from the file so a 2 GB download
+/// never has to fit in memory to be played back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileBody {
+    pub path: PathBuf,
+    pub start: u64,
+    pub len: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub file: Option<FileBody>,
 }
 
 impl Response {
@@ -153,6 +164,7 @@ impl Response {
             status,
             headers: cors(),
             body: body.as_bytes().to_vec(),
+            file: None,
         }
     }
 
@@ -300,7 +312,9 @@ struct CacheInner {
 /// video and audio streams and make playback stutter).
 pub struct Proxy<U: Upstream> {
     upstream: U,
-    download_dir: PathBuf,
+    /// The download folder, shared with the shell so changing it in Settings
+    /// takes effect for files that are already on disk.
+    download_dir: Arc<Mutex<PathBuf>>,
     tokens: Mutex<HashMap<String, TokenEntry>>,
     cache: Mutex<CacheInner>,
     cache_max_bytes: usize,
@@ -315,9 +329,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl<U: Upstream> Proxy<U> {
     pub fn new(upstream: U, download_dir: impl Into<PathBuf>) -> Self {
+        Self::with_shared_dir(upstream, Arc::new(Mutex::new(download_dir.into())))
+    }
+
+    pub fn with_shared_dir(upstream: U, download_dir: Arc<Mutex<PathBuf>>) -> Self {
         Self {
             upstream,
-            download_dir: download_dir.into(),
+            download_dir,
             tokens: Mutex::new(HashMap::new()),
             cache: Mutex::new(CacheInner {
                 map: HashMap::new(),
@@ -328,6 +346,15 @@ impl<U: Upstream> Proxy<U> {
             tokens_max: TOKENS_MAX,
             next_token: AtomicU64::new(1),
         }
+    }
+
+    /// The folder `/file` is allowed to serve from.
+    pub fn download_dir(&self) -> PathBuf {
+        lock(&self.download_dir).clone()
+    }
+
+    pub fn set_download_dir(&self, dir: PathBuf) {
+        *lock(&self.download_dir) = dir;
     }
 
     pub fn with_limits(mut self, max_bytes: usize, max_entry: usize, tokens_max: usize) -> Self {
@@ -453,6 +480,7 @@ impl<U: Upstream> Proxy<U> {
                 status: hit.status,
                 headers: cors(),
                 body: hit.body,
+                file: None,
             };
             res = res
                 .with("content-type", &hit.content_type)
@@ -474,6 +502,7 @@ impl<U: Upstream> Proxy<U> {
                         status: up.status,
                         headers: cors(),
                         body: up.body.clone(),
+                        file: None,
                     };
                     res = res
                         .with("content-type", &up.content_type)
@@ -536,6 +565,7 @@ impl<U: Upstream> Proxy<U> {
                             status: 200,
                             headers: cors(),
                             body: vtt.into_bytes(),
+                            file: None,
                         }
                         .with("content-type", &up.content_type)
                         .with("cache-control", "no-store"),
@@ -562,7 +592,7 @@ impl<U: Upstream> Proxy<U> {
             Ok(p) => p,
             Err(_) => return Response::new(404, "missing"),
         };
-        let root = match self.download_dir.canonicalize() {
+        let root = match self.download_dir().canonicalize() {
             Ok(p) => p,
             Err(_) => return Response::new(404, "missing"),
         };
@@ -570,11 +600,10 @@ impl<U: Upstream> Proxy<U> {
         if !resolved.starts_with(&root) {
             return Response::new(403, "forbidden");
         }
-        let body = match std::fs::read(&resolved) {
-            Ok(b) => b,
-            Err(_) => return Response::new(404, "missing"),
+        let total = match std::fs::metadata(&resolved) {
+            Ok(m) if m.is_file() => m.len(),
+            _ => return Response::new(404, "missing"),
         };
-        let total = body.len() as u64;
         let content_type = content_type_for(&resolved.to_string_lossy());
         let range = match parse_request_range(&resolved, range_header, total) {
             Ok(r) => r,
@@ -582,27 +611,33 @@ impl<U: Upstream> Proxy<U> {
                 return Response::new(416, "").with("content-range", &format!("bytes */{total}"))
             }
         };
-        let Some(range) = range else {
-            return Response {
-                status: 200,
-                headers: cors(),
-                body,
-            }
-            .with("content-type", content_type)
-            .with("content-length", &total.to_string())
-            .with("accept-ranges", "bytes");
+        let (start, len, status) = match range {
+            None => (0u64, total, 200),
+            Some(range) => (range.start, range.len(), 206),
         };
-        let slice = body[range.start as usize..=range.end as usize].to_vec();
+        if len > 0 && start.saturating_add(len) > total {
+            return Response::new(416, "").with("content-range", &format!("bytes */{total}"));
+        }
         let mut res = Response {
-            status: 206,
+            status,
             headers: cors(),
-            body: slice,
+            body: Vec::new(),
+            file: Some(FileBody {
+                path: resolved.clone(),
+                start,
+                len,
+            }),
         };
         res = res
             .with("content-type", content_type)
-            .with("content-length", &range.len().to_string())
-            .with("content-range", &format!("bytes {}-{}/{}", range.start, range.end, total))
+            .with("content-length", &len.to_string())
             .with("accept-ranges", "bytes");
+        if status == 206 {
+            res = res.with(
+                "content-range",
+                &format!("bytes {}-{}/{}", start, start + len.saturating_sub(1), total),
+            );
+        }
         res
     }
 }
@@ -663,8 +698,18 @@ pub fn serve_connection<U: Upstream>(proxy: &Proxy<U>, mut stream: TcpStream) ->
         Ok(r) => r,
         Err(_) => return Ok(()),
     };
-    let mut res = proxy.handle(&req);
-    let body = std::mem::take(&mut res.body);
+    let res = proxy.handle(&req);
+    write_response(&mut stream, &res)?;
+    if let Some(file) = &res.file {
+        copy_file_range(&mut stream, file)?;
+    } else {
+        stream.write_all(&res.body)?;
+    }
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_response(stream: &mut TcpStream, res: &Response) -> std::io::Result<()> {
     let mut head = format!("HTTP/1.1 {} {}\r\n", res.status, res.status_text());
     let mut has_len = false;
     for (k, v) in &res.headers {
@@ -674,12 +719,34 @@ pub fn serve_connection<U: Upstream>(proxy: &Proxy<U>, mut stream: TcpStream) ->
         head.push_str(&format!("{k}: {v}\r\n"));
     }
     if !has_len {
-        head.push_str(&format!("content-length: {}\r\n", body.len()));
+        let len = match &res.file {
+            Some(file) => file.len,
+            None => res.body.len() as u64,
+        };
+        head.push_str(&format!("content-length: {len}\r\n"));
     }
     head.push_str("connection: close\r\n\r\n");
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(&body)?;
-    stream.flush()?;
+    stream.write_all(head.as_bytes())
+}
+
+/// Stream a byte window of a local file to the player without buffering it.
+fn copy_file_range<S: Write>(stream: &mut S, file: &FileBody) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut handle = File::open(&file.path)?;
+    handle.seek(SeekFrom::Start(file.start))?;
+    let mut remaining = file.len;
+    let mut buffer = vec![0u8; 64 * 1024];
+    while remaining > 0 {
+        let want = remaining.min(buffer.len() as u64) as usize;
+        let read = match handle.read(&mut buffer[..want]) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        stream.write_all(&buffer[..read])?;
+        remaining -= read as u64;
+    }
     Ok(())
 }
 
@@ -706,7 +773,6 @@ pub fn serve<U: Upstream + Send + Sync + 'static>(
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::io::Read as _;
     use std::net::SocketAddr;
 
 
@@ -912,7 +978,10 @@ mod tests {
         )));
         assert_eq!(ok.status, 200);
         assert_eq!(ok.header("content-type"), Some("video/mp4"));
-        assert_eq!(ok.body, b"0123456789");
+        // The bytes stream from disk, so they are described rather than held.
+        assert!(ok.body.is_empty());
+        let file = ok.file.expect("a file body");
+        assert_eq!((file.start, file.len), (0, 10));
 
         let denied = proxy.handle(&Request::get(&format!(
             "/file?p={}",
@@ -925,6 +994,87 @@ mod tests {
             urlencode(&dir.join("nope.mp4").to_string_lossy())
         )));
         assert_eq!(missing.status, 404);
+    }
+
+    #[test]
+    fn a_downloaded_file_streams_by_byte_range() {
+        let dir = std::env::temp_dir().join("indio-core-proxy-file-stream");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("big.mp4");
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &payload).unwrap();
+
+        let proxy = Proxy::new(FakeUpstream::new(b"", "video/mp4"), &dir);
+        let mut request = Request::get(&format!("/file?p={}", urlencode(&file.to_string_lossy())));
+        request.range_header = Some("bytes=1000-1999".to_string());
+        let res = proxy.handle(&request);
+        assert_eq!(res.status, 206);
+        assert_eq!(
+            res.header("content-range"),
+            Some(format!("bytes 1000-1999/{}", payload.len()).as_str())
+        );
+        assert_eq!(res.header("content-length"), Some("1000"));
+
+        // Over the socket the window really is the requested slice, and only
+        // that slice: a 2 GB download must never be buffered to be played.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        socket
+            .write_all(
+                format!(
+                    "GET /file?p={} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=1000-1999\r\n\r\n",
+                    urlencode(&file.to_string_lossy())
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        serve_connection(&proxy, server).unwrap();
+        let mut raw = Vec::new();
+        socket.read_to_end(&mut raw).unwrap();
+        let head_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("a header terminator");
+        let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+        assert!(head.contains("http/1.1 206"), "{head}");
+        assert_eq!(&raw[head_end + 4..], &payload[1000..2000]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn moving_the_download_folder_moves_what_file_may_serve() {
+        let from = std::env::temp_dir().join("indio-core-proxy-dir-a");
+        let to = std::env::temp_dir().join("indio-core-proxy-dir-b");
+        let _ = std::fs::create_dir_all(&from);
+        let _ = std::fs::create_dir_all(&to);
+        let in_from = from.join("a.mp4");
+        let in_to = to.join("b.mp4");
+        std::fs::write(&in_from, b"aaaa").unwrap();
+        std::fs::write(&in_to, b"bbbb").unwrap();
+
+        let shared = Arc::new(Mutex::new(from.clone()));
+        let proxy = Proxy::with_shared_dir(FakeUpstream::new(b"", "video/mp4"), Arc::clone(&shared));
+        let ask = |path: &PathBuf| {
+            proxy.handle(&Request::get(&format!(
+                "/file?p={}",
+                urlencode(&path.to_string_lossy())
+            )))
+        };
+        assert_eq!(ask(&in_from).status, 200);
+        assert_eq!(ask(&in_to).status, 403);
+
+        // Settings changed at runtime: the new folder is served, the old one is
+        // not, and nothing needed a restart.
+        proxy.set_download_dir(to.clone());
+        assert_eq!(shared.lock().unwrap().as_path(), to.as_path());
+        assert_eq!(ask(&in_to).status, 200);
+        assert_eq!(ask(&in_from).status, 403);
+
+        let _ = std::fs::remove_dir_all(&from);
+        let _ = std::fs::remove_dir_all(&to);
     }
 
     fn urlencode(value: &str) -> String {

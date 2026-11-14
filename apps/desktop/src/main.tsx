@@ -1,8 +1,8 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
-// Defines window.indio when running under the Tauri shell; a no-op under
-// Electron, where the preload script already provides it.
+// Builds `window.indio` on top of the Rust shell's IPC, and arms the dev smoke
+// harness when the shell asks for it.
 import './indio-tauri';
 import './styles.css';
 

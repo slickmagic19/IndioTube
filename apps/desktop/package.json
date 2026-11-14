@@ -1,27 +1,25 @@
 {
   "name": "indiotube-desktop",
   "private": true,
-  "version": "0.1.38",
-  "description": "IndioTube — ad-free YouTube desktop player with phone sync.",
+  "version": "0.1.39",
+  "description": "IndioTube — ad-free YouTube desktop player with phone sync (Tauri + Rust).",
   "author": "IndioTube",
-  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
-    "electron:dev": "electron .",
     "check": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "dist:portable": "node ../../scripts/fetch-ytdlp.js && npm run build && electron-builder --win portable",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "test:rust": "node ../../scripts/with-rust-env.js cargo test --manifest-path rust/indio-core/Cargo.toml && node ../../scripts/with-rust-env.js cargo test --manifest-path src-tauri/Cargo.toml",
+    "tauri:dev": "node ../../scripts/dev.js",
+    "tauri:shell": "node ../../scripts/with-rust-env.js tauri dev",
+    "tauri:build": "node ../../scripts/fetch-ytdlp.js && node ../../scripts/fetch-ffmpeg.js && node ../../scripts/with-rust-env.js tauri build",
+    "dist": "npm run tauri:build"
   },
   "devDependencies": {
     "@types/qrcode": "^1.5.5",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.0",
-    "electron": "32.3.3",
-    "electron-builder": "^25.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.5.0",
@@ -32,40 +30,5 @@
   "dependencies": {
     "qrcode": "^1.5.4",
     "@tauri-apps/api": "^2"
-  },
-  "build": {
-    "appId": "com.indiotube.desktop",
-    "productName": "IndioTube",
-    "npmRebuild": false,
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "vendor/ytdlp/yt-dlp.exe",
-        "to": "ytdlp/yt-dlp.exe"
-      },
-      {
-        "from": "vendor/ffmpeg/ffmpeg.exe",
-        "to": "ffmpeg/ffmpeg.exe"
-      },
-      {
-        "from": "vendor/ffmpeg/ffprobe.exe",
-        "to": "ffmpeg/ffprobe.exe"
-      }
-    ],
-    "win": {
-      "target": [
-        "portable"
-      ]
-    },
-    "portable": {
-      "artifactName": "IndioTube-${version}-win.${ext}"
-    },
-    "directories": {
-      "output": "../../release"
-    }
   }
 }

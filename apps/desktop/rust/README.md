@@ -1,9 +1,9 @@
 # indio-core (Rust)
 
-The Rust core for the IndioTube desktop app. This is the first slice of moving
-the Electron main process's JavaScript into Rust ahead of a Tauri shell; the
-rules, the edge cases and the tests are ported one module at a time so the
-running app keeps working while the core grows.
+The Rust core of the IndioTube desktop app: the rules, the edge cases and the
+tests that used to live in the Electron main process, ported module by module.
+The shell in `../src-tauri` is the only caller, and the desktop app ships no
+JavaScript main process at all.
 
 | module | JavaScript it replaces | what it owns |
 |---|---|---|
@@ -18,55 +18,38 @@ running app keeps working while the core grows.
 
 ## Toolchain on this machine
 
-`rustup` (stable) plus a **GNU** host toolchain, because the MSVC build tools
-are not installed here and a MinGW gcc is a ~400 MB portable unzip instead of a
-multi-gigabyte Visual Studio install:
+`rustup` (stable) plus the GNU host toolchain when MSVC build tools are missing;
+`../../scripts/with-rust-env.js` (used by the npm scripts) picks between them and
+points cargo at a portable MinGW-w64 — `~/tools/mingw2/mingw64/bin`, or whatever
+`INDIOTUBE_MINGW_BIN` says:
 
 ```bash
-rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-# MinGW-w64 from winlibs, unpacked outside the repo:
-#   C:/Users/<you>/tools/mingw2/mingw64/bin/gcc.exe
-export PATH="$HOME/.cargo/bin:$HOME/tools/mingw2/mingw64/bin:$PATH"
-export RUSTFLAGS="-C linker=C:/Users/<you>/tools/mingw2/mingw64/bin/gcc.exe"
+cd apps/desktop
+npm run test:rust          # indio-core, then the shell
+node ../../scripts/with-rust-env.js cargo test --manifest-path rust/indio-core/Cargo.toml
 ```
 
 ## Build and test
 
-```bash
-cd apps/desktop/rust/indio-core
-cargo +stable-x86_64-pc-windows-gnu test
-```
-
-The tests mirror `test/streams.test.ts` and `test/downloads.test.ts`: the same
-ladder shapes, the same caption rules, the same progress lines and the same
-retry limits. The proxy tests drive real `TcpStream`s through
+The tests mirror the JavaScript suites that used to sit in `apps/desktop/test`:
+the same ladder shapes, the same caption rules, the same progress lines and the
+same retry limits. The proxy tests drive real `TcpStream`s through
 `serve_connection`, so request parsing and response headers are exercised over
 a socket, not just in memory.
 
 ## Parity against the JavaScript
 
-`parity-check.js` fetches a real search page and Home feed with the app's own
-JavaScript client, saves the raw responses and prints what `electron/inTube.js`
-parsed. `examples/parse_fixture.rs` parses the same bytes with the Rust core:
+The JavaScript reference implementation is gone from the tree — it is in git
+history up to the last Electron release. What remains here is the fixture
+checker, which parses a saved InnerTube or yt-dlp response with the Rust core:
 
 ```bash
-node parity-check.js                      # writes fixture-search.json
-cargo run --example parse_fixture -- \
-  ../fixture-search.json search           # same items, Rust side
+cd apps/desktop/rust/indio-core
+cargo run --example parse_fixture -- ../fixture-search.json search
+cargo run --example parse_fixture -- ../fixture-watch.json watch <videoId>
 ```
 
-`compare-parity.js` then diffs the two outputs (ignoring `null` vs missing keys
-and rounding numbers), for every mode `parity-check.js` captured:
-
-```bash
-node parity-check.js                      # writes fixture-*.json and js-*.json
-# for each mode: search, watch, comments, channel, playlists, playlist
-cargo run --example parse_fixture -- ../fixture-watch.json watch <videoId> \
-  > ../rust-watch.json
-node compare-parity.js search watch comments channel playlists playlist
-```
-
-A run on 2026-11-13 matched on all six modes against live YouTube responses: a
+A live run on 2026-11-13 matched on all six modes against YouTube responses: a
 search page, a watch page with its Up next rail and chapters, the comment
 threads behind that video, a channel page, that channel's playlists tab and a
 playlist header. That run caught one real bug — the lockup thumbnail took the

@@ -7,11 +7,13 @@
   ],
   "scripts": {
     "dev": "npm --workspace apps/desktop run dev",
-    "electron:dev": "npm --workspace apps/desktop run electron:dev",
+    "tauri:dev": "npm --workspace apps/desktop run tauri:dev",
     "build": "npm --workspace apps/desktop run build",
     "check": "npm --workspace apps/desktop run check",
     "test": "npm --workspace apps/desktop run test",
+    "test:rust": "npm --workspace apps/desktop run test:rust",
     "fetch:ytdlp": "node scripts/fetch-ytdlp.js",
-    "dist:portable": "npm --workspace apps/desktop run dist:portable"
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.js",
+    "dist": "npm --workspace apps/desktop run dist"
   }
 }

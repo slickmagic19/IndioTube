@@ -26,12 +26,7 @@ pub fn locate(name: &str, env_var: &str) -> Option<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            roots.push(dir.to_path_buf());
-            roots.push(dir.join("vendor"));
-            // src-tauri/target/debug/IndioTube.exe -> apps/desktop/vendor
-            if let Some(app_dir) = dir.ancestors().nth(3) {
-                roots.push(app_dir.join("vendor"));
-            }
+            roots.extend(search_roots(dir));
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
@@ -40,13 +35,43 @@ pub fn locate(name: &str, env_var: &str) -> Option<PathBuf> {
     }
     let sub = if name == "yt-dlp" { "ytdlp" } else { "ffmpeg" };
     for root in roots {
-        for candidate in [root.join(sub).join(&exe_name), root.join(&exe_name)] {
+        for candidate in [
+            root.join(sub).join(&exe_name),
+            root.join("ytdlp").join(&exe_name),
+            root.join("ffmpeg").join(&exe_name),
+            root.join(&exe_name),
+        ] {
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
     }
     which(&exe_name)
+}
+
+/// Where the sidecars can be, given the directory the executable lives in.
+///
+/// The NSIS bundle puts `bundle.resources` under `_up_\vendor\<tool>\` next to
+/// the installed exe, so a packaged app has to be looked at differently from a
+/// `cargo run` out of `src-tauri/target/debug` — which is what found nothing
+/// and made playback claim yt-dlp was missing on a machine that had it.
+pub fn search_roots(exe_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots = vec![
+        exe_dir.to_path_buf(),
+        exe_dir.join("vendor"),
+        exe_dir.join("resources"),
+        // Tauri's NSIS layout: `$INSTDIR\IndioTube.exe` and
+        // `$INSTDIR\_up_\vendor\ytdlp\yt-dlp.exe`.
+        exe_dir.join("_up_"),
+        exe_dir.join("_up_").join("vendor"),
+        exe_dir.join("_up_").join("resources"),
+        exe_dir.join("resources").join("vendor"),
+    ];
+    // src-tauri/target/debug/IndioTube.exe -> apps/desktop/vendor
+    if let Some(app_dir) = exe_dir.ancestors().nth(3) {
+        roots.push(app_dir.join("vendor"));
+    }
+    roots
 }
 
 fn which(exe: &str) -> Option<PathBuf> {
@@ -139,4 +164,57 @@ pub fn extract(ytdlp: &PathBuf, video_id: &str) -> Result<Value, String> {
 
 pub fn ladder(info: &Value) -> QualityLadder {
     build_qualities(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_env_override_wins_when_the_file_exists() {
+        let dir = std::env::temp_dir().join(format!("indio-locate-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let fake = dir.join("yt-dlp-here.exe");
+        std::fs::write(&fake, b"").unwrap();
+        std::env::set_var("INDIOTUBE_LOCATE_TEST", &fake);
+        assert_eq!(
+            locate("yt-dlp", "INDIOTUBE_LOCATE_TEST").as_deref(),
+            Some(fake.as_path())
+        );
+        // A variable pointing at nothing falls back to the normal search.
+        std::env::set_var("INDIOTUBE_LOCATE_TEST", dir.join("missing.exe"));
+        assert!(locate("yt-dlp-definitely-not-installed", "INDIOTUBE_LOCATE_TEST").is_none());
+        std::env::remove_var("INDIOTUBE_LOCATE_TEST");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_sidecar_is_reported_not_guessed() {
+        assert!(locate("indiotube-no-such-tool", "INDIOTUBE_NO_SUCH_TOOL").is_none());
+    }
+
+    #[test]
+    fn the_installed_bundle_is_searched_where_it_actually_puts_them() {
+        // `%LOCALAPPDATA%\IndioTube\IndioTube.exe` with the resources under
+        // `_up_\vendor\…` — the NSIS layout. Missing this is what made a
+        // packaged build say yt-dlp was not installed.
+        let installed = std::path::Path::new("C:/Users/me/AppData/Local/IndioTube");
+        let roots = search_roots(installed);
+        assert!(roots.contains(&installed.join("_up_").join("vendor")));
+        assert!(roots.contains(&installed.join("resources")));
+        // The yt-dlp candidate the bundle produces:
+        let ytdlp = installed.join("_up_").join("vendor").join("ytdlp").join("yt-dlp.exe");
+        assert!(roots.iter().any(|root| root.join("ytdlp").join("yt-dlp.exe") == ytdlp));
+    }
+
+    #[test]
+    fn a_development_build_finds_the_repo_vendor_folder() {
+        // src-tauri/target/debug/IndioTube.exe -> apps/desktop/vendor
+        let debug = std::path::Path::new("C:/repo/apps/desktop/src-tauri/target/debug");
+        let roots = search_roots(debug);
+        assert!(roots.contains(
+            &std::path::Path::new("C:/repo/apps/desktop")
+                .join("vendor")
+        ));
+    }
 }

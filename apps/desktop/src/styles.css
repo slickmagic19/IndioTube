@@ -290,7 +290,10 @@ a { color: inherit; text-decoration: none; }
 .sk-list-row { display: flex; gap: 14px; padding: 8px 10px; align-items: center; }
 .sk-list-thumb { width: 170px; min-width: 170px; aspect-ratio: 16 / 9; border-radius: 8px; }
 .sk-watch { display: flex; gap: 24px; align-items: flex-start; }
-.sk-player { flex: 1; aspect-ratio: 16 / 9; border-radius: 12px; }
+/* Same box as the real .player-slot, so the streaming player can already sit
+   here while the rest of the watch page is still a skeleton. */
+.sk-player-slot { width: 100%; aspect-ratio: 16 / 9; position: relative; }
+.sk-player { width: 100%; height: 100%; aspect-ratio: 16 / 9; border-radius: 12px; }
 .sk-side { width: 380px; min-width: 320px; display: flex; flex-direction: column; gap: 14px; }
 .sk-side-row { display: flex; gap: 8px; }
 .sk-side-thumb { width: 168px; min-width: 168px; aspect-ratio: 16 / 9; border-radius: 8px; }

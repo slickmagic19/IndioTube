@@ -11,6 +11,7 @@ import type { Feed, VideoItem } from '../types';
 import { VideoCard } from '../components/VideoCard';
 import { GridSkeleton } from '../components/Skeletons';
 import { useApp } from '../store';
+import { warmPage } from '../player/warmStreams';
 import { useInfiniteScroll } from '../useInfiniteScroll';
 
 // Last rendered feed per mode. Coming back Home paints this immediately and
@@ -58,18 +59,20 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
     }
     setLoading(true);
     const params = chipIdx >= 0 ? feed?.chips[chipIdx]?.params || null : null;
-    // Home and Trending go out together: a signed-out Home is usually empty
-    // and the popular mix is the fallback, so racing them removes a whole
-    // round trip from the first paint.
-    const job = mode === 'home'
-      ? Promise.all([
-        window.indio.home({ params, force: force > 0 }),
-        window.indio.trending({ force: force > 0 }).catch(() => null),
-      ]).then(([home, trend]) => {
-        if (home.videos.length || home.chips.length) return { feed: home, popular: false };
-        if (trend && trend.videos.length) return { feed: trend, popular: true };
-        return { feed: home, popular: false };
-      })
+    // Home answers the paint; the popular mix is only a fallback, so it goes
+    // out beside Home — warm when Home turns out to be empty, but never in
+    // front of a Home that is already on screen.
+    const job: Promise<{ feed: Feed; popular: boolean }> = mode === 'home'
+      ? (() => {
+        const trending = window.indio.trending({ force: force > 0 }).catch(() => null);
+        return window.indio.home({ params, force: force > 0 }).then(async (home) => {
+          if (home.videos.length || home.chips.length) return { feed: home, popular: false };
+          const trend = await trending;
+          return trend && trend.videos.length
+            ? { feed: trend, popular: true }
+            : { feed: home, popular: false };
+        });
+      })()
       : window.indio.trending({ force: force > 0 }).then((f) => ({ feed: f, popular: true }));
     job.then(({ feed: f, popular: p }) => {
       if (cancelled) return;
@@ -77,6 +80,9 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       setPopular(p);
       setFeedVersion((v) => v + 1);
       feedCache[mode] = { at: Date.now(), feed: f, popular: p };
+      // The top of the page is what gets clicked, so the shell is told to have
+      // those streams ready while the viewer reads the titles.
+      warmPage(f.videos);
     })
       .catch((e) => { if (!cancelled) setError(String(e?.message || e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -101,6 +107,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       .then((f) => {
         setFeed(f);
         setFeedVersion((v) => v + 1);
+        warmPage(f.videos);
         // A category feed is not what Home shows on return, so it must not
         // replace the cached unfiltered feed.
         if (chipIdx === -1) feedCache[mode] = { at: Date.now(), feed: f, popular };

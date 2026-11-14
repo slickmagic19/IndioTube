@@ -1,49 +1,100 @@
-# IndioTube Tauri shell
+# IndioTube desktop shell (Rust / Tauri)
 
-The native shell for the desktop app: the same React UI in a Tauri window, with
-the Rust core (`../rust/indio-core`) behind the `window.indio` bridge. Electron
-(`../electron`) is still the shipping shell and still the source of everything
-not listed as wired below.
+The native shell for the desktop app: the React UI in `../src` inside a Tauri
+window, with the Rust core (`../rust/indio-core`) behind the `window.indio`
+bridge. This is the only shell — the Electron main process it replaced is gone,
+and everything that used to live there now runs in this process.
 
 ## Layout
 
 | file | what it owns |
 |---|---|
-| `src/main.rs` | window setup, `AppState`, media-proxy startup, the commands that are not metadata (settings, window, SponsorBlock stubs), and the headless `INDIOTUBE_SELFTEST` path |
-| `src/commands.rs` | the `window.indio` surface: feeds, search, suggestions, channels, watch, comments, playlists, stream URLs |
-| `src/http.rs` | `ureq` (rustls) transport for the InnerTube client and the CDN byte-range upstream |
-| `src/ytdlp.rs` | locating `yt-dlp`/`ffmpeg`, the bounded `--dump-single-json` run, and the quality ladder |
-| `../src/indio-tauri.ts` | builds `window.indio` out of `invoke` calls when `__TAURI_INTERNALS__` is present; a no-op under Electron |
+| `src/main.rs` | window setup, `AppState`, media-proxy startup, settings, window modes (fullscreen / mini), the headless `INDIOTUBE_SELFTEST` path |
+| `src/commands.rs` | the `window.indio` surface: feeds, search, suggestions, channels, watch, comments, playlists, stream URLs, SponsorBlock |
+| `src/library.rs` | the library store: history, resume positions, watch-later, likes, playlists, subscriptions, downloads, feedback ids |
+| `src/downloads.rs` | the download queue: concurrency 2, pause / resume / cancel, bounded retries, progress events, queue file |
+| `src/local_feed.rs` | the local Home recommender (signed-out YouTube serves nothing) |
+| `src/sync_server.rs` | the LAN pairing server the Android app scans a QR of |
+| `src/sync_core.rs` | the snapshot shape and the add-only merge rules shared with Android |
+| `src/stream_cache.rs` | the on-disk quality cache, so a reopen skips yt-dlp |
+| `src/ytdlp.rs` | locating `yt-dlp`/`ffmpeg`, the bounded `--dump-single-json` run, the quality ladder |
+| `src/http.rs` | `ureq` (rustls) transport for InnerTube and the CDN byte-range upstream |
+| `src/smoke.rs` | the dev-only `INDIOTUBE_SMOKE` harness |
+| `../src/indio-tauri.ts` | builds `window.indio` out of `invoke` calls when `__TAURI_INTERNALS__` is present |
 
-The media proxy from `indio-core` is started on a random loopback port at boot.
-The renderer only ever sees `http://127.0.0.1:<port>/v?t=…` URLs, so signed CDN
-links never reach the DOM.
+The media proxy from `indio-core` starts on a random loopback port at boot. The
+renderer only ever sees `http://127.0.0.1:<port>/v?t=…`, so signed CDN links
+never reach the DOM. Local files are streamed by byte range (`/file?p=…`) rather
+than buffered, so a multi-gigabyte download plays without loading into memory.
+
+## Where the data lives
+
+The same folder Electron used (`%APPDATA%\indiotube-desktop`), with the same
+file names, so switching shells keeps the profile:
+
+- `indiotube-library.json` — the library store
+- `indiotube-settings.json` — settings (an older `settings.json` is folded in)
+- `downloads.json` — the download queue (an older `indiotube-downloads.json` is folded in)
+- `streams-cache.json` — resolved quality ladders (5h TTL, read on first use, not at launch)
+- `home-mix.json` — the last local Home page (12h usable, so a relaunch paints
+  the feed before it has made a single request)
+
+## Why opening the app and pressing play are quick
+
+Four things used to stand between a click and a picture, and each has its own
+answer in this directory:
+
+- **The same video resolved three times.** Hovering a card, the watch page's
+  warm-up and the player all ask for the ladder within a second of each other.
+  `src/extract.rs::SingleFlight` runs yt-dlp once and lets the other callers
+  share the answer.
+- **A video that will not resolve, retried forever.** A 60-second note in
+  `src/extract.rs::MissCache` answers the second ask immediately.
+- **A cold Home page.** `src/local_feed.rs` saves the mix it painted last time
+  (`home-mix.json`) and serves it straight away, re-gathering behind the page,
+  so the first cards arrive with the app instead of after a gather — measured
+  here as 24 s down to 1.5 s for a relaunch. The renderer no longer waits for
+  the popular-mix request before it paints, either.
+- **A click on a video nobody had hovered.** `commands::warm_streams` keeps a
+  short queue of the videos that are on screen and resolves one at a time, in
+  the background, giving up its turn whenever the viewer is waiting for a
+  resolution of their own (`SingleFlight::active`). Pages call it through
+  `window.indio.streams.warm`.
 
 ## Running it
 
 ```bash
 cd apps/desktop
-npm run dev            # vite on 127.0.0.1:5174 (the shell's devUrl)
-npm run tauri:dev      # in a second terminal
+npm run tauri:dev      # starts vite on 127.0.0.1:5174 and the window
+npm run tauri:build    # release binary + bundle under src-tauri/target/release/bundle
 ```
 
-This machine has no MSVC build tools, so the GNU toolchain is required:
-
-```bash
-export PATH="$HOME/.cargo/bin:$HOME/tools/mingw2/mingw64/bin:$PATH"
-export RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu
-export RUSTFLAGS="-C linker=C:/Users/<you>/tools/mingw2/mingw64/bin/gcc.exe"
-cd apps/desktop/src-tauri && cargo build
-./target/debug/IndioTube.exe
-```
-
+Both go through `../../scripts/with-rust-env.js`, which picks the toolchain:
+MSVC when `link.exe` is on PATH, otherwise the GNU toolchain plus a portable
+MinGW-w64 (`~/tools/mingw2/mingw64/bin`, override with `INDIOTUBE_MINGW_BIN`).
 `icons/icon.ico` is generated by `node make-icon.js`; `tauri-build` needs it for
 the Windows resource.
+
+## Tests
+
+```bash
+cd apps/desktop
+npm run test:rust      # indio-core + shell unit tests (cargo test)
+npm test               # renderer logic + the window.indio bridge contract
+```
+
+The Rust tests are the ported JavaScript suites: the library rules
+(`src/library.rs`), the add-only sync merge (`src/sync_core.rs`), the pairing
+server's wire contract (`src/sync_server.rs`), the download queue (`src/downloads.rs`),
+the recommender ranking (`src/local_feed.rs`), the ladder→player URL mapping
+(`src/commands.rs`), and the quality ladder / proxy / parsers in
+`../rust/indio-core`. `../../test/indioBridge.test.ts` pins the envelope each
+`window.indio` call unwraps, which is the seam between the two halves.
 
 ## Checking it without clicking
 
 ```bash
-INDIOTUBE_SELFTEST=dQw4w9WgXcQ ./target/debug/IndioTube.exe
+INDIOTUBE_SELFTEST=dQw4w9WgXcQ target/debug/IndioTube.exe
 ```
 
 It searches, resolves the ladder with yt-dlp, registers a proxy token for the
@@ -57,21 +108,36 @@ and `Content-Range`. A real run:
 [selftest] OK
 ```
 
-## Wired
+For the UI, the smoke harness boots the app, opens a route and prints what the
+renderer actually painted before exiting:
 
-- Home, trending, search (+ continuation), suggestions
-- Channels: videos, live tab, playlists tab (+ continuation), about
-- Watch page, Up next continuation, comments, playlists (+ continuation)
-- Stream ladder and player URLs, captions, local file URLs, ffmpeg detection
-- SponsorBlock segments, settings persistence, fullscreen/mini window
+```bash
+INDIOTUBE_SMOKE=1 INDIOTUBE_SMOKE_ROUTE=watch/dQw4w9WgXcQ INDIOTUBE_SMOKE_MEDIA=1 \
+  INDIOTUBE_SMOKE_WINDOW=1 INDIOTUBE_SMOKE_WAIT=30000 target/debug/IndioTube.exe
+```
 
-## Not wired yet
+`INDIOTUBE_SMOKE_CLICK=1` goes with it: the harness clicks the first card the
+feed paints, and the report's `firsts` then count from that click —
+`titleAt` (what the page showed), `playerAt` (when the video area appeared)
+and `frameAt` (first decoded frame) — while `cardsAt`/`clickedAt` count from
+the moment the app started. Those four numbers are how a release is compared
+against the last one instead of being eyeballed. Redirect the run into a file
+and `node ../../../scripts/read-smoke-log.js <file>` prints it as a table.
 
-- **Downloads**: the queue lives in `electron/downloads.js`; the commands answer
-  with "the download queue is not available in the Rust shell yet" so the
-  Downloads screen reports it instead of silently doing nothing.
-- **Library** (history, subscriptions, resume positions, notes): `library_get`
-  and `library_op` answer the same way.
-- **Device sync** (`electron/sync.js`).
+`[smoke] {…}` carries the title, hash, node/skeleton/card counts, the first
+lines of text and any window errors, plus — with the flags on — five samples of
+the video and audio clocks and the result of driving the mini-player commands.
+The exit code is non-zero when the page reported errors. (Screen captures and
+network throttling were Electron-only and are not ported.)
 
-Those three are why the shell is not the shipping build yet.
+A real watch-page run looks like this — video playing through the Rust proxy,
+the action row and description painted, the mini command resizing the window to
+460×300 and restoring it:
+
+```
+[smoke] {"cards":0,"errors":[],"hash":"#/watch/dQw4w9WgXcQ",
+  "media":{"samples":[…, {"t":20.8,"ready":4,"paused":false}, …]},
+  "modes":{"before":{"fullscreen":false},"setMini":true,
+           "inMini":{"size":[460,300]},"after":{"size":[1296,820]}},
+  "nodes":583,"skeletons":0,"text":"IndioTube Rick Astley - Never Gonna …"}
+```

@@ -10,6 +10,8 @@ import { usePlayback } from '../player/PlaybackHost';
 import { RelatedCard, downloadVideo, openVideo } from '../components/VideoCard';
 import { Avatar, Menu, Verified } from '../components/ui';
 import { WatchSkeleton } from '../components/Skeletons';
+import { peekVideo } from '../videoHints';
+import { warmPage } from '../player/warmStreams';
 import { ClockIcon, DownloadIcon, PanelRightIcon, PlaylistIcon, ThumbDownIcon, ThumbUpIcon } from '../components/icons';
 import { PlaylistPicker } from '../components/VideoCard';
 
@@ -26,14 +28,28 @@ export function WatchScreen({ videoId }: { videoId: string }) {
   const [descOpen, setDescOpen] = useState(false);
   const [saveAnchor, setSaveAnchor] = useState<DOMRect | null>(null);
 
+  // The card that was clicked already showed the title, the channel and the
+  // length, so the page starts with those instead of a blank skeleton while
+  // the metadata round trip is still in the air.
+  const known = useMemo(() => peekVideo(videoId), [videoId]);
+  // YouTube's multi-owner uploads ("Vox and 2 more") come back on the watch
+  // payload without a channel at all; the card has one, so the row never
+  // collapses into an empty circle with nothing beside it.
+  const channel = {
+    name: watch?.channelName || known?.channelName || '',
+    id: watch?.channelId || known?.channelId || '',
+    avatar: watch?.channelAvatar ?? known?.channelAvatar ?? null,
+    verified: Boolean(watch?.channelVerified),
+  };
+
   const video: VideoItem = useMemo(() => {
     if (watch) {
       return {
         videoId,
         title: watch.title,
-        channelName: watch.channelName,
-        channelId: watch.channelId,
-        channelAvatar: watch.channelAvatar,
+        channelName: channel.name,
+        channelId: channel.id,
+        channelAvatar: channel.avatar,
         thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
         durationSec: 0,
         viewsText: watch.viewsText,
@@ -42,10 +58,10 @@ export function WatchScreen({ videoId }: { videoId: string }) {
         membersOnly: watch.membersOnly,
       };
     }
-    return {
+    return known ?? {
       videoId, title: 'Loading…', durationSec: 0, isLive: false, membersOnly: false,
     };
-  }, [watch, videoId]);
+  }, [watch, known]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false;
@@ -57,7 +73,7 @@ export function WatchScreen({ videoId }: { videoId: string }) {
     setDescOpen(false);
     // Hand the video to the shared player straight away (it keeps playing
     // across routes) and warm the yt-dlp ladder in parallel with the metadata.
-    const stub: VideoItem = {
+    const stub: VideoItem = peekVideo(videoId) ?? {
       videoId, title: 'Loading…', durationSec: 0, isLive: false, membersOnly: false,
       thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
     };
@@ -69,6 +85,9 @@ export function WatchScreen({ videoId }: { videoId: string }) {
         setWatch(w);
         setRelated(w.related);
         setRelatedToken(w.relatedToken || null);
+        // The first couple of up-next videos are what this viewer is likely to
+        // play next, so the shell is told to have them ready while they watch.
+        warmPage(w.related, 3);
         const full: VideoItem = {
           videoId,
           title: w.title,
@@ -99,7 +118,7 @@ export function WatchScreen({ videoId }: { videoId: string }) {
 
   const liked = Boolean(lib?.library.liked.some((v) => v.videoId === videoId));
   const later = Boolean(lib?.library.watchLater.some((v) => v.videoId === videoId));
-  const subscribed = Boolean(watch?.channelId && lib?.subscriptions.some((s) => s.channelId === watch.channelId));
+  const subscribed = Boolean(channel.id && lib?.subscriptions.some((s) => s.channelId === channel.id));
 
   const loadMoreComments = async () => {
     if (!commentsCont) return;
@@ -137,7 +156,10 @@ export function WatchScreen({ videoId }: { videoId: string }) {
     );
   }
   if (!watch) {
-    return <WatchSkeleton />;
+    // The player is handed its slot here, not only in the real layout: it can
+    // start streaming (and be seen doing it) while the metadata is still in
+    // flight. The title comes from the card that was clicked.
+    return <WatchSkeleton slotRef={playback.registerSlot} video={video} />;
   }
 
   // The "Up next" rail is toggled from its own header (and from the title row
@@ -164,23 +186,23 @@ export function WatchScreen({ videoId }: { videoId: string }) {
 
         <div className="watch-bar">
           <div className="watch-channel" style={{ margin: 0 }}>
-            <div className="avatar" onClick={() => watch.channelId && navigate(`/channel/${watch.channelId}`)} style={{ cursor: 'pointer' }}>
-              <Avatar name={watch.channelName} src={watch.channelAvatar} size={40} />
+            <div className="avatar" onClick={() => channel.id && navigate(`/channel/${channel.id}`)} style={{ cursor: 'pointer' }}>
+              <Avatar name={channel.name} src={channel.avatar} size={40} />
             </div>
             <div>
-              <div className="name" onClick={() => watch.channelId && navigate(`/channel/${watch.channelId}`)}>
-                {watch.channelName}
-                {watch.channelVerified ? <Verified size={13} /> : null}
+              <div className="name" onClick={() => channel.id && navigate(`/channel/${channel.id}`)}>
+                {channel.name}
+                {channel.verified ? <Verified size={13} /> : null}
               </div>
               <div className="subs">{watch.subscribersText || ''}</div>
             </div>
-            {watch.channelId && (
+            {channel.id && (
               <button
                 className={`pill${subscribed ? ' subbed' : ''}`}
                 style={{ marginLeft: 14 }}
                 onClick={() => {
-                  if (subscribed) op('unsubscribe', watch.channelId);
-                  else op('subscribe', { channelId: watch.channelId, name: watch.channelName || '', avatar: watch.channelAvatar || null });
+                  if (subscribed) op('unsubscribe', channel.id);
+                  else op('subscribe', { channelId: channel.id, name: channel.name, avatar: channel.avatar });
                 }}
               >
                 {subscribed ? 'Subscribed' : 'Subscribe'}

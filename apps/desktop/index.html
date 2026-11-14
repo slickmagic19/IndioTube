@@ -14,7 +14,8 @@
         const saved = localStorage.getItem('indio-theme');
         document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
       } catch (e) { /* default dark */ }
-      // Captured by the INDIOTUBE_SMOKE dev harness (electron/main.js).
+      // Captured by the INDIOTUBE_SMOKE dev harness (src-tauri/src/smoke.rs).
+      // Errors thrown before the module scripts run are picked up from here.
       window.__smokeErrors = [];
       window.addEventListener('error', (e) => window.__smokeErrors.push(String(e.message).slice(0, 200)));
     </script>

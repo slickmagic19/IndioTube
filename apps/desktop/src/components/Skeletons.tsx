@@ -2,6 +2,7 @@
 // (grid gap, thumb aspect, 36px avatars) so content never jumps when it
 // arrives — the point of a skeleton is to avoid that shift.
 import React from 'react';
+import { Avatar } from './ui';
 
 export function Sk({ w, h, radius, className, style }: {
   w?: number | string;
@@ -80,18 +81,48 @@ export function CommentsSkeleton({ count = 4 }: { count?: number }) {
   );
 }
 
-export function WatchSkeleton() {
+export function WatchSkeleton({ slotRef, video }: {
+  slotRef?: (el: HTMLDivElement | null) => void;
+  /** What the card that was clicked already showed. Painting it here is what
+   *  makes the page feel instant; the real metadata replaces it a moment later
+   *  in the same boxes, so nothing moves. */
+  video?: { title?: string; channelName?: string; channelAvatar?: string; viewsText?: string; publishedText?: string } | null;
+}) {
+  const stats = [video?.viewsText, video?.publishedText].filter(Boolean).join(' · ');
   return (
     <div className="sk-watch">
       <div className="watch-main">
-        <Sk className="sk-player" />
-        <Sk style={{ height: 18, width: '68%', margin: '16px 0 12px' }} />
+        {/* The player is placed over this box and starts streaming while the
+            rest of the page still waits for its metadata, so the video is on
+            screen seconds before the title, channel row and comments land. */}
+        <div className="sk-player-slot" ref={slotRef}>
+          <Sk className="sk-player" />
+        </div>
+        {video?.title && video.title !== 'Loading…'
+          ? <div className="watch-title">{video.title}</div>
+          : <Sk style={{ height: 18, width: '68%', margin: '16px 0 12px' }} />}
         <div className="sk-row" style={{ alignItems: 'center', marginTop: 0 }}>
-          <Sk className="sk-avatar" style={{ width: 40, height: 40 }} />
-          <div className="sk-lines" style={{ gap: 8, maxWidth: 260 }}>
-            <Sk className="sk-line" style={{ width: 150, height: 13 }} />
-            <Sk className="sk-line" style={{ width: 100, height: 10 }} />
-          </div>
+          {video?.channelName ? (
+            /* The same boxes the loaded page uses, so the channel row does not
+               move when the metadata arrives. */
+            <div className="watch-channel">
+              <div className="avatar">
+                <Avatar name={video.channelName} src={video.channelAvatar} size={40} />
+              </div>
+              <div>
+                <div className="name">{video.channelName}</div>
+                {stats && <div className="subs">{stats}</div>}
+              </div>
+            </div>
+          ) : (
+            <>
+              <Sk className="sk-avatar" style={{ width: 40, height: 40 }} />
+              <div className="sk-lines" style={{ gap: 8, maxWidth: 260 }}>
+                <Sk className="sk-line" style={{ width: 150, height: 13 }} />
+                <Sk className="sk-line" style={{ width: 100, height: 10 }} />
+              </div>
+            </>
+          )}
           <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
             <Sk style={{ width: 96, height: 36, borderRadius: 20 }} />
             <Sk style={{ width: 96, height: 36, borderRadius: 20 }} />

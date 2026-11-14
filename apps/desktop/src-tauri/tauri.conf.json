@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "IndioTube",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "identifier": "com.indiotube.desktop",
   "build": {
     "devUrl": "http://127.0.0.1:5174",
     "frontendDist": "../dist",
     "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
@@ -19,7 +19,9 @@
         "minWidth": 940,
         "minHeight": 600,
         "backgroundColor": "#0f0f0f",
-        "resizable": true
+        "resizable": true,
+        "center": true,
+        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding"
       }
     ],
     "security": {
@@ -27,8 +29,18 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
-    "icon": []
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": [
+      "../vendor/ytdlp/yt-dlp.exe",
+      "../vendor/ffmpeg/ffmpeg.exe",
+      "../vendor/ffmpeg/ffprobe.exe"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }
