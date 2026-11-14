@@ -214,6 +214,15 @@ fn wrap(v: &Value, height: i64) -> Track {
     }
 }
 
+/// True for the high-frame-rate rendition of a height (50/60 fps).
+fn high_fps(v: &Value) -> bool {
+    f(v, "fps").unwrap_or(30.0) > 30.0
+}
+
+fn format_fps(v: &Value) -> i64 {
+    f(v, "fps").unwrap_or(30.0).round() as i64
+}
+
 fn pick_subtitle_url(list: &Value) -> Option<String> {
     let arr = list.as_array()?;
     // yt-dlp lists lowest first; the JS side iterates in reverse.
@@ -295,30 +304,27 @@ pub fn build_qualities(info: &Value) -> QualityLadder {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let best_muxed_at = |h: i64| -> Option<&Value> {
+    let best_muxed_at = |h: i64, high: bool| -> Option<&Value> {
         muxed
             .iter()
             .copied()
-            .filter(|v| format_height(v) == h)
+            .filter(|v| format_height(v) == h && high_fps(v) == high)
             .max_by(|a, b| {
                 audio_score(a, info)
                     .partial_cmp(&audio_score(b, info))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     };
-    let best_video_at = |h: i64| -> Option<&Value> {
+    let best_video_at = |h: i64, high: bool| -> Option<&Value> {
         audio?;
         video_only
             .iter()
             .copied()
-            .filter(|v| format_height(v) == h)
+            .filter(|v| format_height(v) == h && high_fps(v) == high)
             .min_by(|a, b| {
-                // 30 fps before 60 fps at the same height: half the bitrate for
-                // the same picture, which is what makes a start feel slow.
-                let fps_rank = |v: &Value| if v.get("fps").and_then(Value::as_f64).unwrap_or(30.0) > 30.0 { 1 } else { 0 };
+                // Best codec first, then the cheaper stream of that codec.
                 codec_rank(a)
                     .cmp(&codec_rank(b))
-                    .then(fps_rank(a).cmp(&fps_rank(b)))
                     .then(
                         f(b, "tbr")
                             .unwrap_or(0.0)
@@ -337,25 +343,27 @@ pub fn build_qualities(info: &Value) -> QualityLadder {
     heights.sort_unstable_by(|a, b| b.cmp(a));
     heights.dedup();
 
-    let options: Vec<Rung> = heights
-        .iter()
-        .map(|&h| {
-            let m = best_muxed_at(h);
-            let v = best_video_at(h);
-            let chosen = v.or(m);
-            let fps = chosen
-                .and_then(|f| f.get("fps").and_then(Value::as_f64))
-                .unwrap_or(0.0)
-                .round() as i64;
-            Rung {
+    // One rung per (height, frame-rate class). A 60 fps file is twice the
+    // bitrate and twice the decode work, so it is the viewer's choice rather
+    // than something to silently drop - before this, a 60 fps rendition of a
+    // height could never be selected at all. The 30 fps rung comes first, so
+    // "Auto" and the default menu order keep the cheaper stream.
+    let mut options: Vec<Rung> = Vec::new();
+    for &h in &heights {
+        for high in [false, true] {
+            let m = best_muxed_at(h, high);
+            let v = best_video_at(h, high);
+            let Some(chosen) = v.or(m) else { continue };
+            let fps = format_fps(chosen);
+            options.push(Rung {
                 height: h,
                 label: if fps >= 50 { format!("{h}p{fps}") } else { format!("{h}p") },
                 fps,
                 muxed: m.map(|f| wrap(f, h)),
                 video_only: v.map(|f| wrap(f, h)),
-            }
-        })
-        .collect();
+            });
+        }
+    }
 
     let best_muxed = muxed.iter().copied().max_by(|a, b| {
         format_height(a)
@@ -436,6 +444,36 @@ pub fn nearest(options: &[Rung], height: i64) -> Option<&Rung> {
         .or_else(|| options.iter().min_by_key(|o| o.height))
 }
 
+/// The rung for a requested height and frame rate.
+///
+/// `fps` is the rendition the viewer picked from the menu: `Some(60)` means
+/// the high-frame-rate rung at that height, `None` keeps the cheap one (which
+/// is also what Auto means on a slow link). A request for a rendition that does
+/// not exist falls back to the other class rather than failing the play.
+pub fn pick_rung(options: &[Rung], height: i64, fps: Option<i64>) -> Option<&Rung> {
+    let at_or_below: Vec<&Rung> = options.iter().filter(|o| o.height <= height).collect();
+    // Nothing at or below the request: take the smallest rung there is, never
+    // something bigger than the viewer asked for.
+    let pool: Vec<&Rung> = if at_or_below.is_empty() {
+        let lowest = options.iter().map(|r| r.height).min()?;
+        options.iter().filter(|r| r.height == lowest).collect()
+    } else {
+        at_or_below
+    };
+    let best_height = pool.iter().map(|r| r.height).max()?;
+    let same: Vec<&Rung> = pool.into_iter().filter(|r| r.height == best_height).collect();
+    if let Some(wanted) = fps {
+        let high = wanted >= 50;
+        if let Some(hit) = same.iter().find(|r| (r.fps >= 50) == high) {
+            return Some(hit);
+        }
+    }
+    if let Some(low) = same.iter().copied().find(|r| r.fps < 50) {
+        return Some(low);
+    }
+    same.first().copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,21 +513,53 @@ mod tests {
     }
 
     #[test]
-    fn prefers_split_video_when_audio_exists_and_labels_frame_rates() {
+    fn offers_30_and_60_fps_as_separate_rungs() {
         let ladder = build_qualities(&info(vec![
-            f(json!({ "height": 1080, "format_id": "v60", "acodec": "none", "fps": 60, "tbr": 4000.0 })),
-            f(json!({ "height": 1080, "format_id": "v30", "acodec": "none", "fps": 30, "tbr": 2500.0 })),
+            f(json!({ "height": 1080, "format_id": "v60", "acodec": "none", "fps": 60, "tbr": 4000.0, "url": "https://cdn/60" })),
+            f(json!({ "height": 1080, "format_id": "v30", "acodec": "none", "fps": 30, "tbr": 2500.0, "url": "https://cdn/30" })),
             f(json!({ "height": 1080, "format_id": "a", "vcodec": "none", "acodec": "opus", "ext": "webm", "abr": 160.0 })),
         ]));
-        let rung = &ladder.options[0];
-        // The label follows the rung's chosen stream: the 30fps video-only file
-        // wins over the 60fps one, so the label carries no frame rate.
-        assert_eq!(rung.label, "1080p");
-        assert_eq!(rung.fps, 30);
-        let chosen = rung.video_only.as_ref().unwrap();
-        assert_eq!(chosen.url, "https://cdn.example/vid.mp4?sig=x");
-        // 30 fps is the preferred pick even though 60 fps exists.
-        assert!(rung.video_only.is_some());
+        // Two rungs at the same height: the cheap one first, 60 fps available.
+        assert_eq!(ladder.options.len(), 2);
+        assert_eq!(ladder.options[0].label, "1080p");
+        assert_eq!(ladder.options[0].fps, 30);
+        assert_eq!(ladder.options[1].label, "1080p60");
+        assert_eq!(ladder.options[1].fps, 60);
+        assert_eq!(ladder.options[1].video_only.as_ref().unwrap().url, "https://cdn/60");
+        // Auto stays on the cheaper rendition.
+        assert_eq!(pick_rung(&ladder.options, ladder.auto_height, None).unwrap().fps, 30);
+    }
+
+    #[test]
+    fn pick_rung_honours_the_frame_rate_the_viewer_asked_for() {
+        let ladder = build_qualities(&info(vec![
+            f(json!({ "height": 720, "format_id": "v60", "acodec": "none", "fps": 60, "tbr": 3500.0, "url": "https://cdn/60" })),
+            f(json!({ "height": 720, "format_id": "v30", "acodec": "none", "fps": 30, "tbr": 2000.0, "url": "https://cdn/30" })),
+            f(json!({ "height": 720, "format_id": "a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128.0 })),
+        ]));
+        assert_eq!(pick_rung(&ladder.options, 720, Some(60)).unwrap().video_only.as_ref().unwrap().url, "https://cdn/60");
+        assert_eq!(pick_rung(&ladder.options, 720, Some(30)).unwrap().video_only.as_ref().unwrap().url, "https://cdn/30");
+        assert_eq!(pick_rung(&ladder.options, 720, None).unwrap().fps, 30);
+        // A video that only offers 60 fps still plays when 30 is asked for.
+        let only60 = build_qualities(&info(vec![
+            f(json!({ "height": 720, "format_id": "v60", "acodec": "none", "fps": 60 })),
+            f(json!({ "height": 720, "format_id": "a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128.0 })),
+        ]));
+        assert_eq!(pick_rung(&only60.options, 720, Some(30)).unwrap().fps, 60);
+    }
+
+    #[test]
+    fn a_60_fps_rung_keeps_the_best_codec() {
+        // 60 fps is not worth decoding in software: avc wins over av01 at the
+        // same frame rate.
+        let ladder = build_qualities(&info(vec![
+            f(json!({ "height": 720, "format_id": "av1", "vcodec": "av01.0.05M.08", "acodec": "none", "fps": 60, "tbr": 3000.0, "url": "https://cdn/av1" })),
+            f(json!({ "height": 720, "format_id": "avc", "vcodec": "avc1.4d401f", "acodec": "none", "fps": 60, "tbr": 3200.0, "url": "https://cdn/avc" })),
+            f(json!({ "height": 720, "format_id": "a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128.0 })),
+        ]));
+        let rung = pick_rung(&ladder.options, 720, Some(60)).unwrap();
+        assert_eq!(rung.fps, 60);
+        assert_eq!(rung.video_only.as_ref().unwrap().url, "https://cdn/avc");
     }
 
     #[test]

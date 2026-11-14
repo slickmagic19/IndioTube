@@ -987,6 +987,7 @@ pub fn default_settings(download_dir: &str) -> Value {
         "theme": "dark",
         "autoplay": true,
         "defaultQuality": Value::Null,
+        "defaultQualityFps": Value::Null,
         "captionsEnabled": false,
         "captionLang": "",
         "sponsorBlock": true,

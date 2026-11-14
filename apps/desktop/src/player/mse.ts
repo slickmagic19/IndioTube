@@ -12,6 +12,7 @@
 // request; no manifest, no re-muxing, no ffmpeg.
 import { useEffect, useRef, useState } from 'react';
 import type { MutableRefObject, RefObject } from 'react';
+import { releaseMediaElement } from './mediaLifecycle';
 
 export interface Segment {
   /** Absolute byte offset in the file. */
@@ -189,9 +190,122 @@ export const BUFFER_AHEAD_SECONDS = 30;
 export const BUFFER_BEHIND_SECONDS = 30;
 const MAX_INIT_BYTES = 2 * 1024 * 1024;
 
+/**
+ * A byte range can fail on its own (a CDN 5xx, a socket reset, a proxy hiccup)
+ * long before the stream as a whole is unhealthy. Re-asking for that one range
+ * keeps the session alive where a single failure used to end it and drop the
+ * viewer into the two-element fallback. Pinned by a unit test.
+ */
+export const FETCH_ATTEMPTS = 2;
+export const FETCH_RETRY_MS = 250;
+
+/**
+ * Don't start a SourceBuffer `remove` for a sliver: every trim is an async
+ * update that wakes the media pipeline and its decoder. Waiting until at least
+ * this much has fallen out of the retained window keeps steady playback from
+ * running a remove every single pump round. Pinned by a unit test.
+ */
+export const EVICT_MARGIN_SECONDS = 5;
+
+/** Media kept behind the playhead when a full buffer rejects an append. */
+export const EMERGENCY_BEHIND_SECONDS = 5;
+
+/**
+ * A segment is one sidx entry - usually a few seconds, and on a high-latency
+ * link each one costs a full round trip. Fetching several adjacent segments in
+ * one range request keeps the pipe full instead of idling a whole RTT per
+ * segment, and appending them together means fewer SourceBuffer updates (each
+ * one wakes the decoder). Bounded so one chunk still fits the proxy cache and
+ * never holds much more than the buffer window in memory.
+ */
+export const CHUNK_MAX_BYTES = 8 * 1024 * 1024;
+export const CHUNK_MAX_SEGMENTS = 8;
+
+/** A contiguous run of segments that one range request can deliver. */
+export interface Chunk {
+  /** Index of the first segment in the run. */
+  first: number;
+  count: number;
+  /** Inclusive byte range of the whole run. */
+  start: number;
+  end: number;
+  /** Presentation time of the first segment and the run's total duration. */
+  time: number;
+  duration: number;
+}
+
+/**
+ * The largest run of contiguous segments worth one request, starting at
+ * `from`. `untilTime` is the buffer-ahead horizon: a chunk never reaches past
+ * it, so the retained window stays bounded. Returns null when `from` is past
+ * the end.
+ */
+export function chunkAt(
+  index: TrackIndex,
+  from: number,
+  untilTime = Number.POSITIVE_INFINITY,
+  maxBytes = CHUNK_MAX_BYTES,
+  maxSegments = CHUNK_MAX_SEGMENTS,
+): Chunk | null {
+  const segments = index.segments;
+  if (from < 0 || from >= segments.length) return null;
+  const first = segments[from];
+  let count = 1;
+  let bytes = first.size;
+  while (from + count < segments.length && count < maxSegments) {
+    const prev = segments[from + count - 1];
+    const next = segments[from + count];
+    // The index accumulates offsets, so this holds; a gap would mean the range
+    // no longer maps onto the fragment that was asked for.
+    if (next.start !== prev.start + prev.size) break;
+    if (bytes + next.size > maxBytes) break;
+    if (next.time + next.duration > untilTime) break;
+    bytes += next.size;
+    count += 1;
+  }
+  const last = segments[from + count - 1];
+  return {
+    first: from,
+    count,
+    start: first.start,
+    end: last.start + last.size - 1,
+    time: first.time,
+    duration: last.time + last.duration - first.time,
+  };
+}
+
 /** Byte offset below which buffered data can be dropped, or null to keep it. */
 export function evictionCutoff(now: number, behind = BUFFER_BEHIND_SECONDS): number | null {
   return now >= behind ? Math.max(0, now - behind) : null;
+}
+
+/**
+ * True only when a trim would really reclaim a useful chunk of media. `remove`
+ * on an already-empty range still costs an update cycle, so a null/unknown
+ * buffered start is a no-op.
+ */
+export function shouldEvict(
+  bufferedStart: number | null,
+  cutoff: number | null,
+  margin = EVICT_MARGIN_SECONDS,
+): boolean {
+  if (bufferedStart == null || cutoff == null) return false;
+  if (!Number.isFinite(bufferedStart) || !Number.isFinite(cutoff)) return false;
+  return bufferedStart < cutoff - margin;
+}
+
+/**
+ * Aggressive cut used after a failed append (usually a full SourceBuffer).
+ * Returns null when there is nothing behind the playhead left to reclaim.
+ */
+export function emergencyCutoff(
+  now: number,
+  bufferedStart: number | null,
+  behind = EMERGENCY_BEHIND_SECONDS,
+): number | null {
+  if (bufferedStart == null || !Number.isFinite(bufferedStart) || !Number.isFinite(now)) return null;
+  const cutoff = Math.max(0, now - behind);
+  return cutoff > bufferedStart + 0.25 ? cutoff : null;
 }
 
 /**
@@ -210,10 +324,30 @@ export class MseSession {
 
   private pendingSeek: number | null = null;
   private pumpTimer = 0;
+  /**
+   * False until the fetch the viewer is waiting for has landed. The first
+   * fetch after a start or a seek asks for one segment only, so the picture
+   * appears after the least possible number of bytes; everything after it
+   * batches several segments per request.
+   */
+  private primed = false;
   /** Cancels every in-flight byte request when this session is replaced. */
   private abort = new AbortController();
   private fetchedBytes = 0;
   private fetchedRequests = 0;
+
+  /**
+   * The element itself can fail (decoder error, MediaSource closed by the
+   * shell). Without this the player would sit on a frozen frame forever in MSE
+   * mode because `srcs` is null, so the JSX `onError` fallback never fires.
+   */
+  private onMediaError = () => {
+    if (this.disposed) return;
+    // Code 1 is "aborted", which is normal while the element is re-pointed at
+    // a new resource during a source swap.
+    if (this.video.error?.code === 1) return;
+    this.fail('media element error');
+  };
 
   private onSeeking = () => {
     if (this.disposed) return;
@@ -283,6 +417,7 @@ export class MseSession {
     this.video.addEventListener('seeking', this.onSeeking);
     this.video.addEventListener('waiting', this.onWaiting);
     this.video.addEventListener('stalled', this.onWaiting);
+    this.video.addEventListener('error', this.onMediaError);
   }
 
   async start(atSeconds: number): Promise<void> {
@@ -337,10 +472,15 @@ export class MseSession {
     this.pendingSeek = null;
     // Init segments first, one per track, then the segment containing `at`.
     // The two tracks have their own SourceBuffers, so the appends can overlap.
-    await Promise.all(this.tracks.map((track, i) => {
+    const inits = await Promise.all(this.tracks.map((track, i) => {
       const head = i === 0 ? videoBuf : audioBuf;
       return this.append(track, toArrayBuffer(head, 0, track.index.initEnd));
     }));
+    if (this.disposed) return;
+    // Without its init segment a SourceBuffer rejects every media segment, so
+    // the session would sit on a black frame instead of letting the player fall
+    // back to the two-element path.
+    if (inits.some((ok) => !ok)) throw new Error('stream init failed');
     for (const track of this.tracks) {
       track.next = segmentIndexAt(track.index, at);
     }
@@ -378,28 +518,58 @@ export class MseSession {
       track.gen += 1;
       track.next = segmentIndexAt(track.index, t);
     }
+    // The segment under the new playhead is what the viewer is waiting for;
+    // batch again once it is on screen.
+    this.primed = false;
     this.pump();
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.teardown();
+    // Pause, detach and reload: the revoked MediaSource must not leave the
+    // element holding a decoder and its buffers for the next video's sake.
+    releaseMediaElement(this.video);
+    try { URL.revokeObjectURL(this.objectUrl); } catch { /* gone */ }
+  }
+
+  /**
+   * Stops everything that can outlive the session. A SourceBuffer failure used
+   * to leave the 500 ms pump interval and the element listeners running for the
+   * rest of the app session, because `dispose()` returned early once `fail()`
+   * had marked the session disposed.
+   */
+  private teardown(): void {
     // Stop downloading segments for a video that is no longer on screen; a
     // fast skip used to leave several megabytes arriving into a dead session.
     try { this.abort.abort(); } catch { /* already gone */ }
     try { this.video.removeEventListener('seeking', this.onSeeking); } catch { /* gone */ }
     try { this.video.removeEventListener('waiting', this.onWaiting); } catch { /* gone */ }
     try { this.video.removeEventListener('stalled', this.onWaiting); } catch { /* gone */ }
+    try { this.video.removeEventListener('error', this.onMediaError); } catch { /* gone */ }
     window.clearInterval(this.pumpTimer);
-    try { this.video.removeAttribute('src'); this.video.load(); } catch { /* gone */ }
-    try { URL.revokeObjectURL(this.objectUrl); } catch { /* gone */ }
+    this.pumpTimer = 0;
   }
 
   private async fetchBytes(url: string, start: number, endInclusive: number): Promise<ArrayBuffer> {
-    const data = await this.fetchRange(url, start, endInclusive, this.abort.signal);
-    this.fetchedBytes += data.byteLength;
-    this.fetchedRequests += 1;
-    return data;
+    let last: unknown = null;
+    for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt += 1) {
+      if (this.disposed) throw new Error('session disposed');
+      try {
+        const data = await this.fetchRange(url, start, endInclusive, this.abort.signal);
+        this.fetchedBytes += data.byteLength;
+        this.fetchedRequests += 1;
+        return data;
+      } catch (e) {
+        last = e;
+        // A cancelled request means the viewer moved on; asking again would
+        // only queue work nobody is waiting for.
+        if (this.abort.signal.aborted || (e as Error)?.name === 'AbortError') throw e;
+        if (attempt + 1 < FETCH_ATTEMPTS) await sleep(FETCH_RETRY_MS);
+      }
+    }
+    throw last instanceof Error ? last : new Error('stream range failed');
   }
 
   private async fetchHead(url: string): Promise<Uint8Array> {
@@ -414,9 +584,15 @@ export class MseSession {
 
   private open(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.ms.addEventListener('sourceopen', () => resolve(), { once: true });
-      this.ms.addEventListener('sourceclose', () => { /* teardown */ }, { once: true });
-      window.setTimeout(() => reject(new Error('media source timed out')), 8000);
+      const timer = window.setTimeout(() => reject(new Error('media source timed out')), 8000);
+      this.ms.addEventListener('sourceopen', () => {
+        window.clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      this.ms.addEventListener('sourceclose', () => {
+        window.clearTimeout(timer);
+        reject(new Error('media source closed'));
+      }, { once: true });
       // Point the element at the MediaSource exactly once: assigning src twice
       // reloads the resource and closes the MediaSource that just opened.
       if (this.video.src !== this.objectUrl) this.video.src = this.objectUrl;
@@ -426,13 +602,15 @@ export class MseSession {
   private fail(reason: string): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.teardown();
     try { URL.revokeObjectURL(this.objectUrl); } catch { /* gone */ }
     this.onError(reason);
   }
 
-  private async append(track: Track, data: ArrayBuffer): Promise<void> {
+  /** Appends one segment and reports whether the SourceBuffer accepted it. */
+  private async append(track: Track, data: ArrayBuffer): Promise<boolean> {
     const sb = track.buffer;
-    if (!sb || this.disposed) return;
+    if (!sb || this.disposed) return false;
     // One append at a time per SourceBuffer; wait for the current update to
     // finish instead of throwing InvalidStateError.
     while (sb.updating && !this.disposed) {
@@ -442,18 +620,25 @@ export class MseSession {
         window.setTimeout(done, 2000);
       });
     }
-    if (this.disposed) return;
-    await new Promise<void>((resolve) => {
-      const done = () => {
-        sb.removeEventListener('updateend', done);
-        sb.removeEventListener('error', done);
-        resolve();
+    if (this.disposed) return false;
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        sb.removeEventListener('updateend', onEnd);
+        sb.removeEventListener('error', onError);
+        resolve(ok);
       };
-      sb.addEventListener('updateend', done);
-      sb.addEventListener('error', done);
+      const onEnd = () => finish(true);
+      const onError = () => finish(false);
+      sb.addEventListener('updateend', onEnd);
+      sb.addEventListener('error', onError);
       // appendBuffer accepts the ArrayBuffer directly; wrapping it in another
       // Uint8Array copied every segment before it was handed to the decoder.
-      try { sb.appendBuffer(data); } catch { done(); }
+      // A throw (usually QuotaExceededError on a full buffer) must not be
+      // treated as success: that used to skip the segment and leave a gap.
+      try { sb.appendBuffer(data); } catch { finish(false); }
     });
   }
 
@@ -468,10 +653,22 @@ export class MseSession {
         for (let guard = 0; guard < 64; guard += 1) {
           if (this.disposed) return;
           const now = this.video.currentTime || 0;
+          // Retained data needs no second copy: jump the index past anything
+          // the element already holds (a seek back into the window).
+          let skipped = false;
+          for (const track of this.tracks) {
+            while (track.next < track.index.segments.length) {
+              const s = track.index.segments[track.next];
+              if (!this.isBuffered(track, s.time, s.duration)) break;
+              track.next += 1;
+              skipped = true;
+            }
+          }
           // Append whichever track is furthest behind the playhead first, so
           // audio never lags the picture into a gap.
           const pending = this.tracks.filter((tr) => tr.next < tr.index.segments.length);
           if (!pending.length) return;
+          if (skipped) continue; // the order may have changed
           pending.sort((a, b) => a.index.segments[a.next].time - b.index.segments[b.next].time);
           const track = pending[0];
           const seg = track.index.segments[track.next];
@@ -480,21 +677,36 @@ export class MseSession {
             this.evict(now);
             return;
           }
-          if (this.isBuffered(track, seg.time, seg.duration)) {
-            track.next += 1;
-            continue;
-          }
+          // One range request for the whole run of segments the window needs:
+          // a round trip per segment leaves the pipe idle, and every extra
+          // SourceBuffer update wakes the decoder. The first fetch stays small
+          // so the first picture does not wait for the whole window.
+          const until = this.primed
+            ? now + BUFFER_AHEAD_SECONDS
+            : seg.time + Math.max(seg.duration, 1);
+          const chunk = chunkAt(track.index, track.next, until);
+          if (!chunk) return;
           const gen = track.gen;
-          const data = await this.fetchBytes(track.url, seg.start, seg.start + seg.size - 1);
+          const data = await this.fetchBytes(track.url, chunk.start, chunk.end);
           if (this.disposed) return;
-          // The viewer seeked again while this segment was downloading: append
+          // The viewer seeked again while this chunk was downloading: append
           // it (still useful) but never move the new position's index past the
           // segment it needs - that used to leave the playhead in a gap with no
           // data and no sound until the next skip.
           if (track.gen !== gen) continue;
-          await this.append(track, data);
+          let appended = await this.append(track, data);
+          if (!appended && !this.disposed) {
+            // A full SourceBuffer rejects the append. Drop what has already
+            // played and offer the same bytes again; advancing past a
+            // rejected segment leaves a permanent hole in the timeline.
+            this.reclaim(track, this.video.currentTime || 0);
+            appended = await this.append(track, data);
+          }
+          if (this.disposed) return;
+          if (!appended) throw new Error('stream append failed');
           if (track.gen !== gen) continue;
-          track.next += 1;
+          track.next = chunk.first + chunk.count;
+          this.primed = true;
           this.snapForward();
         }
       } catch (e) {
@@ -517,12 +729,30 @@ export class MseSession {
     return false;
   }
 
+  private bufferedStart(sb: SourceBuffer): number | null {
+    const b = sb.buffered;
+    return b.length ? b.start(0) : null;
+  }
+
+  /** Drops everything but a few seconds of history after a rejected append. */
+  private reclaim(track: Track, now: number): void {
+    const sb = track.buffer;
+    if (!sb || sb.updating || this.disposed) return;
+    const cutoff = emergencyCutoff(now, this.bufferedStart(sb));
+    if (cutoff == null) return;
+    try { sb.remove(0, cutoff); } catch { /* the retry reports the failure */ }
+  }
+
   private evict(now: number): void {
     const cutoff = evictionCutoff(now, BUFFER_BEHIND_SECONDS);
     if (cutoff == null) return;
     for (const track of this.tracks) {
       const sb = track.buffer;
       if (!sb || sb.updating || this.disposed) continue;
+      // Only trim when a meaningful window has really fallen behind. Without
+      // this, steady playback asked every SourceBuffer for a remove on each
+      // 500 ms pump, even when there was nothing to reclaim.
+      if (!shouldEvict(this.bufferedStart(sb), cutoff)) continue;
       try { sb.remove(0, cutoff); } catch { /* retry next pump */ }
     }
   }
@@ -530,6 +760,10 @@ export class MseSession {
 
 function toArrayBuffer(buf: Uint8Array, start: number, end: number): ArrayBuffer {
   return buf.buffer.slice(buf.byteOffset + start, buf.byteOffset + Math.min(end, buf.byteLength)) as ArrayBuffer;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 /** React glue: keeps one MseSession alive for the current source. */

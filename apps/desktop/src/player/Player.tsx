@@ -10,6 +10,7 @@ import { useApp } from '../store';
 import { audioSyncAction } from './syncLogic';
 import { canUseMse, useMseSource, type MseSource } from './mse';
 import { releasePlayback } from './mediaLifecycle';
+import { useBlackFrameWatchdog } from './frameWatchdog';
 import {
   CONTROLS_HIDE_DELAY_AFTER_LEAVE_MS, CONTROLS_HIDE_DELAY_MS,
   cursorHidden,
@@ -60,6 +61,9 @@ export function Player(props: PlayerProps) {
 
   const [qualities, setQualities] = useState<Qualities | null>(null);
   const [height, setHeight] = useState<number | null>(settings?.defaultQuality ?? null);
+  // The frame rate of the saved rung: 60 for a 720p60 pick, null for the
+  // cheaper 30 fps rendition. Without it the ladder could only ever play 30.
+  const [fps, setFps] = useState<number | null>(settings?.defaultQualityFps ?? null);
   const [srcs, setSrcs] = useState<{ video: string; audio: string | null } | null>(null);
   // What is actually decoding right now, for Stats for nerds. `height` is the
   // requested rung; a fallback or Auto can resolve to a different one.
@@ -232,6 +236,7 @@ export function Player(props: PlayerProps) {
       return;
     }
     const target = height ?? settings?.defaultQuality ?? null;
+    const targetFps = height === null ? null : (fps ?? settings?.defaultQualityFps ?? null);
     (async () => {
       try {
         // The ladder and the playable source are independent requests (the
@@ -239,7 +244,7 @@ export function Player(props: PlayerProps) {
         // the same time removes a whole IPC round trip from the start.
         const [qualityResult, sourceResult] = await Promise.allSettled([
           window.indio.streams.qualities(video.videoId),
-          window.indio.streams.playUrl(video.videoId, target),
+          window.indio.streams.playUrl(video.videoId, target, targetFps),
         ]);
         if (cancelled) return;
         const q = qualityResult.status === 'fulfilled' ? qualityResult.value : null;
@@ -363,14 +368,19 @@ export function Player(props: PlayerProps) {
           await new Promise((r) => setTimeout(r, 300 * 2 ** attempt));
           const q = await window.indio.streams.qualities(video.videoId, true);
           setQualities(q);
-          const rungs = [...q.options].sort((a, b) => b.height - a.height);
+          // One height can appear twice (30 and 60 fps) but stepping down means
+          // going to a lower picture, so work from the distinct heights.
+          const rungs = [...new Set(q.options.map((o) => o.height))].sort((a, b) => b - a);
           // Attempt 0 keeps the viewer's quality; later attempts walk down the
           // ladder (Auto last) so one bad CDN edge cannot keep the video down.
           const target = attempt === 0
             ? height
-            : (rungs[Math.min(attempt - 1, rungs.length - 1)]?.height ?? null);
-          const src = await window.indio.streams.playUrl(video.videoId, target);
-          if (attempt > 0) setHeight(target);
+            : (rungs[Math.min(attempt - 1, rungs.length - 1)] ?? null);
+          // A retry keeps the frame rate the viewer chose; stepping down the
+          // ladder drops back to the cheap rendition of that height.
+          const targetFps = attempt === 0 ? fps : null;
+          const src = await window.indio.streams.playUrl(video.videoId, target, targetFps);
+          if (attempt > 0) { setHeight(target); setFps(null); }
           applySource(src, videoRef.current?.currentTime || 0);
           return;
         } catch {
@@ -382,7 +392,29 @@ export function Player(props: PlayerProps) {
     } finally {
       recoveringRef.current = false;
     }
-  }, [video.videoId, height]);
+  }, [video.videoId, height, fps]);
+
+  // A clock that runs while the picture stays black is the one failure the
+  // element never reports. Nudge the pipeline first; if frames still do not
+  // arrive, rebuild the stream (MSE gives way to the two-element fallback).
+  const kickBlackFrame = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    // A hair of a seek makes the decoder resolve the frame again.
+    try { v.currentTime = v.currentTime + 0.01; } catch { /* next tick */ }
+  }, []);
+
+  const recoverBlackFrame = useCallback(() => {
+    if (mseSessionRef.current) {
+      // MSE is the only path that can end up with a running clock and no
+      // picture; the two-element player is the path that always works.
+      onMseError();
+      return;
+    }
+    void recoverStream();
+  }, [onMseError, recoverStream]);
+
+  useBlackFrameWatchdog(videoRef, playing, kickBlackFrame, recoverBlackFrame);
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
@@ -483,11 +515,14 @@ export function Player(props: PlayerProps) {
     setNow(pos);
   }, [srcs]);
 
-  const switchQuality = useCallback(async (h: number | null) => {
+  const switchQuality = useCallback(async (h: number | null, f: number | null = null) => {
     setHeight(h);
-    saveSettings({ defaultQuality: h });
+    setFps(h === null ? null : f);
+    saveSettings({ defaultQuality: h, defaultQualityFps: h === null ? null : f });
     try {
-      const src = await window.indio.streams.playUrl(video.videoId, h);
+      // A 60 fps rung is its own stream; asking for the frame rate picks it
+      // instead of the cheaper rendition at the same height.
+      const src = await window.indio.streams.playUrl(video.videoId, h, h === null ? null : f);
       const v = videoRef.current;
       const wasPlaying = !!v && !v.paused;
       const t = v?.currentTime || 0;
@@ -1194,7 +1229,7 @@ export function Player(props: PlayerProps) {
               try {
                 const q = await window.indio.streams.qualities(video.videoId, true);
                 setQualities(q);
-                const src = await window.indio.streams.playUrl(video.videoId, height);
+                const src = await window.indio.streams.playUrl(video.videoId, height, fps);
                 applySource(src);
               } catch (e: any) { setError(String(e?.message || e)); setLoading(false); }
             }}>Retry</button>
@@ -1369,13 +1404,19 @@ export function Player(props: PlayerProps) {
                       </span>
                       {height === null && <CheckIcon size={18} />}
                     </button>
-                    {(qualities?.options || []).map((o) => (
-                      <button type="button" key={o.height} className="ps-row" aria-pressed={height === o.height}
-                        onClick={() => { switchQuality(o.height); closeGear(); }}>
-                        <span className="ps-row-label">{o.label}</span>
-                        {height === o.height && <CheckIcon size={18} />}
-                      </button>
-                    ))}
+                    {(qualities?.options || []).map((o) => {
+                      // One height can offer a 30 and a 60 fps stream; the key
+                      // and the selected check must tell them apart.
+                      const selected = height === o.height
+                        && (fps == null ? o.fps < 50 : (o.fps >= 50) === (fps >= 50));
+                      return (
+                        <button type="button" key={`${o.height}-${o.fps}`} className="ps-row" aria-pressed={selected}
+                          onClick={() => { switchQuality(o.height, o.fps); closeGear(); }}>
+                          <span className="ps-row-label">{o.label}</span>
+                          {selected && <CheckIcon size={18} />}
+                        </button>
+                      );
+                    })}
                     {!qualities?.options.length && (
                       <div className="ps-note">Resolution options load with the video.</div>
                     )}

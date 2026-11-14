@@ -547,13 +547,44 @@ fn selftest(state: &AppState, video_id: &str) -> i32 {
         println!("[selftest] no playable url on the chosen rung");
         return 1;
     };
+    if !selftest_probe(state, video_id, &url, rung.height) {
+        return 1;
+    }
+
+    // The high-frame-rate rendition is a separate stream; proving it resolves
+    // and serves bytes is what makes "720p60 works" a measurement.
+    let high = indio_core::quality::pick_rung(&ladder.options, ladder.auto_height, Some(60));
+    match high {
+        Some(rung) if rung.fps >= 50 => {
+            println!("[selftest] 60fps rung={} fps={}", rung.label, rung.fps);
+            let url = rung
+                .video_only
+                .as_ref()
+                .or(rung.muxed.as_ref())
+                .map(|t| t.url.clone());
+            match url {
+                Some(url) if selftest_probe(state, video_id, &url, rung.height) => {}
+                _ => {
+                    println!("[selftest] 60fps stream FAILED");
+                    return 1;
+                }
+            }
+        }
+        _ => println!("[selftest] this video has no high-frame-rate rung"),
+    }
+    println!("[selftest] OK");
+    0
+}
+
+/// Fetch the first kilobyte of a stream through the player's own proxy.
+fn selftest_probe(state: &AppState, video_id: &str, url: &str, height: i64) -> bool {
     let token = state.proxy.add_token(
-        &url,
+        url,
         indio_core::proxy::TokenEntry {
-            url: url.clone(),
+            url: url.to_string(),
             video_id: Some(video_id.to_string()),
             role: Some("video".to_string()),
-            height: Some(rung.height),
+            height: Some(height),
             at: Instant::now(),
         },
     );
@@ -570,21 +601,16 @@ fn selftest(state: &AppState, video_id: &str) -> i32 {
             let mut body = Vec::new();
             let _ = std::io::Read::read_to_end(&mut resp.into_reader(), &mut body);
             println!(
-                "[selftest] proxy status={status} bytes={} content-range={content_range} height={}",
-                body.len(),
-                rung.height
+                "[selftest] proxy status={status} bytes={} content-range={content_range} height={height}",
+                body.len()
             );
-            if body.is_empty() || (status != 200 && status != 206) {
-                return 1;
-            }
+            !body.is_empty() && (status == 200 || status == 206)
         }
         Err(e) => {
             println!("[selftest] proxy request FAILED: {e}");
-            return 1;
+            false
         }
     }
-    println!("[selftest] OK");
-    0
 }
 
 fn main() {

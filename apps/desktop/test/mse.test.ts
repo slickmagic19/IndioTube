@@ -4,13 +4,22 @@ import { describe, expect, it } from 'vitest';
 import {
   BUFFER_AHEAD_SECONDS,
   BUFFER_BEHIND_SECONDS,
+  CHUNK_MAX_BYTES,
+  CHUNK_MAX_SEGMENTS,
+  EMERGENCY_BEHIND_SECONDS,
+  EVICT_MARGIN_SECONDS,
+  FETCH_ATTEMPTS,
   canUseMse,
+  chunkAt,
+  emergencyCutoff,
   evictionCutoff,
   mimeForCodec,
   parseTrackIndex,
   readBoxes,
   segmentIndexAt,
+  shouldEvict,
 } from '../src/player/mse';
+import type { TrackIndex } from '../src/player/mse';
 
 function box(type: string, payload: number): Uint8Array {
   const b = new Uint8Array(8 + payload);
@@ -102,6 +111,88 @@ describe('SourceBuffer memory policy', () => {
     expect(evictionCutoff(BUFFER_BEHIND_SECONDS)).toBe(0);
     expect(evictionCutoff(BUFFER_BEHIND_SECONDS + 12.5)).toBeCloseTo(12.5, 6);
     expect(evictionCutoff(600)).toBeCloseTo(570, 6);
+  });
+
+  it('does not trim a sliver on every pump round', () => {
+    // A remove() is an async update that wakes the decoder, so steady playback
+    // must not ask for one until a meaningful window has really fallen behind.
+    expect(EVICT_MARGIN_SECONDS).toBe(5);
+    expect(shouldEvict(null, 100)).toBe(false);
+    expect(shouldEvict(80, null)).toBe(false);
+    // 80 s buffered start vs a 100 s cutoff: 20 s behind is worth a remove.
+    expect(shouldEvict(80, 100)).toBe(true);
+    // 3 s behind is inside the margin: nothing worth reclaiming yet.
+    expect(shouldEvict(97, 100)).toBe(false);
+    // Exactly on the margin is not "more than" the margin.
+    expect(shouldEvict(95, 100)).toBe(false);
+    expect(shouldEvict(94.9, 100)).toBe(true);
+    expect(shouldEvict(Number.NaN, 100)).toBe(false);
+  });
+
+  it('empties the buffer only when it can really reclaim the history', () => {
+    expect(EMERGENCY_BEHIND_SECONDS).toBe(5);
+    expect(emergencyCutoff(40, null)).toBeNull();
+    // Nothing buffered before the playhead yet (the first seconds of a video).
+    expect(emergencyCutoff(3, 0)).toBeNull();
+    // A sliver is not what a rejected append needs.
+    expect(emergencyCutoff(5.1, 0)).toBeNull();
+    expect(emergencyCutoff(40, 0)).toBeCloseTo(35, 6);
+    expect(emergencyCutoff(600, 12)).toBeCloseTo(595, 6);
+    expect(emergencyCutoff(Number.NaN, 0)).toBeNull();
+  });
+
+  it('re-asks for a byte range that failed on its own', () => {
+    // One CDN hiccup used to end the whole MSE session.
+    expect(FETCH_ATTEMPTS).toBeGreaterThan(1);
+  });
+});
+
+describe('batching segments into one range request', () => {
+  function track(times: number[], sizes?: number[]): TrackIndex {
+    let offset = 100;
+    const segments = times.map((time, i) => {
+      const size = sizes?.[i] ?? 10;
+      const seg = { start: offset, size, time, duration: 1 };
+      offset += size;
+      return seg;
+    });
+    return { initEnd: 0, timescale: 1000, duration: times.length, segments };
+  }
+
+  it('covers every segment inside the buffer window in one chunk', () => {
+    const chunk = chunkAt(track([0, 1, 2, 3]), 0, 30);
+    expect(chunk).not.toBeNull();
+    expect(chunk!).toMatchObject({ first: 0, count: 4, time: 0, duration: 4 });
+    expect(chunk!.start).toBe(100);
+    // Inclusive end of the last segment.
+    expect(chunk!.end).toBe(100 + 10 * 4 - 1);
+  });
+
+  it('never reaches past the buffer-ahead horizon', () => {
+    // Playhead at 0 with a 5 s segment: only the segment under it is worth
+    // fetching now, so the first picture does not wait for the whole window.
+    const chunk = chunkAt(track([0, 5, 10]), 0, 5);
+    expect(chunk!.count).toBe(1);
+  });
+
+  it('stops at the byte and segment caps', () => {
+    const big = chunkAt(track([0, 1, 2], [4, 4, 4]), 0, 30, 8);
+    expect(big!.count).toBe(2);
+    const many = chunkAt(track([0, 1, 2, 3, 4, 5, 6, 7, 8]), 0, 30);
+    expect(many!.count).toBe(CHUNK_MAX_SEGMENTS);
+    expect(CHUNK_MAX_BYTES).toBeGreaterThan(1024 * 1024);
+  });
+
+  it('stops where the byte offsets are no longer contiguous', () => {
+    const index = track([0, 1, 2]);
+    index.segments[2] = { ...index.segments[2], start: 9_999 };
+    const chunk = chunkAt(index, 0, 30);
+    expect(chunk!.count).toBe(2);
+  });
+
+  it('returns nothing past the last segment', () => {
+    expect(chunkAt(track([0]), 1)).toBeNull();
+    expect(chunkAt(track([]), 0)).toBeNull();
   });
 });
 

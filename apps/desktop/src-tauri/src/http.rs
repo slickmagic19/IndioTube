@@ -15,6 +15,13 @@ fn agent() -> ureq::Agent {
         // the timeout at all.
         .timeout_connect(std::time::Duration::from_secs(8))
         .timeout_read(std::time::Duration::from_secs(30))
+        // The picture and the sound are two files on the same CDN host, and a
+        // seek back re-asks for ranges that were just fetched. ureq keeps one
+        // idle socket per host by default, so every second request paid for a
+        // new TCP+TLS handshake - on a four-core Atom that is both latency and
+        // real CPU. A small pool keeps both tracks' ranges on warm sockets.
+        .max_idle_connections(16)
+        .max_idle_connections_per_host(6)
         .build()
 }
 

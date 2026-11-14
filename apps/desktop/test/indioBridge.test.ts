@@ -151,7 +151,11 @@ describe('window.indio over Tauri invoke', () => {
       videoCodec: 'avc1.4d401f',
       audioCodec: null,
     });
-    expect(tauri.calls.at(-1)!.args).toEqual({ videoId: 'v1', height: null });
+    expect(tauri.calls.at(-1)!.args).toEqual({ videoId: 'v1', height: null, fps: null });
+    // A 60 fps pick travels with the height so the shell can tell the two
+    // renditions of the same resolution apart.
+    await indio.streams.playUrl('v1', 720, 60);
+    expect(tauri.calls.at(-1)!.args).toEqual({ videoId: 'v1', height: 720, fps: 60 });
     expect(await indio.streams.subtitleUrl('v1')).toBe('http://127.0.0.1:1/subs?t=2&ext=1');
     expect(await indio.streams.localUrl('C:\\d.mp4')).toBe('http://127.0.0.1:1/file?p=x');
     expect(tauri.calls.at(-1)!.args).toEqual({ file: 'C:\\d.mp4' });

@@ -105,10 +105,10 @@ if (isTauri && !(window as unknown as { indio?: unknown }).indio) {
     streams: {
       qualities: async (videoId: string, force?: boolean) =>
         (await go<{ qualities: unknown }>('qualities', { videoId, force: Boolean(force) })).qualities,
-      playUrl: async (videoId: string, height?: number | null) =>
+      playUrl: async (videoId: string, height?: number | null, fps?: number | null) =>
         go<{ video: string; audio: string | null; height: number; label: string; videoCodec: string | null; audioCodec: string | null }>(
           'play_url',
-          { videoId, height: height ?? null },
+          { videoId, height: height ?? null, fps: fps ?? null },
         ),
       subtitleUrl: async (videoId: string, lang?: string) =>
         (await go<{ url: string | null }>('subtitle_url', { videoId, lang: lang ?? '' })).url,
@@ -559,6 +559,16 @@ async function runSmoke(): Promise<void> {
     cards: document.querySelectorAll('.card').length,
     contentScrollable: content ? content.scrollHeight > content.clientHeight + 4 : null,
     text: (document.body && document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 220),
+    // The startup screen in index.html must be gone once React painted, or the
+    // window is showing a placeholder instead of the app.
+    boot: {
+      present: Boolean(document.getElementById('boot')),
+      visible: (() => {
+        const el = document.getElementById('boot');
+        return el ? getComputedStyle(el).display !== 'none' : null;
+      })(),
+      rootChildren: document.getElementById('root')?.childElementCount ?? 0,
+    },
     errors,
     firsts,
     clicked,

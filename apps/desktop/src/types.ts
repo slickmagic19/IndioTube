@@ -204,6 +204,9 @@ export interface Settings {
   theme: 'dark' | 'light';
   autoplay: boolean;
   defaultQuality: number | null;
+  /** Frame rate of the saved quality rung (60 for a 720p60 pick), or null for
+   *  the cheaper 30 fps rendition. */
+  defaultQualityFps: number | null;
   captionsEnabled: boolean;
   captionLang: string;
   sponsorBlock: boolean;
@@ -250,7 +253,7 @@ export interface IndioBridge {
   playlistCont(token: string): Promise<PlaylistPage>;
   streams: {
     qualities(videoId: string, force?: boolean): Promise<Qualities>;
-    playUrl(videoId: string, height: number | null): Promise<{
+    playUrl(videoId: string, height: number | null, fps?: number | null): Promise<{
       video: string; audio: string | null; height: number; label?: string;
       videoCodec?: string | null; audioCodec?: string | null;
     }>;

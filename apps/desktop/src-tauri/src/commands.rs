@@ -596,19 +596,25 @@ struct Picked {
     url: String,
     audio: Option<String>,
     height: i64,
+    fps: i64,
     label: String,
     video_codec: Option<String>,
     audio_codec: Option<String>,
 }
 
 /// The same choice electron/streams.js makes: a muxed rung when there is one,
-/// otherwise video-only plus the shared best audio track.
-fn pick_tracks(ladder: &indio_core::quality::QualityLadder, height: Option<i64>) -> Result<Picked, String> {
+/// otherwise video-only plus the shared best audio track. `fps` selects between
+/// the 30 and 60 fps renditions of a height (see `quality::pick_rung`).
+fn pick_tracks(
+    ladder: &indio_core::quality::QualityLadder,
+    height: Option<i64>,
+    fps: Option<i64>,
+) -> Result<Picked, String> {
     if ladder.options.is_empty() && ladder.auto.is_none() {
         return Err("This video has no ad-free stream".to_string());
     }
     let target = height.unwrap_or(ladder.auto_height);
-    if let Some(rung) = indio_core::quality::nearest(&ladder.options, target) {
+    if let Some(rung) = indio_core::quality::pick_rung(&ladder.options, target, fps) {
         let label = if height.is_none() {
             "Auto".to_string()
         } else {
@@ -619,6 +625,7 @@ fn pick_tracks(ladder: &indio_core::quality::QualityLadder, height: Option<i64>)
                 url: muxed.url.clone(),
                 audio: None,
                 height: rung.height,
+                fps: rung.fps,
                 label,
                 video_codec: muxed.codec.clone(),
                 audio_codec: None,
@@ -629,6 +636,7 @@ fn pick_tracks(ladder: &indio_core::quality::QualityLadder, height: Option<i64>)
                 url: video.url.clone(),
                 audio: ladder.audio.as_ref().map(|a| a.url.clone()),
                 height: rung.height,
+                fps: rung.fps,
                 label,
                 video_codec: video.codec.clone(),
                 audio_codec: ladder.audio.as_ref().and_then(|a| a.codec.clone()),
@@ -640,6 +648,7 @@ fn pick_tracks(ladder: &indio_core::quality::QualityLadder, height: Option<i64>)
             url: auto.url.clone(),
             audio: None,
             height: auto.height,
+            fps: 0,
             label: "Auto".to_string(),
             video_codec: auto.codec.clone(),
             audio_codec: None,
@@ -667,12 +676,22 @@ pub async fn play_url(
     state: State<'_, AppState>,
     video_id: String,
     height: Option<i64>,
+    fps: Option<i64>,
 ) -> Result<Value, String> {
     let ladder = ladder_for(&state, &video_id, false)?;
     if ladder.is_live {
         return Err("Live videos are not playable on desktop yet".to_string());
     }
-    let picked = pick_tracks(&ladder, height)?;
+    let picked = pick_tracks(&ladder, height, fps)?;
+    // One line per play: which rendition was actually chosen is the difference
+    // between "720p60 stutters" and "720p60 was never selected".
+    eprintln!(
+        "[indio] play {video_id} {} ({}, {} fps, {})",
+        picked.label,
+        picked.height,
+        picked.fps,
+        picked.video_codec.as_deref().unwrap_or("?")
+    );
     let video = proxy_token(&state, &picked.url, &video_id, "video", Some(picked.height));
     let audio = picked
         .audio
@@ -806,6 +825,10 @@ pub async fn sponsor_segments(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.insert(key, (Instant::now(), data.clone()));
+    // One entry per video ever opened, for the whole session, is a leak on a
+    // machine where memory is the scarce resource; the newest few are enough.
+    const SB_CACHE_MAX: usize = 96;
+    crate::stream_cache::trim_to_newest(&mut cache, SB_CACHE_MAX);
     Ok(json!({ "data": data }))
 }
 
@@ -854,7 +877,7 @@ mod tests {
     #[test]
     fn a_muxed_rung_is_one_file_and_needs_no_audio_track() {
         let ladder = build_qualities(&fixture());
-        let picked = pick_tracks(&ladder, Some(360)).unwrap();
+        let picked = pick_tracks(&ladder, Some(360), None).unwrap();
         assert_eq!(picked.url, "https://cdn/360muxed");
         assert!(picked.audio.is_none(), "a single file carries its own sound");
         assert_eq!(picked.height, 360);
@@ -865,7 +888,7 @@ mod tests {
     #[test]
     fn a_split_rung_pairs_with_the_shared_audio_track() {
         let ladder = build_qualities(&fixture());
-        let picked = pick_tracks(&ladder, Some(720)).unwrap();
+        let picked = pick_tracks(&ladder, Some(720), None).unwrap();
         assert_eq!(picked.url, "https://cdn/720video");
         assert_eq!(picked.audio.as_deref(), Some("https://cdn/audio"));
         assert_eq!(picked.height, 720);
@@ -873,9 +896,26 @@ mod tests {
     }
 
     #[test]
+    fn a_60_fps_request_picks_the_high_frame_rate_stream() {
+        let ladder = build_qualities(&fixture());
+        let picked = pick_tracks(&ladder, Some(1080), Some(60)).unwrap();
+        assert_eq!(picked.url, "https://cdn/1080video");
+        assert_eq!(picked.label, "1080p60");
+        // Asked for the same height without a frame rate: the cheaper 30 fps
+        // rendition, which for this video is the 720p rung.
+        let cheap = pick_tracks(&ladder, Some(1080), None).unwrap();
+        assert_eq!(cheap.height, 1080);
+        assert_eq!(cheap.label, "1080p60", "only a 60 fps file exists at 1080p");
+        // Auto never silently upgrades to 60 fps.
+        let auto = pick_tracks(&ladder, None, None).unwrap();
+        assert_eq!(auto.label, "Auto");
+        assert_eq!(auto.height, 720);
+    }
+
+    #[test]
     fn plain_auto_means_the_auto_height_and_keeps_the_label() {
         let ladder = build_qualities(&fixture());
-        let picked = pick_tracks(&ladder, None).unwrap();
+        let picked = pick_tracks(&ladder, None, None).unwrap();
         assert_eq!(picked.label, "Auto");
         // The ladder's auto height is capped at 720p, and 720 is only offered
         // split — so Auto still gets its audio partner.
@@ -886,9 +926,9 @@ mod tests {
     #[test]
     fn a_missing_rung_falls_to_the_nearest_one_below() {
         let ladder = build_qualities(&fixture());
-        let picked = pick_tracks(&ladder, Some(800)).unwrap();
+        let picked = pick_tracks(&ladder, Some(800), None).unwrap();
         assert_eq!(picked.height, 720);
-        let tiny = pick_tracks(&ladder, Some(120)).unwrap();
+        let tiny = pick_tracks(&ladder, Some(120), None).unwrap();
         assert_eq!(tiny.height, 360, "nothing below: take the smallest rung");
     }
 
@@ -897,7 +937,7 @@ mod tests {
         let mut info = fixture();
         info["formats"] = json!([]);
         let ladder = build_qualities(&info);
-        let error = pick_tracks(&ladder, Some(720)).unwrap_err();
+        let error = pick_tracks(&ladder, Some(720), None).unwrap_err();
         assert!(error.contains("no ad-free stream"), "{error}");
     }
 

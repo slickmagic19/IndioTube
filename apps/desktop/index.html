@@ -8,6 +8,25 @@
     <link rel="preconnect" href="https://i.ytimg.com" />
     <link rel="preconnect" href="https://www.youtube.com" />
     <link rel="dns-prefetch" href="https://yt3.ggpht.com" />
+    <style>
+      /* Inline so the window is painted by the document itself, not by the
+         bundle: a slow disk or a failed module still shows this screen instead
+         of a black window. */
+      html, body { margin: 0; height: 100%; background: #0f0f0f; color: #e5e5e5; }
+      #boot {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        gap: 12px; align-items: center; justify-content: center;
+        font: 500 15px/1.4 system-ui, "Segoe UI", sans-serif;
+      }
+      #boot .mark { font-size: 22px; font-weight: 600; }
+      #boot .msg { opacity: .6; }
+      #boot button {
+        font: inherit; padding: 8px 18px; border-radius: 8px; cursor: pointer;
+        color: #0f0f0f; background: #f1f1f1; border: 0;
+      }
+      /* React has painted something: the boot screen is not needed. */
+      #root:not(:empty) + #boot { display: none; }
+    </style>
     <script>
       // Paint the saved theme before first frame — no flash on relaunch.
       try {
@@ -18,10 +37,28 @@
       // Errors thrown before the module scripts run are picked up from here.
       window.__smokeErrors = [];
       window.addEventListener('error', (e) => window.__smokeErrors.push(String(e.message).slice(0, 200)));
+      // The bundle never mounted: say so and offer a way back instead of
+      // leaving the viewer with a window that is only a black rectangle.
+      setTimeout(function () {
+        var root = document.getElementById('root');
+        if (root && root.childElementCount > 0) return;
+        var msg = document.getElementById('boot-msg');
+        if (msg) msg.textContent = 'IndioTube could not finish starting.';
+        var button = document.getElementById('boot-reload');
+        if (button) {
+          button.hidden = false;
+          button.onclick = function () { location.reload(); };
+        }
+      }, 10000);
     </script>
   </head>
   <body>
     <div id="root"></div>
+    <div id="boot" aria-live="polite">
+      <div class="mark">IndioTube</div>
+      <div class="msg" id="boot-msg">Starting…</div>
+      <button id="boot-reload" type="button" hidden>Reload</button>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -7,6 +7,16 @@ import { QrIcon } from '../components/icons';
 import { SPONSOR_CATEGORIES } from '../player/sponsorLogic';
 import { readPerfMode, setPerfMode, type PerfMode } from '../perf';
 
+// 60 fps is its own stream in the ladder: offering it here is what makes
+// "always start in 720p60" possible.
+const QUALITY_CHOICES: { height: number; fps: number }[] = [
+  { height: 1080, fps: 30 },
+  { height: 720, fps: 30 },
+  { height: 720, fps: 60 },
+  { height: 480, fps: 30 },
+  { height: 360, fps: 30 },
+];
+
 export function SettingsScreen() {
   const { settings, saveSettings, lib, op, toast } = useApp();
   const [syncOpen, setSyncOpen] = useState(false);
@@ -54,12 +64,22 @@ export function SettingsScreen() {
       </div>
       <div className="field">
         <div className="label"><b>Default quality</b><span>Applies to the next video you open</span></div>
-        <select value={settings.defaultQuality ?? 'auto'} onChange={(e) => {
-          const v = e.target.value;
-          set({ defaultQuality: v === 'auto' ? null : Number(v) });
-        }}>
+        <select value={settings.defaultQuality == null
+          ? 'auto'
+          : `${settings.defaultQuality}-${(settings.defaultQualityFps ?? 0) >= 50 ? 60 : 30}`}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === 'auto') {
+              set({ defaultQuality: null, defaultQualityFps: null });
+              return;
+            }
+            const [h, f] = v.split('-').map(Number);
+            set({ defaultQuality: h, defaultQualityFps: f >= 50 ? f : null });
+          }}>
           <option value="auto">Auto — 720p when available</option>
-          {[1080, 720, 480, 360].map((h) => <option key={h} value={h}>{h}p</option>)}
+          {QUALITY_CHOICES.map(({ height: h, fps: f }) => (
+            <option key={`${h}-${f}`} value={`${h}-${f}`}>{f >= 50 ? `${h}p${f}` : `${h}p`}</option>
+          ))}
         </select>
       </div>
       <div className="field">

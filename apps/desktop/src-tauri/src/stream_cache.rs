@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use indio_core::quality::QualityLadder;
 use serde_json::{json, Value};
@@ -20,12 +20,35 @@ use serde_json::{json, Value};
 pub const TTL: Duration = Duration::from_secs(5 * 3600);
 /// The file is a convenience, not an archive: keep the most recent handful.
 pub const MAX_ENTRIES: usize = 60;
+/// Shape of a stored ladder. Bumped when the ladder gained its 60 fps rungs (2):
+/// a file written by an older build has no high-frame-rate options in it, and
+/// keeping it would hide 720p60 for up to six hours.
+pub const FORMAT: u64 = 2;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Drop the oldest entries of an in-memory map until at most `max` remain.
+///
+/// The SponsorBlock answer cache used to be one entry per video ever opened
+/// and nothing ever removed them, so a long session kept growing on a machine
+/// where memory is the scarce resource. Returns how many entries were dropped.
+pub fn trim_to_newest<T>(map: &mut HashMap<String, (Instant, T)>, max: usize) -> usize {
+    let mut removed = 0;
+    while map.len() > max {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(key, _)| key.clone());
+        let Some(key) = oldest else { break };
+        map.remove(&key);
+        removed += 1;
+    }
+    removed
 }
 
 /// Read the cache. A missing, unreadable, half-written or stale file is simply
@@ -39,6 +62,11 @@ pub fn load(path: &Path, now: u64) -> HashMap<String, (u64, QualityLadder)> {
     let Ok(doc) = serde_json::from_str::<Value>(&text) else {
         return out;
     };
+    // A file written before the ladder changed shape is worse than no cache:
+    // it would hide the renditions the player now offers.
+    if doc.get("v").and_then(Value::as_u64) != Some(FORMAT) {
+        return out;
+    }
     let Some(entries) = doc.get("entries").and_then(Value::as_object) else {
         return out;
     };
@@ -81,7 +109,7 @@ pub fn save(path: &Path, entries: &HashMap<String, (u64, QualityLadder)>, now: u
             doc.insert(id.clone(), json!({ "at": at, "qualities": value }));
         }
     }
-    let text = match serde_json::to_string(&json!({ "v": 1, "entries": doc })) {
+    let text = match serde_json::to_string(&json!({ "v": FORMAT, "entries": doc })) {
         Ok(text) => text,
         Err(_) => return,
     };
@@ -166,6 +194,33 @@ mod tests {
         let loaded = load(&path, now + TTL.as_millis() as u64 + 1);
         assert!(loaded.is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_cache_from_the_old_ladder_shape_is_ignored() {
+        let path = temp("shape-version");
+        let old = json!({
+            "v": FORMAT - 1,
+            "entries": { "abc123": { "at": now_ms(), "qualities": ladder("abc123") } }
+        });
+        std::fs::write(&path, old.to_string()).unwrap();
+        assert!(load(&path, now_ms()).is_empty(), "the old shape hides 60 fps");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_in_memory_cache_drops_its_oldest_entries() {
+        let now = Instant::now();
+        let mut map: HashMap<String, (Instant, &str)> = HashMap::new();
+        map.insert("oldest".to_string(), (now - Duration::from_secs(30), "a"));
+        map.insert("middle".to_string(), (now - Duration::from_secs(10), "b"));
+        map.insert("newest".to_string(), (now - Duration::from_secs(1), "c"));
+        assert_eq!(trim_to_newest(&mut map, 3), 0);
+        assert_eq!(trim_to_newest(&mut map, 2), 1);
+        assert!(map.get("oldest").is_none());
+        assert!(map.contains_key("newest"));
+        assert_eq!(trim_to_newest(&mut map, 0), 2);
+        assert!(map.is_empty());
     }
 
     #[test]
