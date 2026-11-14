@@ -75,7 +75,7 @@ describe('window.indio over Tauri invoke', () => {
     tauri.on('indio_init', () => ({ ok: true }));
     tauri.on('home', () => ({ feed }));
     tauri.on('home_cont', () => ({ feed }));
-    tauri.on('homeMore', () => ({ videos: feed.videos }));
+    tauri.on('home_more', () => ({ videos: feed.videos }));
     tauri.on('trending', () => ({ feed }));
     tauri.on('trending_cont', () => ({ feed }));
     tauri.on('search', () => ({ results: { entries: [], continuation: null, restricted: false } }));
@@ -100,6 +100,10 @@ describe('window.indio over Tauri invoke', () => {
     expect(await indio.homeCont('tok')).toEqual(feed);
     expect(tauri.calls.at(-1)!.args).toEqual({ token: 'tok' });
     expect(await indio.homeMore({ excludeIds: ['v1'] })).toEqual(feed.videos);
+    // The name matters as much as the unwrap: the shell only registers the
+    // snake_case command, and asked for anything else the page fails at runtime
+    // with "Command … not found" instead of paging the feed.
+    expect(tauri.calls.at(-1)).toEqual({ cmd: 'home_more', args: { excludeIds: ['v1'] } });
     expect(await indio.trending({})).toEqual(feed);
     expect(await indio.trendingCont('tok')).toEqual(feed);
     expect(await indio.search('cats', { type: 1 })).toEqual({

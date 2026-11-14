@@ -19,19 +19,21 @@ const DownloadsScreen = lazy(() => import('./screens/DownloadsScreen').then((m) 
 const LocalPlayerScreen = lazy(() => import('./screens/DownloadsScreen').then((m) => ({ default: m.LocalPlayerScreen })));
 const SettingsScreen = lazy(() => import('./screens/SettingsScreen').then((m) => ({ default: m.SettingsScreen })));
 import { PlaybackHost } from './player/PlaybackHost';
+import { FEED_REFRESH_EVENT, requestFeedRefresh } from './feedRefresh';
 import {
   BackIcon, ClockIcon, DownloadIcon, FireIcon, ForwardIcon, HistoryIcon, HomeIcon, MenuIcon, PlaylistIcon,
   PlayIcon, SearchIcon, SettingsIcon, SubsIcon, ThumbUpIcon,
 } from './components/icons';
 
-// Clicking the logo or Home navigates back to the feed. Coming from another
-// page shows the feed already cached (no reload, no flicker); clicking it
-// again while on Home is what asks for a fresh mix, exactly like YouTube.
+// Clicking the logo or Home goes back to the feed and asks it for a fresh mix.
+// Arriving from another page paints what is cached (no flicker) while the new
+// feed loads behind it; clicking again while on Home does the same thing the
+// already-visible screen would do.
 function homeClick() {
   const hash = window.location.hash;
   const onHome = hash === '' || hash === '#/' || hash === '#/home';
-  if (!onHome) { navigate('/home'); return; }
-  window.dispatchEvent(new Event('indio-feed-refresh'));
+  requestFeedRefresh('home');
+  if (!onHome) navigate('/home');
 }
 
 // ---- top bar ------------------------------------------------------------------
@@ -132,7 +134,7 @@ function SideNav({ onClose }: { onClose(): void }) {
   return (
     <div className="sidenav mini-hide">
       <Item to="/home" icon={<HomeIcon size={20} />} label="Home" active={page === 'home' || page === 'watch'}
-        onClick={homeClick} />
+        onClick={() => { homeClick(); onClose(); }} />
       <Item to="/trending" icon={<FireIcon size={20} />} label="Trending" active={page === 'trending'} />
       <Item to="/subscriptions" icon={<SubsIcon size={20} />} label="Subscriptions"
         active={lib?.subscriptions.some((s) => `#/channel/${s.channelId}` === window.location.hash)} />

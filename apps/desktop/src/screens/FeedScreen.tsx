@@ -13,10 +13,12 @@ import { GridSkeleton } from '../components/Skeletons';
 import { useApp } from '../store';
 import { warmPage } from '../player/warmStreams';
 import { useInfiniteScroll } from '../useInfiniteScroll';
+import { FEED_REFRESH_EVENT, doneFeedRefresh, wantsFeedRefresh } from '../feedRefresh';
 
-// Last rendered feed per mode. Coming back Home paints this immediately and
-// does NOT re-request it: the feed is only reloaded when the viewer asks for
-// it (logo / Home while already on Home) or when it is older than 30 minutes.
+// Last rendered feed per mode. Coming back Home paints this immediately, so the
+// grid never blanks; a reload is only fetched when the viewer asks for one (logo
+// or Home click, from Home or on the way back to it) or when the cache is older
+// than 30 minutes.
 const feedCache: Record<string, { at: number; feed: Feed; popular: boolean }> = {};
 const CACHE_TTL = 30 * 60_000;
 const LOCAL_PAGE_SIZE = 40;
@@ -54,10 +56,12 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
     setMoreError(null);
     moreBlocked.current = false;
     // Returning to a feed we loaded recently: show it as it was, untouched.
-    // `force` is bumped by a logo/Home click, which is the only other reason
-    // to go back to the network.
+    // A logo/Home click asks for a reload, and that request can arrive from
+    // another page (see feedRefresh.ts) - the cached grid still paints first,
+    // the fresh mix replaces it when it lands.
     const cached = feedCache[mode];
-    if (force === 0 && cached && Date.now() - cached.at < CACHE_TTL) {
+    const reload = force > 0 || wantsFeedRefresh(mode);
+    if (!reload && cached && Date.now() - cached.at < CACHE_TTL) {
       setFeed(cached.feed);
       setPopular(cached.popular);
       setLoading(false);
@@ -71,7 +75,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
     const job: Promise<{ feed: Feed; popular: boolean }> = mode === 'home'
       ? (() => {
         const trending = window.indio.trending({ force: force > 0 }).catch(() => null);
-        return window.indio.home({ params, force: force > 0 }).then(async (home) => {
+        return window.indio.home({ params, force: reload }).then(async (home) => {
           if (home.videos.length || home.chips.length) return { feed: home, popular: false };
           const trend = await trending;
           return trend && trend.videos.length
@@ -81,6 +85,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       })()
       : window.indio.trending({ force: force > 0 }).then((f) => ({ feed: f, popular: true }));
     job.then(({ feed: f, popular: p }) => {
+      doneFeedRefresh(mode);
       if (cancelled) return;
       setFeed(f);
       setPopular(p);
@@ -90,7 +95,10 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       // those streams ready while the viewer reads the titles.
       warmPage(f.videos);
     })
-      .catch((e) => { if (!cancelled) setError(String(e?.message || e)); })
+      .catch((e) => {
+        doneFeedRefresh(mode);
+        if (!cancelled) setError(String(e?.message || e));
+      })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [mode, force]); // chips are applied by an explicit reload below
@@ -99,8 +107,8 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
   // same: the feed flips to a fresh mix without leaving the page).
   useEffect(() => {
     const onRefresh = () => setForce((f) => f + 1);
-    window.addEventListener('indio-feed-refresh', onRefresh);
-    return () => window.removeEventListener('indio-feed-refresh', onRefresh);
+    window.addEventListener(FEED_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(FEED_REFRESH_EVENT, onRefresh);
   }, []);
 
   // Chip changes re-request with its params (home) — trending has none.
@@ -114,9 +122,8 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
         setFeed(f);
         setFeedVersion((v) => v + 1);
         warmPage(f.videos);
-        // A category feed is not what Home shows on return, so it must not
-        // replace the cached unfiltered feed.
-        if (chipIdx === -1) feedCache[mode] = { at: Date.now(), feed: f, popular };
+        // A category feed is not what Home shows on return, so it never
+        // replaces the cached unfiltered mix (only the "All" chip may).
       })
       .catch((e) => setError(String(e?.message || e)))
       .finally(() => setLoading(false));

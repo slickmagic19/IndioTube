@@ -169,6 +169,11 @@ pub async fn home_more(
     let lib = library.0.state();
     let factory = crate::tube_factory(&state);
     let videos = state.local_feed.more(&lib, &exclude, limit, &factory);
+    eprintln!(
+        "[indio] home more -> {} videos ({} excluded)",
+        videos.len(),
+        exclude.len()
+    );
     Ok(json!({ "videos": videos }))
 }
 

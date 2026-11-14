@@ -18,7 +18,9 @@
 //! is how the load timings are read), `INDIOTUBE_SMOKE_NAV=1` (drive the top
 //! bar's Back/Forward buttons), `INDIOTUBE_SMOKE_SEARCH_CLICK=1` (click the
 //! empty side of a search row and its channel line, and check where each one
-//! went), `INDIOTUBE_SMOKE_WAIT=<ms>` (how long to wait before reporting).
+//! went), `INDIOTUBE_SMOKE_FEED=1` (scroll Home to its end and check a second
+//! page arrives, then click the logo and check a reload was asked for),
+//! `INDIOTUBE_SMOKE_WAIT=<ms>` (how long to wait before reporting).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -78,6 +80,7 @@ pub fn smoke_config() -> Value {
         "click": std::env::var("INDIOTUBE_SMOKE_CLICK").as_deref() == Ok("1"),
         "nav": std::env::var("INDIOTUBE_SMOKE_NAV").as_deref() == Ok("1"),
         "searchClick": std::env::var("INDIOTUBE_SMOKE_SEARCH_CLICK").as_deref() == Ok("1"),
+        "feed": std::env::var("INDIOTUBE_SMOKE_FEED").as_deref() == Ok("1"),
         "waitMs": env_number("INDIOTUBE_SMOKE_WAIT", 8_000),
     });
     println!("[smoke] config -> {config}");

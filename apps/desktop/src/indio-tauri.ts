@@ -77,7 +77,7 @@ if (isTauri && !(window as unknown as { indio?: unknown }).indio) {
 
   const api = {
     home: async (p: Args = {}) => (await go<{ feed: unknown }>('home', p)).feed,
-    homeMore: async (p: Args = {}) => (await go<{ videos: unknown[] }>('homeMore', p)).videos,
+    homeMore: async (p: Args = {}) => (await go<{ videos: unknown[] }>('home_more', p)).videos,
     homeCont: async (token: string) => (await go<{ feed: unknown }>('home_cont', { token })).feed,
     trending: async (p: Args = {}) => (await go<{ feed: unknown }>('trending', p)).feed,
     trendingCont: async (token: string) => (await go<{ feed: unknown }>('trending_cont', { token })).feed,
@@ -189,6 +189,8 @@ type SmokeConfig = {
   nav?: boolean;
   /** Click a search row's empty side and its channel line. */
   searchClick?: boolean;
+  /** Page the Home feed to its end and reload it from the logo. */
+  feed?: boolean;
   waitMs: number;
 };
 
@@ -457,6 +459,83 @@ async function probeNavigation(): Promise<NavigationProbe> {
   };
 }
 
+type FeedProbe = {
+  skipped?: string;
+  failures: string[];
+  cards?: number;
+  pagesLoaded?: number;
+  caughtUp?: boolean;
+  pagingError?: string | null;
+  reloadStarted?: boolean;
+  firstBefore?: string | null;
+  firstAfter?: string | null;
+};
+
+/**
+ * Home the way it is actually used: scroll to the bottom and see whether the
+ * feed keeps going, then click the logo and see whether a reload really starts.
+ * Both of these were once silent failures - a paging call that named a command
+ * the shell never registered, and a reload request that never survived the
+ * navigation which asked for it.
+ */
+async function probeFeed(): Promise<FeedProbe> {
+  const grid = await until(() => document.querySelector('.card'), 15_000);
+  if (!grid) return { skipped: 'no cards', failures: ['Home never painted a feed'] };
+  const failures: string[] = [];
+  const content = document.querySelector('.content') as HTMLElement | null;
+  const count = () => document.querySelectorAll('.card').length;
+  const firstId = () => document.querySelector('.card')?.getAttribute('data-vid') || null;
+  const caughtUp = () => /all caught up/i.test(document.body.innerText || '');
+  const pagingError = () => {
+    const row = Array.from(document.querySelectorAll('.state'))
+      .find((el) => /try again/i.test(el.textContent || ''));
+    return row ? (row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160) : null;
+  };
+
+  const cards = count();
+  let pagesLoaded = 0;
+  if (!content) {
+    failures.push('the feed has no .content scroll container to page from');
+  } else {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const before = count();
+      content.scrollTo(0, content.scrollHeight);
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline && count() === before) await wait(150);
+      if (count() !== before) {
+        pagesLoaded += 1;
+        continue;
+      }
+      if (caughtUp()) break;
+      failures.push(`scrolling to the end of Home loaded no more videos (${before} cards)`);
+      break;
+    }
+  }
+  const seenPagingError = pagingError();
+  if (seenPagingError) failures.push(`Home paging showed: ${seenPagingError}`);
+
+  // The logo is the "give me a different mix" control.
+  const firstBefore = firstId();
+  (document.querySelector('.brand') as HTMLElement | null)?.click();
+  const barAppeared = (await until(
+    () => (document.querySelector('.refresh-bar.on') ? true : null), 3_000)) === true;
+  await wait(4_000);
+  const firstAfter = firstId();
+  const reloadStarted = barAppeared || firstAfter !== firstBefore;
+  if (!reloadStarted) failures.push('clicking the logo did not reload the feed');
+
+  return {
+    failures,
+    cards,
+    pagesLoaded,
+    caughtUp: caughtUp(),
+    pagingError: seenPagingError,
+    reloadStarted,
+    firstBefore,
+    firstAfter,
+  };
+}
+
 /**
  * When the parts the viewer waits for actually appear. `cardsAt` and `clickedAt`
  * count from the page loading; `titleAt`, `playerAt` and `frameAt` count from
@@ -549,8 +628,10 @@ async function runSmoke(): Promise<void> {
   const playerUi = config.ui ? await probePlayerUi() : null;
   const searchClick = config.searchClick ? await probeSearchClick() : null;
   const navigation = config.nav ? await probeNavigation() : null;
+  const feed = config.feed ? await probeFeed() : null;
   if (searchClick) errors.push(...searchClick.failures.map((f) => `search click: ${f}`));
   if (navigation) errors.push(...navigation.failures.map((f) => `navigation: ${f}`));
+  if (feed) errors.push(...feed.failures.map((f) => `home feed: ${f}`));
   const report = {
     title: document.title,
     hash: location.hash,
@@ -577,6 +658,7 @@ async function runSmoke(): Promise<void> {
     ...(playerUi ? { playerUi } : {}),
     ...(searchClick ? { searchClick } : {}),
     ...(navigation ? { navigation } : {}),
+    ...(feed ? { feed } : {}),
   };
   try {
     await invoke('smoke_report', { report });
