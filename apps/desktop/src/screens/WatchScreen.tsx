@@ -27,6 +27,9 @@ export function WatchScreen({ videoId }: { videoId: string }) {
   const [moreRelated, setMoreRelated] = useState(false);
   const [descOpen, setDescOpen] = useState(false);
   const [saveAnchor, setSaveAnchor] = useState<DOMRect | null>(null);
+  // Bumped by "Try again": a failed metadata request is usually a dropped
+  // connection, and re-running the effect is exactly the retry that fixes it.
+  const [attempt, setAttempt] = useState(0);
 
   // The card that was clicked already showed the title, the channel and the
   // length, so the page starts with those instead of a blank skeleton while
@@ -112,9 +115,15 @@ export function WatchScreen({ videoId }: { videoId: string }) {
             .catch(() => undefined);
         }
       })
-      .catch((e) => { if (!cancelled) setError(String(e?.message || e)); });
+      .catch((e) => {
+        if (cancelled) return;
+        setError(String(e?.message || e));
+        // Do not leave the shared player streaming invisibly behind the error
+        // page when the metadata request failed; "Try again" starts it fresh.
+        playback.close();
+      });
     return () => { cancelled = true; };
-  }, [videoId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [videoId, attempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const liked = Boolean(lib?.library.liked.some((v) => v.videoId === videoId));
   const later = Boolean(lib?.library.watchLater.some((v) => v.videoId === videoId));
@@ -150,8 +159,12 @@ export function WatchScreen({ videoId }: { videoId: string }) {
   if (error) {
     return (
       <div className="state">
-        <div>Couldn't open this video: {error}</div>
-        <button onClick={() => navigate('/home')}>Back to Home</button>
+        <div>Couldn't open this video.</div>
+        <div style={{ color: 'var(--text-dim)', maxWidth: 620 }}>{error}</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          <button onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+          <button className="btn ghost" onClick={() => navigate('/home')}>Back to Home</button>
+        </div>
       </div>
     );
   }

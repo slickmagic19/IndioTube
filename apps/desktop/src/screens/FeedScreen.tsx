@@ -32,6 +32,10 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
   const [force, setForce] = useState(0);
   const [popular, setPopular] = useState(false);
   const [feedVersion, setFeedVersion] = useState(0);
+  // Paging failures are separate from a failed first page: keep the grid that
+  // is already on screen and offer a retry instead of ending the feed.
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const moreBlocked = useRef(false);
   const modeRef = useRef<string>('');
 
   useEffect(() => {
@@ -47,6 +51,8 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
     }
     setError(null);
     setExhausted(false);
+    setMoreError(null);
+    moreBlocked.current = false;
     // Returning to a feed we loaded recently: show it as it was, untouched.
     // `force` is bumped by a logo/Home click, which is the only other reason
     // to go back to the network.
@@ -117,7 +123,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
   };
 
   const loadMore = useCallback(() => {
-    if (!feed || loadingMore || exhausted) return;
+    if (!feed || loadingMore || exhausted || moreBlocked.current) return;
     const isLocal = Boolean(feed.local);
     const token = feed.continuation;
     if (!isLocal && !token) {
@@ -125,6 +131,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       return;
     }
     setLoadingMore(true);
+    setMoreError(null);
     const request: Promise<Feed | VideoItem[]> = isLocal
       ? window.indio.homeMore({ excludeIds: feed.videos.map((v) => v.videoId), limit: LOCAL_PAGE_SIZE })
       : (mode === 'home' ? window.indio.homeCont(token!) : window.indio.trendingCont(token!));
@@ -159,9 +166,20 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       setFeed(next);
       if (chipIdx === -1) feedCache[mode] = { at: Date.now(), feed: next, popular };
       if (!nextToken) setExhausted(true);
-    }).catch(() => setExhausted(true))
+    }).catch((e) => {
+      // A dropped connection is not "you're all caught up". Stop the sentinel
+      // from hammering the network, keep the grid, and show a retry.
+      moreBlocked.current = true;
+      setMoreError(String(e?.message || e));
+    })
       .finally(() => setLoadingMore(false));
   }, [feed, mode, loadingMore, exhausted, popular, chipIdx]);
+
+  const retryMore = () => {
+    moreBlocked.current = false;
+    setMoreError(null);
+    loadMore();
+  };
 
   const sentinelRef = useInfiniteScroll(loadMore, [
     feed?.videos.length || 0,
@@ -242,6 +260,12 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
         <div ref={sentinelRef} className="feed-sentinel" aria-hidden="true" />
       )}
       {loadingMore && <div style={{ marginTop: 22 }}><GridSkeleton count={4} /></div>}
+      {moreError && (
+        <div className="state" style={{ paddingTop: 12 }}>
+          <div>{moreError}</div>
+          <button onClick={retryMore}>Try again</button>
+        </div>
+      )}
       {exhausted && visible.length > 0 && (
         <div className="show-more" style={{ color: 'var(--text-dim)' }}>You're all caught up</div>
       )}

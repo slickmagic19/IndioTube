@@ -1,6 +1,6 @@
 // Search results with the YouTube filter menu (type / sort / upload date /
 // duration). The filter integers match the Android app's protobuf params.
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { SearchEntry, SearchResults } from '../types';
 import { navigate, useRoute } from '../router';
 import { VideoCard, openVideo } from '../components/VideoCard';
@@ -28,8 +28,10 @@ export function SearchScreen() {
   const [filters, setFilters] = useState<Filters>({});
   const [filterAnchor, setFilterAnchor] = useState<DOMRect | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const sentinel = useRef<HTMLDivElement>(null);
+  const moreBusy = useRef(false);
   const activeFilters = Object.values(filters).filter((v) => v != null).length;
 
   useEffect(() => {
@@ -42,6 +44,7 @@ export function SearchScreen() {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setMoreError(null);
     // A failed query must never leave the previous query's rows on screen:
     // that is what made a flaky request look like "search returned nothing"
     // or, worse, the wrong results.
@@ -54,24 +57,34 @@ export function SearchScreen() {
     return () => { cancelled = true; };
   }, [query, filters, attempt]);
 
+  const fetchMore = useCallback(() => {
+    const token = results?.continuation;
+    if (!token || moreBusy.current) return;
+    moreBusy.current = true;
+    setMoreError(null);
+    setLoadingMore(true);
+    withSearchRetry(() => window.indio.searchCont(token))
+      .then((r) => setResults((cur) => cur && ({
+        entries: [...cur.entries, ...r.entries],
+        continuation: r.continuation === cur.continuation ? null : r.continuation,
+        restricted: cur.restricted,
+      })))
+      .catch((e) => setMoreError(String(e?.message || e)))
+      .finally(() => {
+        moreBusy.current = false;
+        setLoadingMore(false);
+      });
+  }, [results?.continuation]);
+
   useEffect(() => {
     const el = sentinel.current;
-    if (!el || !results?.continuation || loading) return;
+    if (!el || !results?.continuation || loading || moreError) return;
     const io = new IntersectionObserver((entries) => {
-      if (!entries[0].isIntersecting || loadingMore) return;
-      setLoadingMore(true);
-      withSearchRetry(() => window.indio.searchCont(results.continuation!))
-        .then((r) => setResults((cur) => cur && ({
-          entries: [...cur.entries, ...r.entries],
-          continuation: r.continuation === cur.continuation ? null : r.continuation,
-          restricted: cur.restricted,
-        })))
-        .catch(() => setResults((cur) => cur && { ...cur, continuation: null }))
-        .finally(() => setLoadingMore(false));
+      if (entries[0].isIntersecting) fetchMore();
     }, { rootMargin: '500px' });
     io.observe(el);
     return () => io.disconnect();
-  }, [results, loading, loadingMore]);
+  }, [results?.continuation, loading, moreError, fetchMore]);
 
   const apply = (patch: Filters) => {
     setFilters((f) => ({ ...f, ...patch }));
@@ -132,6 +145,12 @@ export function SearchScreen() {
       )}
       <div ref={sentinel} style={{ height: 4 }} />
       {loadingMore && <ListSkeleton count={2} />}
+      {moreError && !loadingMore && (
+        <div className="state" style={{ paddingTop: 12 }}>
+          <div>{moreError}</div>
+          <button onClick={fetchMore}>Try again</button>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 // Playlist page for both YouTube playlists (fetched) and local playlists
 // (from the library). Local ones support rename, delete and removing rows.
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { PlaylistPage, VideoItem } from '../types';
 import { formatDuration } from '../types';
 import { navigate } from '../router';
@@ -18,6 +18,10 @@ export function PlaylistScreen({ kind, id }: { kind: 'yt' | 'local'; id: string 
   const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [newName, setNewName] = useState('');
+  // Paging failures keep the rows on screen and offer a retry.
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const moreBusy = useRef(false);
+  const [attempt, setAttempt] = useState(0);
   const sentinel = useRef<HTMLDivElement>(null);
 
   const local = kind === 'local' ? lib?.library.playlists.find((p) => p.id === id) : undefined;
@@ -27,30 +31,39 @@ export function PlaylistScreen({ kind, id }: { kind: 'yt' | 'local'; id: string 
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setMoreError(null);
     window.indio.playlist(id)
       .then((p) => { if (!cancelled) setPage(p); })
       .catch((e) => { if (!cancelled) setError(String(e?.message || e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [kind, id]);
+  }, [kind, id, attempt]);
+
+  const fetchMore = useCallback(() => {
+    const token = page?.continuation;
+    if (kind !== 'yt' || !token || moreBusy.current) return;
+    moreBusy.current = true;
+    setMoreError(null);
+    window.indio.playlistCont(token)
+      .then((p) => setPage((cur) => cur && ({
+        ...cur,
+        videos: [...cur.videos, ...p.videos],
+        continuation: p.continuation === cur.continuation ? null : p.continuation,
+      })))
+      .catch((e) => setMoreError(String(e?.message || e)))
+      .finally(() => { moreBusy.current = false; });
+  }, [kind, page?.continuation]);
 
   useEffect(() => {
-    if (kind !== 'yt' || !page?.continuation) return;
+    if (kind !== 'yt' || !page?.continuation || moreError) return;
     const el = sentinel.current;
     if (!el) return;
     const io = new IntersectionObserver((entries) => {
-      if (!entries[0].isIntersecting) return;
-      window.indio.playlistCont(page.continuation!)
-        .then((p) => setPage((cur) => cur && ({
-          ...cur,
-          videos: [...cur.videos, ...p.videos],
-          continuation: p.continuation === cur.continuation ? null : p.continuation,
-        })))
-        .catch(() => setPage((cur) => cur && { ...cur, continuation: null }));
+      if (entries[0].isIntersecting) fetchMore();
     }, { rootMargin: '500px' });
     io.observe(el);
     return () => io.disconnect();
-  }, [kind, page]);
+  }, [kind, page?.continuation, moreError, fetchMore]);
 
   if (kind === 'local') {
     if (!local) {
@@ -108,7 +121,12 @@ export function PlaylistScreen({ kind, id }: { kind: 'yt' | 'local'; id: string 
 
   if (loading) return <GridSkeleton count={12} />;
   if (error || !page) {
-    return <div className="state"><div>Playlist unavailable: {error || 'not found'}</div></div>;
+    return (
+      <div className="state">
+        <div>{error || 'This playlist could not be opened.'}</div>
+        <button onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+      </div>
+    );
   }
   return (
     <div>
@@ -122,6 +140,12 @@ export function PlaylistScreen({ kind, id }: { kind: 'yt' | 'local'; id: string 
         {page.videos.map((v, i) => <VideoCard key={`${v.videoId}-${i}`} video={v} />)}
       </div>
       <div ref={sentinel} style={{ height: 4 }} />
+      {moreError && (
+        <div className="state" style={{ paddingTop: 12 }}>
+          <div>{moreError}</div>
+          <button onClick={fetchMore}>Try again</button>
+        </div>
+      )}
     </div>
   );
 }

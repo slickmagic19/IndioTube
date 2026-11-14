@@ -5,6 +5,7 @@
 // `src-tauri`. It is installed as soon as `__TAURI_INTERNALS__` is present, and
 // the app never learns which shell it is running in because there is only one.
 import { invoke } from '@tauri-apps/api/core';
+import { friendlyError } from './errors';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export function isTauriShell(): boolean {
@@ -19,7 +20,13 @@ const isTauri = isTauriShell();
 type Args = Record<string, unknown>;
 
 async function call<T>(cmd: string, args?: Args): Promise<T> {
-  return invoke<T>(cmd, args);
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    // Every screen and toast shows this message, so it must be a sentence, not
+    // a raw transport dump. The shell already retried connection failures.
+    throw new Error(friendlyError(e));
+  }
 }
 
 function detectLocale(): { lang: string; country: string } {

@@ -1,7 +1,7 @@
 // Channel page: header + Subscribe, Videos / Live / Playlists / About tabs,
 // with the Videos grid appending the next page automatically when scrolled
 // to the end.
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChannelAbout, ChannelPage, PlaylistItem, VideoItem } from '../types';
 import { navigate } from '../router';
 import { useApp } from '../store';
@@ -25,6 +25,11 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
   const [continuation, setContinuation] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [done, setDone] = useState(false);
+  // A paging failure keeps the grid and offers a retry instead of pretending
+  // the channel ended there.
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const moreBlocked = useRef(false);
+  const [attempt, setAttempt] = useState(0);
 
   const subscribed = Boolean(lib?.subscriptions.some((s) => s.channelId === channelId));
 
@@ -39,6 +44,8 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
     setVideos([]);
     setContinuation(null);
     setDone(false);
+    setMoreError(null);
+    moreBlocked.current = false;
     window.indio.channel(channelId)
       .then((p) => {
         if (cancelled) return;
@@ -50,7 +57,7 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
       .catch((e) => { if (!cancelled) setError(String(e?.message || e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [channelId]);
+  }, [channelId, attempt]);
 
   useEffect(() => {
     if (tab === 1 && livePage === null) {
@@ -69,8 +76,9 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
   }, [tab, playlists, about, channelId, page?.aboutToken]);
 
   const loadMore = useCallback(() => {
-    if (tab !== 0 || loadingMore || done || !continuation) return;
+    if (tab !== 0 || loadingMore || done || !continuation || moreBlocked.current) return;
     setLoadingMore(true);
+    setMoreError(null);
     window.indio.channelCont(continuation, channelId).then((p) => {
       const known = new Set(videos.map((v) => v.videoId));
       const fresh = p.videos.filter((v) => !known.has(v.videoId));
@@ -78,9 +86,18 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
       const next = p.continuation && p.continuation !== continuation ? p.continuation : null;
       setContinuation(next);
       if (!next) setDone(true);
-    }).catch(() => setDone(true))
+    }).catch((e) => {
+      moreBlocked.current = true;
+      setMoreError(String(e?.message || e));
+    })
       .finally(() => setLoadingMore(false));
   }, [tab, loadingMore, done, continuation, videos, channelId]);
+
+  const retryMore = () => {
+    moreBlocked.current = false;
+    setMoreError(null);
+    loadMore();
+  };
 
   const sentinelRef = useInfiniteScroll(loadMore, [
     tab, videos.length, continuation, done, loadingMore,
@@ -88,7 +105,16 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
 
   if (loading) return <ChannelSkeleton />;
   if (error || !page) {
-    return <div className="state"><div>Channel unavailable: {error}</div><button onClick={() => navigate('/home')}>Home</button></div>;
+    return (
+      <div className="state">
+        <div>Channel unavailable.</div>
+        {error && <div style={{ color: 'var(--text-dim)', maxWidth: 620 }}>{error}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          <button onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+          <button className="btn ghost" onClick={() => navigate('/home')}>Home</button>
+        </div>
+      </div>
+    );
   }
 
   const c = page.channel;
@@ -124,6 +150,12 @@ export function ChannelScreen({ channelId }: { channelId: string }) {
             <div className="grid">{videos.map((v, i) => <VideoCard key={`${v.videoId}-${i}`} video={v} showChannel={false} />)}</div>
             {!done && <div ref={sentinelRef} className="feed-sentinel" aria-hidden="true" />}
             {loadingMore && <div className="state"><Spinner /></div>}
+            {moreError && !loadingMore && (
+              <div className="state" style={{ paddingTop: 12 }}>
+                <div>{moreError}</div>
+                <button onClick={retryMore}>Try again</button>
+              </div>
+            )}
           </>
           : <div className="state">No videos yet.</div>
       )}
