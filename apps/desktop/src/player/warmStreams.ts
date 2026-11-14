@@ -14,13 +14,27 @@
  * streams would only cost time. Best effort — without the Tauri bridge there
  * is nothing to warm and nothing to say about it.
  */
+import { perfLite } from '../perf';
+
+/**
+ * How many speculative extractions a page may queue. Zero on a lite machine:
+ * each one is a yt-dlp process holding a resolved ladder, and on a 2 GiB
+ * tablet it competes directly with the video the viewer is waiting for.
+ */
+export function warmCount(requested: number, lite: boolean): number {
+  if (lite) return 0;
+  return Math.max(0, requested);
+}
+
 export function warmPage(
   videos: { videoId: string; isLive?: boolean; membersOnly?: boolean }[],
   count = 2,
 ): number {
+  const budget = warmCount(count, perfLite());
+  if (budget <= 0) return 0;
   const ids = videos
     .filter((video) => video && video.videoId && !video.isLive && !video.membersOnly)
-    .slice(0, count)
+    .slice(0, budget)
     .map((video) => video.videoId);
   if (!ids.length) return 0;
   const indio = typeof window === 'undefined'

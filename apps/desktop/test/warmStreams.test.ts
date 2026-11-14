@@ -2,7 +2,7 @@
 // The queue and its pacing live in Rust; what belongs here is the policy about
 // the list itself: the top of the page, and nothing that cannot play here.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { warmPage } from '../src/player/warmStreams';
+import { warmCount, warmPage } from '../src/player/warmStreams';
 
 function setWindow(indio: unknown) {
   (globalThis as unknown as { window: unknown }).window = indio === undefined
@@ -53,5 +53,11 @@ describe('warming the videos a page shows', () => {
     expect(warmPage([{ videoId: 'a' }])).toBe(0);
     setWindow({});
     expect(warmPage([{ videoId: 'a' }])).toBe(0);
+  });
+
+  it('queues nothing speculative on a lite machine', () => {
+    expect(warmCount(2, true)).toBe(0);
+    expect(warmCount(2, false)).toBe(2);
+    expect(warmCount(0, false)).toBe(0);
   });
 });

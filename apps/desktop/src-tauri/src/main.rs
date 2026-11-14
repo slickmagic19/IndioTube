@@ -674,6 +674,9 @@ fn main() {
                 Arc::clone(&library),
                 Arc::new(emit_to(&handle, "sync:event")),
             ));
+            // Watch-position writes are batched instead of hitting the disk on
+            // every five-second tick.
+            library.spawn_flusher();
             app.manage(LibraryState(Arc::clone(&library)));
             app.manage(DownloadsState(Arc::clone(&downloads)));
             app.manage(SyncState(sync));

@@ -445,6 +445,20 @@ fn store_ladder(state: &AppState, video_id: &str, ladder: &QualityLadder) {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.insert(video_id.to_string(), (now_ms(), ladder.clone()));
+        // Ladders are held for five hours and each one carries every stream URL
+        // of the video; an unbounded map grows for the whole session on a
+        // device where memory is the scarce resource. Keep the newest handful.
+        const STREAM_CACHE_MAX: usize = 24;
+        while cache.len() > STREAM_CACHE_MAX {
+            let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            cache.remove(&oldest);
+        }
         cache.clone()
     };
     let path = state.streams_cache_path.clone();

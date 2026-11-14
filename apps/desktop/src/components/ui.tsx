@@ -146,7 +146,7 @@ export function Thumb({ src, alt, live, duration, members, fraction, fallbackSrc
   return (
     <div className="thumb-wrap">
       {current && !failed ? (
-        <img src={current} alt={alt} loading="lazy" onError={onError} />
+        <img src={current} alt={alt} loading="lazy" decoding="async" draggable={false} onError={onError} />
       ) : (
         <div style={{ width: '100%', height: '100%', background: 'var(--chip)' }} />
       )}

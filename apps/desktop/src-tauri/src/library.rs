@@ -6,8 +6,9 @@
 //! forwards as `lib:changed`; the renderer re-renders from that.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
 
@@ -133,6 +134,8 @@ pub struct Library {
     /// Where a committed state goes. The shell wires this to `app.emit`, so the
     /// store itself stays free of the windowing layer and unit-testable.
     sink: ChangeSink,
+    /// A watch-position update changed the state but has not reached the disk.
+    dirty: AtomicBool,
 }
 
 fn as_array(value: &Value) -> Vec<Value> {
@@ -178,6 +181,7 @@ impl Library {
             path,
             data: Mutex::new(data),
             sink,
+            dirty: AtomicBool::new(false),
         };
         store.persist();
         store
@@ -208,6 +212,32 @@ impl Library {
     fn commit(&self) {
         self.persist();
         (self.sink)(self.state());
+    }
+
+    /// A position update is invisible to every screen: it must not re-render the
+    /// UI (which would rebuild the feed while a video plays) and it does not
+    /// need its own disk write. Mark it and let the flusher batch it.
+    fn commit_quiet(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Write a pending quiet update, if any. Returns whether it wrote.
+    pub fn flush_if_dirty(&self) -> bool {
+        if !self.dirty.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        self.persist();
+        true
+    }
+
+    /// Batches quiet writes for the whole session (2 s is short enough that a
+    /// crash loses at most one progress tick).
+    pub fn spawn_flusher(self: &Arc<Self>) {
+        let store = Arc::clone(self);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            store.flush_if_dirty();
+        });
     }
 
     /// The sync payload this device offers to others.
@@ -904,14 +934,16 @@ impl Library {
         };
 
         drop(guard);
-        if op != "resumePosition"
-            && op != "isWatched"
-            && op != "isInWatchLater"
-            && op != "isLiked"
-            && op != "isSubscribed"
-            && op != "snapshot"
-        {
-            self.commit();
+        let read_only = matches!(
+            op,
+            "resumePosition" | "isWatched" | "isInWatchLater" | "isLiked" | "isSubscribed" | "snapshot"
+        );
+        if !read_only {
+            if op == "notePosition" {
+                self.commit_quiet();
+            } else {
+                self.commit();
+            }
         }
         Ok(result)
     }

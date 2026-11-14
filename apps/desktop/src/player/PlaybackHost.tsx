@@ -7,11 +7,15 @@
 // docks to the bottom-right corner as the mini player. The media elements are
 // never unmounted for a layout change, which is what keeps audio/video alive.
 import React, {
-  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
+  Suspense, createContext, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from 'react';
 import type { VideoItem, WatchData } from '../types';
 import { navigate } from '../router';
-import { Player } from './Player';
+
+// The player (MSE, captions, SponsorBlock, stats) is the heaviest screen in the
+// bundle and only matters once something is playing, so it is a lazy chunk.
+// It is warmed while the app is idle so the first play does not wait for it.
+const Player = lazy(() => import('./Player').then((m) => ({ default: m.Player })));
 import { enqueue as enqueueQueue } from './queueLogic';
 import { CloseIcon, ExitFullscreenIcon } from '../components/icons';
 
@@ -142,6 +146,16 @@ export function PlaybackHost({ children }: { children: React.ReactNode }) {
     play, setWatchData, next, prev, enqueue, setMini: toggleMini, close, registerSlot,
   }), [video, watch, queue, mini, play, setWatchData, next, prev, enqueue, toggleMini, close, registerSlot]);
 
+  useEffect(() => {
+    const load = () => { import('./Player').catch(() => undefined); };
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(load, { timeout: 3000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = window.setTimeout(load, 1500);
+    return () => window.clearTimeout(id);
+  }, []);
+
   // Track the watch page slot: scroll (captured, so inner scrollers count),
   // resize, slot size changes and a slow poll for layout shifts like theater.
   useEffect(() => {
@@ -163,14 +177,15 @@ export function PlaybackHost({ children }: { children: React.ReactNode }) {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(measure);
     };
-    document.addEventListener('scroll', onScroll, true);
+    // Passive: measuring must never delay the scroll that triggered it.
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
     window.addEventListener('resize', onScroll);
     const ro = slot ? new ResizeObserver(onScroll) : null;
     if (ro && slot) ro.observe(slot);
     const poll = window.setInterval(measure, 400);
     return () => {
       cancelAnimationFrame(raf);
-      document.removeEventListener('scroll', onScroll, true);
+      document.removeEventListener('scroll', onScroll, { capture: true });
       window.removeEventListener('resize', onScroll);
       ro?.disconnect();
       window.clearInterval(poll);
@@ -191,16 +206,18 @@ export function PlaybackHost({ children }: { children: React.ReactNode }) {
       {video && (
         <div className={`playback-layer${mini ? ' mini' : ''}`} style={style}
           data-testid="playback-layer">
-          <Player
-            video={video}
-            watch={watch}
-            queue={queue.items}
-            queueIndex={queue.index}
-            onNext={next}
-            onPrev={prev}
-            miniMode={mini}
-            onExitMini={() => { if (mini) expand(); else toggleMini(true); }}
-          />
+          <Suspense fallback={null}>
+            <Player
+              video={video}
+              watch={watch}
+              queue={queue.items}
+              queueIndex={queue.index}
+              onNext={next}
+              onPrev={prev}
+              miniMode={mini}
+              onExitMini={() => { if (mini) expand(); else toggleMini(true); }}
+            />
+          </Suspense>
           {mini && (
             <div className="mini-chrome">
               <button className="mini-open" title="Back to watch page" aria-label="Back to watch page"

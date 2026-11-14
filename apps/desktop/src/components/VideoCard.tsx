@@ -14,6 +14,8 @@ import {
 } from './icons';
 import { videoCache } from '../screens/DownloadsScreen';
 import { rememberVideo } from '../videoHints';
+import { perfLite } from '../perf';
+import { thumbUrlFor, thumbVariant } from '../thumbs';
 
 export function openVideo(video: VideoItem) {
   // The card already shows the title, channel and length the watch page is
@@ -45,7 +47,11 @@ export function VideoCard({ video, showChannel = true, fraction }: {
   const prefetchTimer = useRef<number>(0);
 
   const startPrefetch = () => {
-    if (video.isLive || video.membersOnly || prefetched.has(video.videoId)) return;
+    // Prefetching spawns yt-dlp per card, which on a 2 GiB tablet is the most
+    // expensive thing the feed can do; keep it to real desktops and to a small
+    // budget, since each ladder is held for hours.
+    if (perfLite() || video.isLive || video.membersOnly || prefetched.has(video.videoId)) return;
+    if (prefetched.size >= 4) return;
     window.clearTimeout(prefetchTimer.current);
     prefetchTimer.current = window.setTimeout(() => {
       prefetched.add(video.videoId);
@@ -69,8 +75,8 @@ export function VideoCard({ video, showChannel = true, fraction }: {
     <div className="card" data-vid={video.videoId} onClick={() => openVideo(video)}
       onMouseEnter={startPrefetch} onMouseLeave={cancelPrefetch}>
       <Thumb
-        src={video.thumbnail}
-        fallbackSrc={`https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg`}
+        src={thumbVariant(video.thumbnail, perfLite())}
+        fallbackSrc={thumbUrlFor(video.videoId, perfLite())}
         alt={video.title}
         live={video.isLive}
         duration={video.isLive ? undefined : formatDuration(video.durationSec)}
@@ -222,9 +228,11 @@ function PlaylistMiniIcon() {
 export function RelatedCard({ video, active }: { video: VideoItem; active?: boolean }) {
   // Some related-rail lockups carry no thumbnail URL; fall back to the
   // canonical i.ytimg poster so the rail never shows a gray hole.
-  const fallback = `https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg`;
-  const [thumb, setThumb] = useState(video.thumbnail || fallback);
-  useEffect(() => { setThumb(video.thumbnail || fallback); }, [video.videoId, video.thumbnail]); // eslint-disable-line react-hooks/exhaustive-deps
+  const fallback = thumbUrlFor(video.videoId, perfLite());
+  const [thumb, setThumb] = useState(() => thumbVariant(video.thumbnail, perfLite()) || fallback);
+  useEffect(() => {
+    setThumb(thumbVariant(video.thumbnail, perfLite()) || fallback);
+  }, [video.videoId, video.thumbnail]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="related-item" onClick={() => openVideo(video)} style={active ? { background: 'var(--chip)' } : undefined}>
       <div className="thumb">

@@ -1,17 +1,23 @@
 // App shell: hash-route switch, top bar with type-ahead, side navigation,
 // and the always-on-top mini-player mode.
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useRoute, navigate, useNavHistory, historyBack, historyForward } from './router';
 import { useApp, AppProvider } from './store';
-import { FeedScreen } from './screens/FeedScreen';
-import { SearchScreen } from './screens/SearchScreen';
-import { WatchScreen } from './screens/WatchScreen';
-import { ChannelScreen } from './screens/ChannelScreen';
-import { PlaylistScreen, LocalPlaylistsHub } from './screens/PlaylistScreen';
-import { LibraryScreen } from './screens/LibraryScreen';
-import { SubscriptionsScreen } from './screens/SubscriptionsScreen';
-import { DownloadsScreen, LocalPlayerScreen } from './screens/DownloadsScreen';
-import { SettingsScreen } from './screens/SettingsScreen';
+// Screens are split out of the startup bundle: the first paint only needs the
+// shell and the feed, and parsing the watch page, the download manager and the
+// settings forms up front is exactly the kind of work a slow tablet cannot
+// afford. Vite emits one chunk per screen and loads it on first navigation.
+const FeedScreen = lazy(() => import('./screens/FeedScreen').then((m) => ({ default: m.FeedScreen })));
+const SearchScreen = lazy(() => import('./screens/SearchScreen').then((m) => ({ default: m.SearchScreen })));
+const WatchScreen = lazy(() => import('./screens/WatchScreen').then((m) => ({ default: m.WatchScreen })));
+const ChannelScreen = lazy(() => import('./screens/ChannelScreen').then((m) => ({ default: m.ChannelScreen })));
+const PlaylistScreen = lazy(() => import('./screens/PlaylistScreen').then((m) => ({ default: m.PlaylistScreen })));
+const LocalPlaylistsHub = lazy(() => import('./screens/PlaylistScreen').then((m) => ({ default: m.LocalPlaylistsHub })));
+const LibraryScreen = lazy(() => import('./screens/LibraryScreen').then((m) => ({ default: m.LibraryScreen })));
+const SubscriptionsScreen = lazy(() => import('./screens/SubscriptionsScreen').then((m) => ({ default: m.SubscriptionsScreen })));
+const DownloadsScreen = lazy(() => import('./screens/DownloadsScreen').then((m) => ({ default: m.DownloadsScreen })));
+const LocalPlayerScreen = lazy(() => import('./screens/DownloadsScreen').then((m) => ({ default: m.LocalPlayerScreen })));
+const SettingsScreen = lazy(() => import('./screens/SettingsScreen').then((m) => ({ default: m.SettingsScreen })));
 import { PlaybackHost } from './player/PlaybackHost';
 import {
   BackIcon, ClockIcon, DownloadIcon, FireIcon, ForwardIcon, HistoryIcon, HomeIcon, MenuIcon, PlaylistIcon,
@@ -191,6 +197,17 @@ function Shell() {
     document.documentElement.dataset.fs = fs ? '1' : '';
   }, [fs]);
 
+  // A performance-mode change from Settings applies to the open screens at
+  // once: cards pick the new thumbnail size, speculative warm-ups stop, the
+  // player poster switches. Re-rendering is enough because every consumer reads
+  // perfLite() while rendering.
+  const [, setPerfEpoch] = useState(0);
+  useEffect(() => {
+    const onPerf = () => setPerfEpoch((n) => n + 1);
+    window.addEventListener('indio-perf-changed', onPerf);
+    return () => window.removeEventListener('indio-perf-changed', onPerf);
+  }, []);
+
   let screen: React.ReactNode;
   switch (route.page) {
     case 'watch': screen = <WatchScreen videoId={route.id} />; break;
@@ -214,7 +231,9 @@ function Shell() {
       <TopBar onMenu={() => setNavOpen((o) => !o)} />
       <div className="main">
         {navOpen && !overlayNav && <SideNav onClose={() => undefined} />}
-        <div className="content" ref={contentRef}>{screen}</div>
+        <div className="content" ref={contentRef}>
+          <Suspense fallback={null}>{screen}</Suspense>
+        </div>
         {overlayNav && (
           <>
             <div className="nav-scrim" onClick={() => setNavOpen(false)} />

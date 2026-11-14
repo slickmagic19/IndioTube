@@ -15,6 +15,8 @@ import {
   cursorHidden,
 } from './controlsLogic';
 import { StatsForNerds } from './StatsForNerds';
+import { perfLite } from '../perf';
+import { thumbVariant } from '../thumbs';
 
 // What streams.playUrl resolves to: the two files plus their codecs.
 type StreamSrc = {
@@ -681,7 +683,9 @@ export function Player(props: PlayerProps) {
       }
       if (v.buffered.length) {
         const end = v.buffered.end(v.buffered.length - 1);
-        if (Math.abs(end - lastBufferedUiRef.current) >= 0.05) {
+        // 0.2 s is one bar-width at any normal duration; repainting it more
+        // often only costs a React pass per tick.
+        if (Math.abs(end - lastBufferedUiRef.current) >= 0.2) {
           lastBufferedUiRef.current = end;
           setBuffered(end);
         }
@@ -704,9 +708,10 @@ export function Player(props: PlayerProps) {
         saveProgress();
       }
     };
-    // 120ms keeps the two clocks within a couple of frames; with a single
-    // element this tick is a no-op.
-    const id = window.setInterval(onTick, 120);
+    // The tick drives the seek bar, the SponsorBlock check and the audio
+    // watchdog. It only commits a state change every 0.2 s of playback, so a
+    // slower timer costs nothing in accuracy and saves renders on weak CPUs.
+    const id = window.setInterval(onTick, 200);
     return () => window.clearInterval(id);
   }, [segments, settings?.sponsorBlock, settings?.sponsorBlockAutoSkip, saveProgress, srcs, muted, rate, seekTo]);
 
@@ -1109,7 +1114,7 @@ export function Player(props: PlayerProps) {
         // box, and let Chromium fill the buffer as soon as a source is set.
         // Once a frame is on screen the poster is dropped so its decoded image
         // is not kept alive for the whole session.
-        poster={loading ? (video.thumbnail || undefined) : undefined}
+        poster={loading ? (thumbVariant(video.thumbnail, perfLite()) || undefined) : undefined}
         preload="auto"
         playsInline
       >
@@ -1166,7 +1171,7 @@ export function Player(props: PlayerProps) {
       )}
       {loading && !error && (
         <div className="load-overlay">
-          {video.thumbnail && <img src={video.thumbnail} alt="" aria-hidden="true" />}
+          {video.thumbnail && <img src={thumbVariant(video.thumbnail, perfLite()) || undefined} alt="" aria-hidden="true" />}
           <div className="load-overlay-scrim" />
           <Spinner />
         </div>

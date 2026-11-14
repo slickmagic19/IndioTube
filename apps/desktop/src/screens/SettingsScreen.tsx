@@ -5,15 +5,24 @@ import { useApp } from '../store';
 import { SyncModal } from '../components/SyncModal';
 import { QrIcon } from '../components/icons';
 import { SPONSOR_CATEGORIES } from '../player/sponsorLogic';
+import { readPerfMode, setPerfMode, type PerfMode } from '../perf';
 
 export function SettingsScreen() {
   const { settings, saveSettings, lib, op, toast } = useApp();
   const [syncOpen, setSyncOpen] = useState(false);
   const [profile, setProfile] = useState(lib?.profileName || '');
+  const [perf, setPerf] = useState<PerfMode>(readPerfMode());
 
   if (!settings) return <div className="state">Loading settings…</div>;
 
   const set = (patch: Partial<typeof settings>) => saveSettings(patch as any);
+
+  const changePerf = (mode: PerfMode) => {
+    setPerf(mode);
+    setPerfMode(mode);
+    const label = mode === 'lite' ? 'Lite' : mode === 'full' ? 'Full' : 'Auto';
+    toast(`Performance mode: ${label}`);
+  };
 
   const toggleCategory = (id: string, on: boolean) => {
     const next = new Set(settings.sponsorBlockCategories || []);
@@ -106,6 +115,17 @@ export function SettingsScreen() {
         <select value={settings.theme} onChange={(e) => set({ theme: e.target.value as 'dark' | 'light' })}>
           <option value="dark">Dark</option>
           <option value="light">Light</option>
+        </select>
+      </div>
+      <div className="field">
+        <div className="label">
+          <b>Performance mode</b>
+          <span>Auto picks Lite on four-core or 4 GB machines; Lite removes animations and heavy effects</span>
+        </div>
+        <select value={perf} onChange={(e) => changePerf(e.target.value as PerfMode)}>
+          <option value="auto">Auto (recommended)</option>
+          <option value="lite">Lite</option>
+          <option value="full">Full</option>
         </select>
       </div>
       <div className="field">
