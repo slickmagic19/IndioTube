@@ -193,6 +193,8 @@ type SmokeConfig = {
   feed?: boolean;
   /** Open the settings page and check that the update section is there. */
   update?: boolean;
+  /** Press the sidebar's Update button (the app closes while it installs). */
+  install?: boolean;
   waitMs: number;
 };
 
@@ -281,11 +283,12 @@ async function probePlayerUi(): Promise<unknown> {
 
   let stats: string | null = null;
   let menuOpened = false;
-  // The volume booster: turning it on has to show its badge next to the
-  // volume slider, and the setting has to survive the round trip through the
-  // shell.
+  // The volume booster: the badge next to the volume slider has to follow the
+  // row, whichever way the click turns it. The setting survives a restart, so
+  // the probe reads the row before and after instead of assuming it starts off.
   let boosterRow = false;
-  let boosterBadge = false;
+  let boosterBadge: boolean | null = null;
+  const boosterNote: string[] = [];
   const gear = controls.querySelector('button[title="Settings"]') as HTMLElement | null;
   if (gear) {
     gear.click();
@@ -304,9 +307,23 @@ async function probePlayerUi(): Promise<unknown> {
     const booster = Array.from(document.querySelectorAll('.ps-row'))
       .find((el) => (el.textContent || '').includes('Volume booster')) as HTMLElement | null;
     boosterRow = Boolean(booster);
-    booster?.click();
-    await wait(700);
-    boosterBadge = Boolean(document.querySelector('.vol-boost'));
+    if (booster) {
+      // The row closes the menu when it is clicked, so the state to compare
+      // against is the one on screen now; the badge is read from the player
+      // itself, which is still there afterwards.
+      const before = ((booster.querySelector('.ps-row-value')?.textContent) || '').trim();
+      booster.click();
+      await wait(700);
+      const badge = Boolean(document.querySelector('.vol-boost'));
+      boosterBadge = badge;
+      if (before === 'Unavailable') {
+        boosterNote.push('the volume booster reports itself unavailable');
+      } else if (before === 'On' && badge) {
+        boosterNote.push('the booster still reads On and still shows its badge after being switched off');
+      } else if (before === 'Off' && !badge) {
+        boosterNote.push('turning the volume booster on did not show its badge');
+      }
+    }
   }
   return {
     hiddenAfterIdle,
@@ -317,7 +334,7 @@ async function probePlayerUi(): Promise<unknown> {
     boosterBadge,
     boosterFailures: [
       ...(boosterRow ? [] : ['the player settings have no Volume booster row']),
-      ...(boosterBadge ? [] : ['turning the volume booster on did not show its badge']),
+      ...boosterNote,
     ],
   };
 }
@@ -687,6 +704,22 @@ async function runSmoke(): Promise<void> {
   // `INDIOTUBE_SMOKE_CLICK=1` turns the run into the thing the viewer actually
   // complains about: open the app, click a video, time what happens.
   const clicked = config.click ? await clickFirstCard() : false;
+  if (config.install) {
+    // Press the Update button the way a viewer would. The shell hands over to
+    // the installer and the app closes, so there is no report to send - and
+    // the report must not be sent, because it would take the app down while
+    // the installer is still downloading. A run whose button never appears
+    // falls through to the ordinary report, which fails it.
+    const item = await until<HTMLElement>(
+      () => document.querySelector('.sidenav .update-item') as HTMLElement | null, 30_000);
+    if (!item) {
+      errors.push('install: the sidebar never offered an Update button');
+    } else {
+      item.click();
+      console.log('[smoke] clicked the sidebar update button; the installer takes over');
+      return;
+    }
+  }
   await new Promise((resolve) => setTimeout(resolve, config.waitMs || 8000));
   window.clearInterval(watch);
   const content = document.querySelector('.content');

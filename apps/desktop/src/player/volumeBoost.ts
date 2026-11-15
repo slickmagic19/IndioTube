@@ -5,11 +5,14 @@
 // element through a gain node multiplies the signal, so a slider at 100% can
 // come out at 200%.
 //
-// Two rules keep this from breaking the sound:
+// Three rules keep this from breaking the sound:
 //
 //  * the element itself stays at 100% while the graph is attached, and the
 //    gain node carries the viewer's volume instead - otherwise the volume
 //    would be applied twice (or not at all, depending on the browser);
+//  * each routed element has a gain of its own. Above 360p the sound arrives
+//    as a second file and the picture element is muted on purpose, so one
+//    muted element must never silence the one that is carrying the sound;
 //  * the graph is only built when the audio context can actually run. A
 //    suspended context would silence the element it routes, so the sound
 //    never depends on it.
@@ -95,17 +98,21 @@ export class VolumeBooster {
     return this.gains.has(element);
   }
 
-  /** The gain the graph is running at right now. */
+  /** The gain the graph is running at right now, ignoring mute. */
   get gain(): number {
-    const muted = this.userMuted || this.anyElementMuted();
-    return effectiveGain(this.volume, this.boosted, muted);
+    return effectiveGain(this.volume, this.boosted, this.userMuted);
   }
 
-  private anyElementMuted(): boolean {
-    for (const element of this.gains.keys()) {
-      if ((element as BoostElement)?.muted) return true;
-    }
-    return false;
+  /**
+   * The gain of one routed element.
+   *
+   * A muted element is silent on its own; its gain is zeroed as well so the
+   * intent is explicit. The other elements keep their gain either way - the
+   * picture element of a split stream is muted for the whole video and still
+   * must not take the sound with it.
+   */
+  private elementGain(element: unknown): number {
+    return effectiveGain(this.volume, this.boosted, this.userMuted || Boolean((element as BoostElement)?.muted));
   }
 
   /**
@@ -123,7 +130,7 @@ export class VolumeBooster {
     try {
       const source = ctx.createMediaElementSource(element);
       const gain = ctx.createGain();
-      gain.gain.value = this.gain;
+      gain.gain.value = this.elementGain(element);
       source.connect(gain);
       gain.connect(ctx.destination);
       this.gains.set(element, gain);
@@ -156,8 +163,7 @@ export class VolumeBooster {
 
   /** Push the current levels into the graph. */
   apply(): void {
-    const gain = this.gain;
-    for (const node of this.gains.values()) node.gain.value = gain;
+    for (const [element, node] of this.gains) node.gain.value = this.elementGain(element);
   }
 
   /** Detach from the elements. The graph itself cannot be undone, so the

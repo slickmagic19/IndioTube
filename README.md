@@ -115,13 +115,14 @@ it no new update can be published.**
 npm run dist                                   # -> src-tauri/target/release/bundle/nsis/*.exe
 
 # 2. sign the installer and publish the manifest the app checks
-node scripts/with-rust-env.js tauri signer sign `
-  -f "$env:USERPROFILE\.indiotube\updater.key" release/IndioTube-0.1.45-win.exe
-node scripts/build-update-manifest.js --version 0.1.45 --installer release/IndioTube-0.1.45-win.exe
+#    the key was generated without a password, so the prompt gets an empty line
+"" | node scripts/with-rust-env.js tauri signer sign `
+  -f "$env:USERPROFILE\.indiotube\updater.key" release/IndioTube-0.1.46-win.exe
+node scripts/build-update-manifest.js --version 0.1.46 --installer release/IndioTube-0.1.46-win.exe
 
 # 3. tag, push and publish (latest.json has to be an asset of the release)
-gh release create v0.1.45 --title "IndioTube 0.1.45" --notes-file release/notes-0.1.45.md `
-   release/IndioTube-0.1.45-win.exe release/latest.json
+gh release create v0.1.46 --title "IndioTube 0.1.46" --notes-file release/notes-0.1.46.md `
+   release/IndioTube-0.1.46-win.exe release/latest.json
 ```
 
 The desktop app has no Electron in it: the window is Tauri, and the main-process

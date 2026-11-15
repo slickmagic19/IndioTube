@@ -22,6 +22,8 @@
 //! page arrives, then click the logo and check a reload was asked for),
 //! `INDIOTUBE_SMOKE_UPDATE=1` (open the settings page and check that the
 //! update section is there),
+//! `INDIOTUBE_SMOKE_INSTALL=1` (press the sidebar's Update button and let the
+//! installer take the app over - the run only fails if the button never shows),
 //! `INDIOTUBE_SMOKE_WAIT=<ms>` (how long to wait before reporting).
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +51,24 @@ fn env_number(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn install_mode() -> bool {
+    std::env::var("INDIOTUBE_SMOKE_INSTALL").as_deref() == Ok("1")
+}
+
+/// How long the watchdog waits for a report.
+///
+/// An install run never reports: the updater downloads the installer, hands
+/// over to it and takes the process down itself. The watchdog therefore only
+/// fires when the hand-over never happened, and it needs a budget that covers
+/// the download (~85 MB) before it can call that a failure.
+fn watchdog_budget_ms() -> u64 {
+    if install_mode() {
+        15 * 60_000
+    } else {
+        env_number("INDIOTUBE_SMOKE_WAIT", 8_000) + 75_000
+    }
+}
+
 /// Called from `setup`, so the watchdog only starts once a window exists.
 pub fn install(app: AppHandle) {
     if !enabled() {
@@ -60,7 +80,7 @@ pub fn install(app: AppHandle) {
     let _ = SMOKE.set(Arc::clone(&smoke));
     println!("[smoke] armed; waiting for the renderer's report");
     let watch_app = app.clone();
-    let budget_ms = env_number("INDIOTUBE_SMOKE_WAIT", 8_000) + 75_000;
+    let budget_ms = watchdog_budget_ms();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(budget_ms));
         if !smoke.reported.load(Ordering::SeqCst) {
@@ -84,6 +104,7 @@ pub fn smoke_config() -> Value {
         "searchClick": std::env::var("INDIOTUBE_SMOKE_SEARCH_CLICK").as_deref() == Ok("1"),
         "feed": std::env::var("INDIOTUBE_SMOKE_FEED").as_deref() == Ok("1"),
         "update": std::env::var("INDIOTUBE_SMOKE_UPDATE").as_deref() == Ok("1"),
+        "install": install_mode(),
         "waitMs": env_number("INDIOTUBE_SMOKE_WAIT", 8_000),
     });
     println!("[smoke] config -> {config}");
@@ -148,5 +169,21 @@ mod tests {
         std::env::set_var(name, "1500");
         assert_eq!(env_number(name, 8_000), 1500);
         std::env::remove_var(name);
+    }
+
+    #[test]
+    fn an_install_run_is_given_time_for_the_download() {
+        // The watchdog is the only way an install run can end without the
+        // updater's own exit, so its budget has to cover a full download. The
+        // wait is pinned here because a smoke run's own environment may carry
+        // a longer one.
+        std::env::set_var("INDIOTUBE_SMOKE_WAIT", "8000");
+        std::env::remove_var("INDIOTUBE_SMOKE_INSTALL");
+        assert_eq!(watchdog_budget_ms(), 8_000 + 75_000);
+        std::env::set_var("INDIOTUBE_SMOKE_INSTALL", "1");
+        assert!(install_mode());
+        assert_eq!(watchdog_budget_ms(), 15 * 60_000);
+        std::env::remove_var("INDIOTUBE_SMOKE_INSTALL");
+        std::env::remove_var("INDIOTUBE_SMOKE_WAIT");
     }
 }

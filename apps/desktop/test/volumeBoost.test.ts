@@ -182,6 +182,46 @@ describe('the booster', () => {
     expect(ctx.gains[0].gain.value).toBe(2);
   });
 
+  it('keeps the sound when only the picture is muted', () => {
+    // Above 360p the sound is a separate file and the picture element is
+    // muted for the whole video. That mute must silence the picture's own
+    // output only - the audio element is the one being heard.
+    const ctx = new FakeContext();
+    const video = new FakeElement();
+    const audio = new FakeElement();
+    const booster = new VolumeBooster();
+    booster.attach(ctx, video);
+    booster.attach(ctx, audio);
+    booster.setVolume(1);
+    booster.setBoosted(true);
+
+    video.muted = true;
+    video.fire('volumechange');
+
+    expect(ctx.gains[0].gain.value).toBe(0);
+    expect(ctx.gains[1].gain.value).toBe(2);
+
+    // And the other way round: the audio track is muted while it seeks, so
+    // the picture must not lose its sound because of it.
+    video.muted = false;
+    audio.muted = true;
+    audio.fire('volumechange');
+    expect(ctx.gains[0].gain.value).toBe(2);
+    expect(ctx.gains[1].gain.value).toBe(0);
+  });
+
+  it('silences every element while the viewer mutes', () => {
+    const ctx = new FakeContext();
+    const booster = new VolumeBooster();
+    booster.attach(ctx, new FakeElement());
+    booster.attach(ctx, new FakeElement());
+    booster.setVolume(1);
+    booster.setBoosted(true);
+
+    booster.setMuted(true);
+    expect(ctx.gains.every((g) => g.gain.value === 0)).toBe(true);
+  });
+
   it('refuses an element the browser will not route', () => {
     const ctx = new FakeContext();
     ctx.createMediaElementSource = () => { throw new Error('not allowed'); };

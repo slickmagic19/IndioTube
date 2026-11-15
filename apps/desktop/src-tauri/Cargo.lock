@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "indiotube-shell"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "if-addrs",
  "indio-core",
