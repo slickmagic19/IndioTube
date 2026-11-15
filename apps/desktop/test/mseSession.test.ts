@@ -263,6 +263,89 @@ describe('keeping the pipe full', () => {
     expect(fetchRange).not.toHaveBeenCalled();
     expect(videoSb.appended).toHaveLength(0);
   });
+
+  it('keeps fetching to the end of the video, not just to the window', async () => {
+    // The viewer watches a two-minute video: everything ahead of the playhead
+    // has to be downloaded, so a dropped connection does not stop it.
+    const videoSb = new FakeSourceBuffer();
+    const audioSb = new FakeSourceBuffer();
+    const { session, start, fetchRange } = rig();
+    start([videoSb, audioSb], 0);
+    const internals = trackInternals(session);
+    internals.tracks[0].index = indexFrom([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    internals.tracks[0].next = 0;
+    internals.primed = true;
+
+    (session as unknown as { pump(): void }).pump();
+    await settle();
+
+    // Ten one-second segments (one byte each, bytes 0…9): one chunk for the
+    // first eight and one for the last two - the horizon is the end of the
+    // video, not 0 + 30 s.
+    expect(fetchRange).toHaveBeenCalledTimes(2);
+    expect(fetchRange.mock.calls[0].slice(1, 3)).toEqual([0, 7]);
+    expect(fetchRange.mock.calls[1].slice(1, 3)).toEqual([8, 9]);
+    expect(internals.tracks[0].next).toBe(10);
+  });
+
+  /** A three-segment track that starts at `from` seconds and ends at 260 s. */
+  function lateTrack(from: number): TrackIndex {
+    return {
+      initEnd: 0,
+      timescale: 1000,
+      duration: 260,
+      segments: [0, 1, 2].map((i) => ({ start: i * 10, size: 10, time: from + i, duration: 1 })),
+    };
+  }
+
+  it('stops filling and keeps playing when the browser buffer is full', async () => {
+    // Chromium has its own quota. An append refused ahead of the window means
+    // "no more room", not "the stream is broken": the session keeps the
+    // windowed behaviour instead of failing playback.
+    const videoSb = new FakeSourceBuffer();
+    const audioSb = new FakeSourceBuffer();
+    videoSb.bufferedRange(0, 99);
+    videoSb.failAppends = 2;
+    const { session, start, errors } = rig();
+    start([videoSb, audioSb], 100);
+    const internals = trackInternals(session);
+    internals.tracks[0].index = lateTrack(200);
+    internals.tracks[0].next = 0;
+    internals.primed = true;
+
+    (session as unknown as { pump(): void }).pump();
+    await settle();
+
+    expect(errors).toEqual([]);
+    expect((internals as unknown as { fillStopped: boolean }).fillStopped).toBe(true);
+    // The refused segment was not skipped: the index still points at it.
+    expect(internals.tracks[0].next).toBe(0);
+  });
+
+  it('offers the refused segment again once playback reaches it', async () => {
+    const videoSb = new FakeSourceBuffer();
+    const audioSb = new FakeSourceBuffer();
+    videoSb.bufferedRange(0, 99);
+    videoSb.failAppends = 2;
+    const { session, video, start, errors } = rig();
+    start([videoSb, audioSb], 100);
+    const internals = trackInternals(session);
+    internals.tracks[0].index = lateTrack(200);
+    internals.tracks[0].next = 0;
+    internals.primed = true;
+    (session as unknown as { pump(): void }).pump();
+    await settle();
+    expect(errors).toEqual([]);
+
+    // Playback catches up to the refused segment: it is inside the window now,
+    // so the pump asks for it again - and this time the buffer takes it.
+    video.currentTime = 195;
+    (session as unknown as { pump(): void }).pump();
+    await settle();
+
+    expect(errors).toEqual([]);
+    expect(internals.tracks[0].next).toBe(3);
+  });
 });
 
 describe('disposing a session', () => {

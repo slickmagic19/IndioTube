@@ -24,6 +24,8 @@
 //! update section is there),
 //! `INDIOTUBE_SMOKE_INSTALL=1` (press the sidebar's Update button and let the
 //! installer take the app over - the run only fails if the button never shows),
+//! `INDIOTUBE_SMOKE_BUFFER=1` (watch the player fill its buffer and fail when it
+//! stops short of the end of the video),
 //! `INDIOTUBE_SMOKE_WAIT=<ms>` (how long to wait before reporting).
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,11 +63,17 @@ fn install_mode() -> bool {
 /// over to it and takes the process down itself. The watchdog therefore only
 /// fires when the hand-over never happened, and it needs a budget that covers
 /// the download (~85 MB) before it can call that a failure.
+///
+/// A buffer run reports, but only after watching the player fill the stream,
+/// which on a slow link is minutes: its budget has to cover that wait.
 fn watchdog_budget_ms() -> u64 {
+    let wait = env_number("INDIOTUBE_SMOKE_WAIT", 8_000);
     if install_mode() {
         15 * 60_000
+    } else if std::env::var("INDIOTUBE_SMOKE_BUFFER").as_deref() == Ok("1") {
+        wait + 180_000
     } else {
-        env_number("INDIOTUBE_SMOKE_WAIT", 8_000) + 75_000
+        wait + 75_000
     }
 }
 
@@ -105,6 +113,7 @@ pub fn smoke_config() -> Value {
         "feed": std::env::var("INDIOTUBE_SMOKE_FEED").as_deref() == Ok("1"),
         "update": std::env::var("INDIOTUBE_SMOKE_UPDATE").as_deref() == Ok("1"),
         "install": install_mode(),
+        "buffer": std::env::var("INDIOTUBE_SMOKE_BUFFER").as_deref() == Ok("1"),
         "waitMs": env_number("INDIOTUBE_SMOKE_WAIT", 8_000),
     });
     println!("[smoke] config -> {config}");
@@ -172,17 +181,26 @@ mod tests {
     }
 
     #[test]
-    fn an_install_run_is_given_time_for_the_download() {
-        // The watchdog is the only way an install run can end without the
-        // updater's own exit, so its budget has to cover a full download. The
-        // wait is pinned here because a smoke run's own environment may carry
-        // a longer one.
+    fn the_watchdog_budget_follows_what_the_run_has_to_wait_for() {
+        // One test owns the smoke environment variables: two tests mutating the
+        // same global variables would race under the parallel runner.
         std::env::set_var("INDIOTUBE_SMOKE_WAIT", "8000");
         std::env::remove_var("INDIOTUBE_SMOKE_INSTALL");
+        std::env::remove_var("INDIOTUBE_SMOKE_BUFFER");
+        // An ordinary run only waits for the page.
         assert_eq!(watchdog_budget_ms(), 8_000 + 75_000);
+
+        // Watching the buffer fill takes as long as the link decides.
+        std::env::set_var("INDIOTUBE_SMOKE_BUFFER", "1");
+        assert_eq!(watchdog_budget_ms(), 8_000 + 180_000);
+        std::env::remove_var("INDIOTUBE_SMOKE_BUFFER");
+
+        // An install run never reports: the budget has to cover the download
+        // that the updater does before it takes the process down.
         std::env::set_var("INDIOTUBE_SMOKE_INSTALL", "1");
         assert!(install_mode());
         assert_eq!(watchdog_budget_ms(), 15 * 60_000);
+
         std::env::remove_var("INDIOTUBE_SMOKE_INSTALL");
         std::env::remove_var("INDIOTUBE_SMOKE_WAIT");
     }

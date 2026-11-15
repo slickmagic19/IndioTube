@@ -181,14 +181,82 @@ interface Track {
   gen: number;
 }
 
-// Chromium's decoded media plus these SourceBuffer windows is the player's
-// biggest memory cost. YouTube itself keeps roughly half a minute on each side
-// of the playhead; holding 40 s ahead and 90 s behind was four times that and
-// is what made memory climb the longer a video stayed open. The windows are
-// exported so the policy is pinned by a unit test.
+// How the session decides how much to hold. The window is the *minimum*: the
+// playhead always has this much in front of it. On top of that the pump keeps
+// fetching to the end of the video - YouTube's grey bar fills to the end while
+// you watch - so a connection that drops mid-video does not stop playback.
+//
+// The limit is memory. Media in a SourceBuffer is compressed, but it is still
+// an allocation, and a two-hour 4K video cannot sit in RAM on the machines this
+// app targets. `FULL_BUFFER_MAX_BYTES` is the ceiling the session plans
+// towards; above it the pump falls back to the window. Chromium has a quota of
+// its own, and a rejected append ahead of the window is treated as "there is no
+// more room" (the fill stops) instead of as a broken stream.
 export const BUFFER_AHEAD_SECONDS = 30;
 export const BUFFER_BEHIND_SECONDS = 30;
+
+/** Media the session may hold (video + audio) when it fills the whole video. */
+export const FULL_BUFFER_MAX_BYTES = 384 * 1024 * 1024;
+
+/** A playhead this close to the end counts as having reached it. */
+export const FINISHED_MARGIN_SECONDS = 0.5;
+
 const MAX_INIT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * How far ahead of the playhead the pump should fetch.
+ *
+ * The end of the video, while the session is not finished with it and still
+ * has room in its budget - so the whole stream is downloaded as the viewer
+ * watches. The ordinary window when the video is over (nothing is left to
+ * fetch), when the duration is unknown, or when the media already held has
+ * used the budget up; `heldBytes` shrinks as the eviction window follows the
+ * playhead, so the fill resumes by itself on a long video.
+ */
+export function aheadHorizon(input: {
+  now: number;
+  duration: number;
+  heldBytes: number;
+  maxBytes?: number;
+  window?: number;
+}): number {
+  const edge = (Number.isFinite(input.now) ? input.now : 0) + (input.window ?? BUFFER_AHEAD_SECONDS);
+  if (!Number.isFinite(input.duration) || input.duration <= 0) return edge;
+  if (input.now >= input.duration - FINISHED_MARGIN_SECONDS) return edge;
+  const max = input.maxBytes ?? FULL_BUFFER_MAX_BYTES;
+  if (!Number.isFinite(input.heldBytes) || input.heldBytes >= max) return edge;
+  return Math.max(edge, input.duration);
+}
+
+/**
+ * The slice of `TimeRanges` the buffer policy needs, so a test can hand in a
+ * plain list instead of a media element.
+ */
+export interface BufferedTimeRanges {
+  readonly length: number;
+  start(index: number): number;
+  end(index: number): number;
+}
+
+/**
+ * Bytes of `index` that the buffered ranges actually hold.
+ *
+ * Read off the SourceBuffer rather than counted from what was downloaded: a
+ * seek back into the window must not make the session think it is holding more
+ * than it is, and segments that have been evicted are no longer memory.
+ */
+export function bufferedBytes(index: TrackIndex, ranges: BufferedTimeRanges): number {
+  if (!ranges || !ranges.length) return 0;
+  let total = 0;
+  for (const segment of index.segments) {
+    const from = segment.time;
+    const to = segment.time + segment.duration;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (ranges.start(i) < to - 0.05 && ranges.end(i) > from + 0.05) { total += segment.size; break; }
+    }
+  }
+  return total;
+}
 
 /**
  * A byte range can fail on its own (a CDN 5xx, a socket reset, a proxy hiccup)
@@ -335,6 +403,12 @@ export class MseSession {
   private abort = new AbortController();
   private fetchedBytes = 0;
   private fetchedRequests = 0;
+  /**
+   * Set when the browser refuses an append that was ahead of the window: its
+   * own buffer quota is full. The session keeps the windowed behaviour from
+   * then on instead of pushing (and failing) the same segment every round.
+   */
+  private fillStopped = false;
 
   /**
    * The element itself can fail (decoder error, MediaSource closed by the
@@ -667,22 +741,30 @@ export class MseSession {
           // Append whichever track is furthest behind the playhead first, so
           // audio never lags the picture into a gap.
           const pending = this.tracks.filter((tr) => tr.next < tr.index.segments.length);
-          if (!pending.length) return;
+          if (!pending.length) {
+            // Everything is buffered: the played-out history is the only thing
+            // left to reclaim.
+            this.evict(now);
+            return;
+          }
           if (skipped) continue; // the order may have changed
           pending.sort((a, b) => a.index.segments[a.next].time - b.index.segments[b.next].time);
           const track = pending[0];
           const seg = track.index.segments[track.next];
-          if (seg.time > now + BUFFER_AHEAD_SECONDS) {
+          // How far ahead this round may reach: the end of the video while it
+          // still fits the budget, the ordinary window otherwise.
+          const horizon = this.horizon(now);
+          if (seg.time > horizon) {
             // Everything needed ahead is buffered; trim what is far behind.
             this.evict(now);
             return;
           }
-          // One range request for the whole run of segments the window needs:
+          // One range request for the whole run of segments the horizon needs:
           // a round trip per segment leaves the pipe idle, and every extra
           // SourceBuffer update wakes the decoder. The first fetch stays small
           // so the first picture does not wait for the whole window.
           const until = this.primed
-            ? now + BUFFER_AHEAD_SECONDS
+            ? horizon
             : seg.time + Math.max(seg.duration, 1);
           const chunk = chunkAt(track.index, track.next, until);
           if (!chunk) return;
@@ -703,7 +785,18 @@ export class MseSession {
             appended = await this.append(track, data);
           }
           if (this.disposed) return;
-          if (!appended) throw new Error('stream append failed');
+          if (!appended) {
+            // Still refused, and this segment is not the one the playhead is
+            // waiting for: the browser's own buffer quota is full. Keep the
+            // windowed behaviour and leave the index where it is, so the
+            // segment is offered again once playback reaches it - breaking a
+            // stream that plays fine to "fill" it would be the worse bug.
+            if (seg.time > now + BUFFER_AHEAD_SECONDS) {
+              this.fillStopped = true;
+              return;
+            }
+            throw new Error('stream append failed');
+          }
           if (track.gen !== gen) continue;
           track.next = chunk.first + chunk.count;
           this.primed = true;
@@ -717,6 +810,27 @@ export class MseSession {
       }
     };
     void run();
+  }
+
+  /**
+   * Where the pump stops fetching ahead.
+   *
+   * The end of the video while the session still has room for it, the ordinary
+   * window when the browser refused earlier appends or the held media already
+   * used the budget. `held` is measured from the SourceBuffers themselves, so
+   * eviction (and playback) frees the budget again as the video runs.
+   */
+  private horizon(now: number): number {
+    const window = now + BUFFER_AHEAD_SECONDS;
+    if (this.fillStopped) return window;
+    let duration = 0;
+    let held = 0;
+    for (const track of this.tracks) {
+      duration = Math.max(duration, track.index.duration);
+      const sb = track.buffer;
+      if (sb) held += bufferedBytes(track.index, sb.buffered);
+    }
+    return aheadHorizon({ now, duration, heldBytes: held, maxBytes: FULL_BUFFER_MAX_BYTES });
   }
 
   private isBuffered(track: Track, time: number, duration: number): boolean {

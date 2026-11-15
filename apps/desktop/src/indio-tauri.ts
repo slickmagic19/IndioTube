@@ -195,6 +195,8 @@ type SmokeConfig = {
   update?: boolean;
   /** Press the sidebar's Update button (the app closes while it installs). */
   install?: boolean;
+  /** Watch the player fill its buffer and check it reaches the end. */
+  buffer?: boolean;
   waitMs: number;
 };
 
@@ -675,6 +677,61 @@ async function clickFirstCard(): Promise<boolean> {
   return false;
 }
 
+type BufferProbe = {
+  failures: string[];
+  skipped?: string;
+  duration: number | null;
+  bufferedEnd: number | null;
+  bufferedAhead: number | null;
+  waitedMs: number | null;
+};
+
+/**
+ * Buffer health, the way the viewer measures it: the grey bar has to reach the
+ * end of the video on its own while playback continues (YouTube keeps filling
+ * the whole stream). The probe waits for it instead of sampling once, because
+ * how long the fill takes is exactly what a slow link decides.
+ */
+async function probeBufferHealth(deadlineMs = 120_000): Promise<BufferProbe> {
+  const video = document.querySelector('video') as HTMLVideoElement | null;
+  const empty = { duration: null, bufferedEnd: null, bufferedAhead: null, waitedMs: null };
+  if (!video) return { failures: ['there is no video element to buffer'], skipped: 'no player', ...empty };
+  const edge = () => {
+    const b = video.buffered;
+    if (!b || !b.length) return 0;
+    // The range the playhead is in: health is what is playable from here.
+    for (let i = 0; i < b.length; i += 1) {
+      if (video.currentTime >= b.start(i) - 0.05 && video.currentTime <= b.end(i) + 0.05) return b.end(i);
+    }
+    return b.end(b.length - 1);
+  };
+  const started = Date.now();
+  const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null;
+  if (!duration) return { failures: ['the video never reported a duration'], ...empty };
+  for (;;) {
+    const end = edge();
+    if (end >= duration - 1) {
+      return {
+        failures: [],
+        duration,
+        bufferedEnd: end,
+        bufferedAhead: end - video.currentTime,
+        waitedMs: Date.now() - started,
+      };
+    }
+    if (Date.now() - started >= deadlineMs) {
+      return {
+        failures: [`the stream stopped buffering at ${end.toFixed(1)} s of ${duration.toFixed(1)} s`],
+        duration,
+        bufferedEnd: end,
+        bufferedAhead: end - video.currentTime,
+        waitedMs: Date.now() - started,
+      };
+    }
+    await wait(250);
+  }
+}
+
 /**
  * The dev smoke harness (`INDIOTUBE_SMOKE=1`): open a route, let the UI settle,
  * and send the shell a report of what was actually painted. The shell prints it
@@ -730,6 +787,7 @@ async function runSmoke(): Promise<void> {
   const navigation = config.nav ? await probeNavigation() : null;
   const feed = config.feed ? await probeFeed() : null;
   const update = config.update ? await probeUpdate() : null;
+  const buffer = config.buffer ? await probeBufferHealth() : null;
   if (searchClick) errors.push(...searchClick.failures.map((f) => `search click: ${f}`));
   const playerUiFailures = (playerUi as { boosterFailures?: string[] } | null)?.boosterFailures;
   if (playerUiFailures) {
@@ -738,6 +796,7 @@ async function runSmoke(): Promise<void> {
   if (navigation) errors.push(...navigation.failures.map((f) => `navigation: ${f}`));
   if (feed) errors.push(...feed.failures.map((f) => `home feed: ${f}`));
   if (update) errors.push(...update.failures.map((f) => `update: ${f}`));
+  if (buffer) errors.push(...buffer.failures.map((f) => `buffer: ${f}`));
   const report = {
     title: document.title,
     hash: location.hash,
@@ -766,6 +825,7 @@ async function runSmoke(): Promise<void> {
     ...(navigation ? { navigation } : {}),
     ...(feed ? { feed } : {}),
     ...(update ? { update } : {}),
+    ...(buffer ? { buffer } : {}),
   };
   try {
     await invoke('smoke_report', { report });

@@ -9,6 +9,10 @@ import {
   EMERGENCY_BEHIND_SECONDS,
   EVICT_MARGIN_SECONDS,
   FETCH_ATTEMPTS,
+  FINISHED_MARGIN_SECONDS,
+  FULL_BUFFER_MAX_BYTES,
+  aheadHorizon,
+  bufferedBytes,
   canUseMse,
   chunkAt,
   emergencyCutoff,
@@ -19,7 +23,7 @@ import {
   segmentIndexAt,
   shouldEvict,
 } from '../src/player/mse';
-import type { TrackIndex } from '../src/player/mse';
+import type { BufferedTimeRanges, TrackIndex } from '../src/player/mse';
 
 function box(type: string, payload: number): Uint8Array {
   const b = new Uint8Array(8 + payload);
@@ -106,6 +110,13 @@ describe('SourceBuffer memory policy', () => {
     expect(BUFFER_BEHIND_SECONDS).toBe(30);
   });
 
+  it('holds a whole video when it fits, but never more than the budget', () => {
+    // The window is a floor, not the goal: the pump fills to the end of the
+    // video (YouTube's grey bar) until the media held is worth more than this.
+    expect(FULL_BUFFER_MAX_BYTES).toBeGreaterThan(128 * 1024 * 1024);
+    expect(FINISHED_MARGIN_SECONDS).toBeGreaterThan(0);
+  });
+
   it('only evicts once there is more than the retained window behind', () => {
     expect(evictionCutoff(10)).toBeNull();
     expect(evictionCutoff(BUFFER_BEHIND_SECONDS)).toBe(0);
@@ -144,6 +155,81 @@ describe('SourceBuffer memory policy', () => {
   it('re-asks for a byte range that failed on its own', () => {
     // One CDN hiccup used to end the whole MSE session.
     expect(FETCH_ATTEMPTS).toBeGreaterThan(1);
+  });
+});
+
+describe('filling the buffer ahead', () => {
+  const room = { now: 10, duration: 600, heldBytes: 0 };
+
+  it('fills to the end of the video while there is room', () => {
+    expect(aheadHorizon(room)).toBe(600);
+    // The window is the floor: a playhead near the end of a short video still
+    // gets its 30 s of room in front of it.
+    expect(aheadHorizon({ now: 5, duration: 20, heldBytes: 0 })).toBe(35);
+  });
+
+  it('falls back to the window once the budget is spent', () => {
+    const full = aheadHorizon({ now: 10, duration: 600, heldBytes: FULL_BUFFER_MAX_BYTES });
+    expect(full).toBe(10 + BUFFER_AHEAD_SECONDS);
+    // Just below the ceiling still fills: a video that almost fits is worth
+    // holding in full.
+    expect(aheadHorizon({ now: 10, duration: 600, heldBytes: FULL_BUFFER_MAX_BYTES - 1 })).toBe(600);
+    // …and the budget can be lowered by a caller that knows better.
+    expect(aheadHorizon({ now: 10, duration: 600, heldBytes: 100, maxBytes: 100 }))
+      .toBe(10 + BUFFER_AHEAD_SECONDS);
+  });
+
+  it('stops filling a video that is over', () => {
+    expect(aheadHorizon({ now: 599.6, duration: 600, heldBytes: 0 })).toBe(599.6 + BUFFER_AHEAD_SECONDS);
+    expect(aheadHorizon({ now: 600, duration: 600, heldBytes: 0 })).toBe(630);
+  });
+
+  it('keeps the window when the duration is unknown', () => {
+    expect(aheadHorizon({ now: 10, duration: 0, heldBytes: 0 })).toBe(40);
+    expect(aheadHorizon({ now: 10, duration: Number.NaN, heldBytes: 0 })).toBe(40);
+    expect(aheadHorizon({ now: Number.NaN, duration: Number.NaN, heldBytes: 0 })).toBe(30);
+  });
+});
+
+describe('measuring what the session is holding', () => {
+  function track(times: number[], sizes?: number[]): TrackIndex {
+    let offset = 100;
+    const segments = times.map((time, i) => {
+      const size = sizes?.[i] ?? 10;
+      const seg = { start: offset, size, time, duration: 1 };
+      offset += size;
+      return seg;
+    });
+    return { initEnd: 0, timescale: 1000, duration: times.length, segments };
+  }
+
+  /** A buffered range list shaped like the element's own `TimeRanges`. */
+  function ranges(list: Array<{ start: number; end: number }>): BufferedTimeRanges {
+    return {
+      length: list.length,
+      start: (i) => list[i].start,
+      end: (i) => list[i].end,
+    };
+  }
+
+  it('counts the segments a buffered range really covers', () => {
+    const index = track([0, 1, 2, 3], [10, 20, 30, 40]);
+    // Buffered 0…2.0 covers the first two segments only.
+    expect(bufferedBytes(index, ranges([{ start: 0, end: 2 }]))).toBe(30);
+    // Everything buffered.
+    expect(bufferedBytes(index, ranges([{ start: 0, end: 4 }]))).toBe(100);
+    // Two ranges, no segment counted twice.
+    expect(bufferedBytes(index, ranges([{ start: 0, end: 1 }, { start: 2, end: 4 }]))).toBe(80);
+    // A sliver that does not reach into a segment is not media held.
+    expect(bufferedBytes(index, ranges([{ start: 0, end: 0.5 }]))).toBe(10);
+    expect(bufferedBytes(index, ranges([]))).toBe(0);
+  });
+
+  it('does not count the history that was evicted', () => {
+    // A seek forward leaves the first half behind; only what is still in a
+    // buffered range is memory.
+    const index = track([0, 1, 2, 3], [10, 20, 30, 40]);
+    expect(bufferedBytes(index, ranges([{ start: 3, end: 4 }]))).toBe(40);
   });
 });
 
