@@ -1,6 +1,6 @@
 [package]
 name = "indiotube-shell"
-version = "0.1.44"
+version = "0.1.45"
 edition = "2021"
 description = "IndioTube desktop shell"
 
@@ -16,6 +16,7 @@ serde_json = "1"
 ureq = "2.10"
 if-addrs = "0.13"
 indio-core = { path = "../rust/indio-core" }
+tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["native-tls", "zip"] }
 
 [[bin]]
 name = "IndioTube"

@@ -16,6 +16,7 @@ import {
   cursorHidden,
 } from './controlsLogic';
 import { StatsForNerds } from './StatsForNerds';
+import { VolumeBooster, boostedPercent } from './volumeBoost';
 import { perfLite } from '../perf';
 import { thumbVariant } from '../thumbs';
 
@@ -88,6 +89,16 @@ export function Player(props: PlayerProps) {
   const lastBufferedUiRef = useRef(-1);
   const [volume, setVolume] = useState(settings?.volume ?? 1);
   const [muted, setMuted] = useState(false);
+  // The volume booster: sound above 100%. A media element cannot do that on
+  // its own, so the elements are routed through a Web Audio gain node (see
+  // volumeBoost.ts). The graph is only built when the audio context can run,
+  // so the sound never depends on it.
+  const boosterRef = useRef<VolumeBooster | null>(null);
+  if (!boosterRef.current) boosterRef.current = new VolumeBooster();
+  const booster = boosterRef.current;
+  const boosterCtxRef = useRef<AudioContext | null>(null);
+  const boosterOn = Boolean(settings?.volumeBooster);
+  const [boosterFailed, setBoosterFailed] = useState(false);
   const [rate, setRate] = useState(settings?.playbackRate ?? 1);
   const [theater, setTheater] = useState(Boolean(settings?.theater));
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -132,6 +143,90 @@ export function Player(props: PlayerProps) {
   // a stale render value when they unmute the audio.
   const mutedRef = useRef(muted);
   useEffect(() => { mutedRef.current = muted; }, [muted]);
+
+  // ---- the volume booster ----------------------------------------------------
+
+  // The latest attach function, so a context that had to be woken up can
+  // continue where it left off.
+  const attachRef = useRef<(enabled?: boolean) => void>(() => undefined);
+
+  // Both media elements go into the graph: whichever one carries the sound is
+  // the one that is heard, and the other has nothing to play anyway.
+  const attachBooster = useCallback((enabled?: boolean) => {
+    const want = enabled ?? boosterOn;
+    if (!want || boosterFailed) return;
+    const video = videoRef.current;
+    const audio = audioRef.current;
+    if (!video && !audio) return;
+    const Ctor = (window as unknown as {
+      AudioContext?: new () => AudioContext;
+      webkitAudioContext?: new () => AudioContext;
+    }).AudioContext
+      || (window as unknown as { webkitAudioContext?: new () => AudioContext }).webkitAudioContext;
+    if (!Ctor) { setBoosterFailed(true); return; }
+    let ctx = boosterCtxRef.current;
+    if (!ctx) {
+      try {
+        ctx = new Ctor();
+      } catch {
+        setBoosterFailed(true);
+        return;
+      }
+      boosterCtxRef.current = ctx;
+      // A context that is suspended (the browser suspended it, or it was
+      // created without a gesture) would silence the elements it routes, so
+      // it is woken up again on the next interaction.
+      ctx.addEventListener?.('statechange', () => {
+        if (ctx?.state === 'suspended') ctx.resume().catch(() => undefined);
+      });
+    }
+    if (ctx.state !== 'running') {
+      // Waking the context up needs a gesture; the next click or key press
+      // provides one and the graph is built then.
+      ctx.resume().then(() => attachRef.current()).catch(() => undefined);
+      return;
+    }
+    if (video && !booster.owns(video) && booster.attach(ctx, video)) {
+      // The element hands its sound to the graph, so it plays at 100% from
+      // now on and the gain node carries the viewer's volume instead.
+      video.volume = 1;
+    }
+    if (audio && !booster.owns(audio) && booster.attach(ctx, audio)) {
+      audio.volume = 1;
+    }
+    booster.setVolume(volume);
+    booster.setBoosted(true);
+    booster.setMuted(muted);
+  }, [booster, boosterFailed, boosterOn, muted, volume]);
+
+  useEffect(() => { attachRef.current = attachBooster; }, [attachBooster]);
+
+  // The booster is a setting, so it can be on when a video starts - but the
+  // audio context may only be started by a gesture. The first click or key
+  // press after the video opened is what puts the graph in place.
+  useEffect(() => {
+    if (!boosterOn || boosterFailed) return;
+    const wake = () => attachBooster();
+    window.addEventListener('pointerdown', wake, true);
+    window.addEventListener('keydown', wake, true);
+    return () => {
+      window.removeEventListener('pointerdown', wake, true);
+      window.removeEventListener('keydown', wake, true);
+    };
+  }, [attachBooster, boosterFailed, boosterOn]);
+
+  // The levels follow the player's own volume and mute. The elements are the
+  // same ones for the whole video, so the graph survives a source change.
+  useEffect(() => {
+    booster.setVolume(volume);
+    booster.setMuted(muted);
+    booster.setBoosted(boosterOn);
+    if (boosterOn) attachBooster();
+  }, [attachBooster, booster, boosterOn, muted, volume]);
+
+  // The graph cannot be undone, so the elements keep running through it at
+  // the viewer's own volume once it exists.
+  useEffect(() => () => { booster.dispose(); }, [booster]);
 
   // ---- source resolution ---------------------------------------------------
 
@@ -640,11 +735,22 @@ export function Player(props: PlayerProps) {
   useEffect(() => {
     const v = videoRef.current;
     const a = audioRef.current;
-    if (v) { v.volume = volume; v.muted = muted || !!srcs?.audio; v.playbackRate = rate; }
+    // An element that is routed through the booster's graph plays at 100%:
+    // the gain node carries the viewer's volume from then on, so the volume
+    // is not applied twice.
+    if (v) {
+      v.volume = booster.owns(v) ? 1 : volume;
+      v.muted = muted || !!srcs?.audio;
+      v.playbackRate = rate;
+    }
     // a.muted is owned by the sync tick (mute while loading/seeking/drifting).
     // preservesPitch keeps the ±5% drift nudge from making voices chipmunk.
-    if (a) { a.volume = volume; a.playbackRate = rate; a.preservesPitch = true; }
-  }, [volume, muted, rate, srcs]);
+    if (a) {
+      a.volume = booster.owns(a) ? 1 : volume;
+      a.playbackRate = rate;
+      a.preservesPitch = true;
+    }
+  }, [volume, muted, rate, srcs, booster]);
 
   // ---- time tick: progress bar, sponsor skip, throttled saves ------------------
 
@@ -963,6 +1069,20 @@ export function Player(props: PlayerProps) {
   const captionsToggleRef = useRef<() => void>(() => undefined);
   captionsToggleRef.current = toggleCaptions;
 
+  // Turning the booster on is a click, and a click is what the audio context
+  // needs to start - so the graph is built right here instead of waiting for
+  // the next interaction.
+  const toggleBooster = useCallback(() => {
+    const next = !boosterOn;
+    saveSettings({ volumeBooster: next });
+    if (!next) {
+      booster.setBoosted(false);
+      return;
+    }
+    setBoosterFailed(false);
+    attachBooster(true);
+  }, [attachBooster, booster, boosterOn, saveSettings]);
+
   // ---- player settings panel ------------------------------------------------
   // One list, like YouTube's: the main menu shows the current value of each
   // setting and a submenu opens with the options (and a tick on the chosen one).
@@ -1167,6 +1287,10 @@ export function Player(props: PlayerProps) {
         ref={audioRef}
         playsInline
         preload="auto"
+        // The track comes from the local proxy, so it is asked for in CORS
+        // mode: that is what lets the volume booster route it through Web
+        // Audio without the browser silencing it.
+        crossOrigin="anonymous"
         // Off-screen rather than display:none: Chromium can suspend hidden
         // media, and a suspended audio element is exactly the silence bug.
         style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
@@ -1195,6 +1319,10 @@ export function Player(props: PlayerProps) {
           videoCodec={sourceInfo?.videoCodec ?? null}
           audioCodec={sourceInfo?.audioCodec ?? null}
           getNetwork={mseNetwork}
+          // With the booster on, the element itself plays at 100% and the
+          // gain node carries the loudness - so the panel is told what the
+          // viewer actually hears.
+          volumeOverride={booster.owns(videoRef.current) ? boostedPercent(volume, boosterOn) / 100 : null}
           onClose={() => setStatsOpen(false)}
         />
       )}
@@ -1290,6 +1418,9 @@ export function Player(props: PlayerProps) {
             <input type="range" min={0} max={1} step={0.01} value={muted ? 0 : volume}
               onMouseDown={() => setMuted(false)}
               onChange={(e) => { setVolume(Number(e.target.value)); saveSettings({ volume: Number(e.target.value) }); }} />
+            {boosterOn && !boosterFailed && (
+              <span className="vol-boost" title={`Volume booster: ${boostedPercent(volume, true)}%`}>2×</span>
+            )}
           </span>
           <span className="time">
             {formatDuration(now)} / {formatDuration(duration)}
@@ -1390,6 +1521,16 @@ export function Player(props: PlayerProps) {
                       <span className="ps-row-end">
                         <span className="ps-row-value">{statsOpen ? 'On' : 'Off'}</span>
                         {statsOpen ? <CheckIcon size={18} /> : <ChevronRightIcon size={18} />}
+                      </span>
+                    </button>
+                    <button type="button" className="ps-row" aria-pressed={boosterOn && !boosterFailed}
+                      onClick={() => { toggleBooster(); closeGear(); }}>
+                      <span className="ps-row-label">Volume booster</span>
+                      <span className="ps-row-end">
+                        <span className="ps-row-value">
+                          {boosterFailed ? 'Unavailable' : boosterOn ? 'On' : 'Off'}
+                        </span>
+                        {boosterOn && !boosterFailed ? <CheckIcon size={18} /> : <ChevronRightIcon size={18} />}
                       </span>
                     </button>
                   </div>

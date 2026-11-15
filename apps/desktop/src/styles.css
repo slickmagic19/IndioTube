@@ -153,6 +153,9 @@ a { color: inherit; text-decoration: none; }
 }
 .sidenav .item:hover { background: var(--bg-hover); }
 .sidenav .item.active { background: var(--chip); font-weight: 600; }
+/* The Update button only shows when a newer build is waiting. */
+.sidenav .item.update-item { color: var(--accent); font-weight: 600; cursor: pointer; }
+.sidenav .item.update-item:hover { background: var(--bg-hover); }
 .sidenav .sep { border-top: 1px solid var(--line); margin: 12px 4px; }
 .sidenav .head { padding: 10px 14px 2px; font-weight: 600; color: var(--text); }
 
@@ -346,6 +349,11 @@ a { color: inherit; text-decoration: none; }
 .controls .time { font-size: 12.5px; margin: 0 8px; color: #ddd; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .controls .vol { display: flex; align-items: center; }
 .controls .vol input { width: 68px; accent-color: #fff; }
+/* The "2x" badge next to the volume slider while the booster is on. */
+.controls .vol .vol-boost {
+  font-size: 11px; font-weight: 700; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 6px; padding: 0 4px; margin-left: 4px;
+}
 .center-play {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   font-size: 56px; color: #fff; background: rgba(0, 0, 0, .2); cursor: pointer;

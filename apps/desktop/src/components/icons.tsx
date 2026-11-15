@@ -49,6 +49,12 @@ export const DownloadIcon = svg(<>
   <path d="M12 4v10" /><path d="m7.5 10 4.5 4.5L16.5 10" /><path d="M5 19h14" />
 </>);
 
+// The Update button: a download arrow inside a circle.
+export const UpdateIcon = svg(<>
+  <path d="M20 12a8 8 0 1 1-2.6-5.9" /><path d="M20 4v4h-4" />
+  <path d="M12 8.5v5" /><path d="m9.8 11.2 2.2 2.3 2.2-2.3" />
+</>);
+
 // Material "settings" cog — solid, with the classic 8-tooth silhouette and
 // a cut-out centre. Used in the player controls and the side nav.
 const GEAR_PATH = 'M19.14 12.94a7.07 7.07 0 0 0 .05-.94 7.07 7.07 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.61l-1.92-3.32a.5.5 0 0 0-.59-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.5.5 0 0 0-.59.22L2.49 8.87a.5.5 0 0 0 .12.61l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.61l1.92 3.32a.5.5 0 0 0 .59.22l2.39-.96c.49.37 1.03.7 1.62.94l.36 2.54a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54a7.03 7.03 0 0 0 1.62-.94l2.39.96a.5.5 0 0 0 .59-.22l1.92-3.32a.5.5 0 0 0-.12-.61zM12 15.6A3.6 3.6 0 1 1 15.6 12 3.6 3.6 0 0 1 12 15.6z';

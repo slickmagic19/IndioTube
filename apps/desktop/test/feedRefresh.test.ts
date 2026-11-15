@@ -9,6 +9,7 @@ import {
   FEED_REFRESH_EVENT,
   clearFeedRefresh,
   doneFeedRefresh,
+  planFeedLoad,
   requestFeedRefresh,
   wantsFeedRefresh,
 } from '../src/feedRefresh';
@@ -57,5 +58,47 @@ describe('a feed reload request', () => {
 
   it('keeps the event name the mounted screen already listens for', () => {
     expect(FEED_REFRESH_EVENT).toBe('indio-feed-refresh');
+  });
+});
+
+describe('what a feed load asks for', () => {
+  it('serves the cached feed when nobody asked for a reload', () => {
+    const plan = planFeedLoad({ wanted: false, chipParams: null });
+    expect(plan.reload).toBe(false);
+    expect(plan.force).toBe(false);
+    expect(plan.params).toBe(null);
+    expect(plan.resetChips).toBe(false);
+  });
+
+  it('keeps the category the viewer picked', () => {
+    const plan = planFeedLoad({ wanted: false, chipParams: 'EgZ2aWRlb3PyBgQKAjoA' });
+    expect(plan.reload).toBe(false);
+    expect(plan.params).toBe('EgZ2aWRlb3PyBgQKAjoA');
+    expect(plan.resetChips).toBe(false);
+  });
+
+  it('asks for a brand new mix when a reload was requested', () => {
+    const plan = planFeedLoad({ wanted: true, chipParams: null });
+    expect(plan.reload).toBe(true);
+    expect(plan.force).toBe(true);
+  });
+
+  it('reloads the plain feed, not the category that was on screen', () => {
+    // A reload that kept the chip filter would refresh the category over
+    // and over - which is what "clicking Home gives me a different mix"
+    // must not do.
+    const plan = planFeedLoad({ wanted: true, chipParams: 'EgZ2aWRlb3PyBgQKAjoA' });
+    expect(plan.params).toBe(null);
+    expect(plan.resetChips).toBe(true);
+    expect(plan.force).toBe(true);
+  });
+
+  it('is spent only by the feed that was asked for', () => {
+    requestFeedRefresh('home');
+    expect(planFeedLoad({ wanted: wantsFeedRefresh('home'), chipParams: null }).reload).toBe(true);
+    expect(planFeedLoad({ wanted: wantsFeedRefresh('trending'), chipParams: null }).reload).toBe(false);
+    doneFeedRefresh('home');
+    // A plain return to the feed afterwards is served from the cache.
+    expect(planFeedLoad({ wanted: wantsFeedRefresh('home'), chipParams: null }).reload).toBe(false);
   });
 });

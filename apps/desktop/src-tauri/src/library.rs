@@ -998,6 +998,7 @@ pub fn default_settings(download_dir: &str) -> Value {
         "downloadDir": download_dir,
         "downloadHeight": 720,
         "volume": 1,
+        "volumeBooster": false,
         "playbackRate": 1,
         "theater": false,
     })
@@ -1379,6 +1380,8 @@ mod tests {
         assert!(settings["defaultQuality"].is_null());
         assert_eq!(settings["downloadHeight"], 720);
         assert_eq!(settings["sponsorBlockCategories"].as_array().unwrap().len(), 8);
+        // The volume booster is off until the viewer asks for it.
+        assert_eq!(settings["volumeBooster"], false);
 
         let mut current = settings.as_object().unwrap().clone();
         merge_settings(

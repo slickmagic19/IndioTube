@@ -58,6 +58,12 @@ same type-ahead search, a left navigation column, and the phone's card grid for 
   the stream ladder so playback starts sooner, and a byte cache serves the second seek instantly
 - YouTube-style mini player: it floats over the page and keeps playing while you browse, expands back
   to the watch page on click, and docks itself automatically when you leave a playing video
+- A volume booster for the loud parts: turn it on in the player's settings (or in Settings) and the
+  sound comes out above 100% - the player's own slider stays where it is, and the mute button and the
+  seek-silence still work exactly as before
+- Update button in the app: the app checks in the background whether a newer IndioTube exists, and
+  when it does the sidebar offers **Update to _version_** - one click downloads the signed installer
+  and lets it install itself; the same thing is in Settings, which also has **Check for updates**
 - The watch page keeps scrolling: video, actions, description, comments, an Up next rail, chapters,
   SponsorBlock segments, captions and playback speed
 - SponsorBlock has the phone's full controls: a master switch, an auto-skip switch, and the eight
@@ -95,6 +101,27 @@ npm run dist             # -> apps/desktop/src-tauri/target/release/bundle
 npm run tauri:dev        # vite + the Rust shell, one command
 npm test                 # renderer unit tests (vitest)
 npm run test:rust        # Rust unit tests (indio-core + the Tauri shell)
+```
+
+### Releasing a new build
+
+The desktop releases are signed so the app can install them itself. The private key that signs the
+installers lives outside the repository (`%USERPROFILE%\.indiotube\updater.key`, and a working copy
+in `apps/desktop/src-tauri/updater/indiotube.key` - both are git-ignored). **Keep a backup: without
+it no new update can be published.**
+
+```powershell
+# 1. bump the version in apps/desktop/package.json, src-tauri/Cargo.toml and src-tauri/tauri.conf.json
+npm run dist                                   # -> src-tauri/target/release/bundle/nsis/*.exe
+
+# 2. sign the installer and publish the manifest the app checks
+node scripts/with-rust-env.js tauri signer sign `
+  -f "$env:USERPROFILE\.indiotube\updater.key" release/IndioTube-0.1.45-win.exe
+node scripts/build-update-manifest.js --version 0.1.45 --installer release/IndioTube-0.1.45-win.exe
+
+# 3. tag, push and publish (latest.json has to be an asset of the release)
+gh release create v0.1.45 --title "IndioTube 0.1.45" --notes-file release/notes-0.1.45.md `
+   release/IndioTube-0.1.45-win.exe release/latest.json
 ```
 
 The desktop app has no Electron in it: the window is Tauri, and the main-process

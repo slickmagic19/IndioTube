@@ -147,4 +147,10 @@ describe('stats rows', () => {
     const rows = buildStatsRows({ ...base, memoryBytes: 42 * 1024 * 1024 });
     expect(rows[rows.length - 1]).toEqual({ label: 'JS heap', value: '42.0 MB' });
   });
+
+  it('shows a volume above 100% when the volume booster is on', () => {
+    const rows = buildStatsRows({ ...base, volume: 2 });
+    const value = (label: string) => rows.find((row) => row.label === label)?.value;
+    expect(value('Volume')).toBe('200%');
+  });
 });

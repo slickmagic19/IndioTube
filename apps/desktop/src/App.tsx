@@ -20,9 +20,13 @@ const LocalPlayerScreen = lazy(() => import('./screens/DownloadsScreen').then((m
 const SettingsScreen = lazy(() => import('./screens/SettingsScreen').then((m) => ({ default: m.SettingsScreen })));
 import { PlaybackHost } from './player/PlaybackHost';
 import { FEED_REFRESH_EVENT, requestFeedRefresh } from './feedRefresh';
+import { planHomeClick } from './homeNav';
+import { useUpdateState } from './useUpdate';
+import { showsUpdateButton, updateLabel, updater } from './updater';
+import { startUpdateCheck } from './updaterTauri';
 import {
   BackIcon, ClockIcon, DownloadIcon, FireIcon, ForwardIcon, HistoryIcon, HomeIcon, MenuIcon, PlaylistIcon,
-  PlayIcon, SearchIcon, SettingsIcon, SubsIcon, ThumbUpIcon,
+  PlayIcon, SearchIcon, SettingsIcon, SubsIcon, ThumbUpIcon, UpdateIcon,
 } from './components/icons';
 
 // Clicking the logo or Home goes back to the feed and asks it for a fresh mix.
@@ -30,10 +34,10 @@ import {
 // feed loads behind it; clicking again while on Home does the same thing the
 // already-visible screen would do.
 function homeClick() {
-  const hash = window.location.hash;
-  const onHome = hash === '' || hash === '#/' || hash === '#/home';
+  const plan = planHomeClick(window.location.hash);
+  if (!plan.refresh) return;
   requestFeedRefresh('home');
-  if (!onHome) navigate('/home');
+  if (plan.navigate) navigate('/home');
 }
 
 // ---- top bar ------------------------------------------------------------------
@@ -124,6 +128,7 @@ function TopBar({ onMenu }: { onMenu(): void }) {
 function SideNav({ onClose }: { onClose(): void }) {
   const route = useRoute();
   const { lib } = useApp();
+  const update = useUpdateState();
   const page = route.page;
   const Item = ({ to, icon, label, active, onClick }: { to: string; icon: React.ReactNode; label: string; active?: boolean; onClick?: () => void }) => (
     <div className={`item${(active ?? ('#' + to) === window.location.hash) ? ' active' : ''}`}
@@ -145,6 +150,15 @@ function SideNav({ onClose }: { onClose(): void }) {
       <Item to="/playlists" icon={<PlaylistIcon size={20} />} label="Playlists" active={page === 'playlists' || page === 'playlist'} />
       <Item to="/downloads" icon={<DownloadIcon size={20} />} label="Downloads" active={page === 'downloads'} />
       <div className="sep" />
+      {/* The Update button only shows when there really is a newer build. */}
+      {showsUpdateButton(update) && (
+        <div className="item update-item" role="button" tabIndex={0}
+          onClick={() => { updater.install(); onClose(); }}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { updater.install(); onClose(); } }}
+          title={`Install ${update.info?.version}`}>
+          <UpdateIcon size={20} /> {updateLabel(update)}
+        </div>
+      )}
       <Item to="/settings" icon={<SettingsIcon size={20} />} label="Settings" active={page === 'settings'} />
       {lib && (
         <div style={{ padding: '18px 14px 6px', color: 'var(--text-dim)', fontSize: 11, lineHeight: 1.6 }}>
@@ -198,6 +212,13 @@ function Shell() {
   useEffect(() => {
     document.documentElement.dataset.fs = fs ? '1' : '';
   }, [fs]);
+
+  // Is there a newer IndioTube? The answer is asked for once at startup, in
+  // the background: the sidebar only offers the Update button when there
+  // really is something newer.
+  useEffect(() => {
+    startUpdateCheck().catch(() => undefined);
+  }, []);
 
   // A performance-mode change from Settings applies to the open screens at
   // once: cards pick the new thumbnail size, speculative warm-ups stop, the

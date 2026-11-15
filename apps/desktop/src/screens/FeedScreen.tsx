@@ -13,7 +13,7 @@ import { GridSkeleton } from '../components/Skeletons';
 import { useApp } from '../store';
 import { warmPage } from '../player/warmStreams';
 import { useInfiniteScroll } from '../useInfiniteScroll';
-import { FEED_REFRESH_EVENT, doneFeedRefresh, wantsFeedRefresh } from '../feedRefresh';
+import { FEED_REFRESH_EVENT, doneFeedRefresh, planFeedLoad, requestFeedRefresh, wantsFeedRefresh } from '../feedRefresh';
 
 // Last rendered feed per mode. Coming back Home paints this immediately, so the
 // grid never blanks; a reload is only fetched when the viewer asks for one (logo
@@ -31,7 +31,10 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [exhausted, setExhausted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [force, setForce] = useState(0);
+  // Bumped every time a reload is asked for. It is a counter and not a
+  // boolean on purpose: a second click has to reload again, and a plain
+  // return to the feed must not.
+  const [reloadTick, setReloadTick] = useState(0);
   const [popular, setPopular] = useState(false);
   const [feedVersion, setFeedVersion] = useState(0);
   // Paging failures are separate from a failed first page: keep the grid that
@@ -55,27 +58,34 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
     setExhausted(false);
     setMoreError(null);
     moreBlocked.current = false;
-    // Returning to a feed we loaded recently: show it as it was, untouched.
-    // A logo/Home click asks for a reload, and that request can arrive from
-    // another page (see feedRefresh.ts) - the cached grid still paints first,
-    // the fresh mix replaces it when it lands.
+    // What this load is for. A reload (the logo or Home was clicked) asks for
+    // the plain feed and a brand new mix; a plain return keeps the category
+    // the viewer picked and the mix that is already cached.
+    const plan = planFeedLoad({
+      wanted: wantsFeedRefresh(mode),
+      chipParams: chipIdx >= 0 ? feed?.chips[chipIdx]?.params || null : null,
+    });
+    if (plan.resetChips) setChipIdx(-1);
     const cached = feedCache[mode];
-    const reload = force > 0 || wantsFeedRefresh(mode);
-    if (!reload && cached && Date.now() - cached.at < CACHE_TTL) {
+    if (cached && Date.now() - cached.at < CACHE_TTL) {
+      // The cached grid stays on screen while a fresh mix is on its way: a
+      // reload must not blank the page it is refreshing.
       setFeed(cached.feed);
       setPopular(cached.popular);
-      setLoading(false);
-      return () => { cancelled = true; };
+      if (!plan.reload) {
+        setLoading(false);
+        return () => { cancelled = true; };
+      }
     }
     setLoading(true);
-    const params = chipIdx >= 0 ? feed?.chips[chipIdx]?.params || null : null;
+    const params = plan.params;
     // Home answers the paint; the popular mix is only a fallback, so it goes
     // out beside Home — warm when Home turns out to be empty, but never in
     // front of a Home that is already on screen.
     const job: Promise<{ feed: Feed; popular: boolean }> = mode === 'home'
       ? (() => {
-        const trending = window.indio.trending({ force: force > 0 }).catch(() => null);
-        return window.indio.home({ params, force: reload }).then(async (home) => {
+        const trending = window.indio.trending({ force: plan.force }).catch(() => null);
+        return window.indio.home({ params, force: plan.force }).then(async (home) => {
           if (home.videos.length || home.chips.length) return { feed: home, popular: false };
           const trend = await trending;
           return trend && trend.videos.length
@@ -83,14 +93,16 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
             : { feed: home, popular: false };
         });
       })()
-      : window.indio.trending({ force: force > 0 }).then((f) => ({ feed: f, popular: true }));
+      : window.indio.trending({ force: plan.force }).then((f) => ({ feed: f, popular: true }));
     job.then(({ feed: f, popular: p }) => {
       doneFeedRefresh(mode);
+      // The mix is cached even when this screen is gone: the viewer who
+      // navigated away gets the fresh feed when they come back.
+      feedCache[mode] = { at: Date.now(), feed: f, popular: p };
       if (cancelled) return;
       setFeed(f);
       setPopular(p);
       setFeedVersion((v) => v + 1);
-      feedCache[mode] = { at: Date.now(), feed: f, popular: p };
       // The top of the page is what gets clicked, so the shell is told to have
       // those streams ready while the viewer reads the titles.
       warmPage(f.videos);
@@ -101,15 +113,19 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [mode, force]); // chips are applied by an explicit reload below
+  }, [mode, reloadTick]); // chips are applied by an explicit reload below
 
   // Logo / Home clicks ask the current feed to revalidate (YouTube does the
-  // same: the feed flips to a fresh mix without leaving the page).
+  // same: the feed flips to a fresh mix without leaving the page). Only the
+  // feed the request was made for answers it: a click on the logo must not
+  // reload Trending on its way to Home.
   useEffect(() => {
-    const onRefresh = () => setForce((f) => f + 1);
+    const onRefresh = () => {
+      if (wantsFeedRefresh(mode)) setReloadTick((t) => t + 1);
+    };
     window.addEventListener(FEED_REFRESH_EVENT, onRefresh);
     return () => window.removeEventListener(FEED_REFRESH_EVENT, onRefresh);
-  }, []);
+  }, [mode]);
 
   // Chip changes re-request with its params (home) — trending has none.
   const pickChip = (idx: number) => {
@@ -203,7 +219,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
     return (
       <div className="state">
         <div>Could not load {mode === 'home' ? 'your Home feed' : 'Trending'}: {error}</div>
-        <button onClick={() => setForce((f) => f + 1)}>Retry</button>
+        <button onClick={() => requestFeedRefresh(mode)}>Retry</button>
       </div>
     );
   }
@@ -254,7 +270,7 @@ export function FeedScreen({ mode }: { mode: 'home' | 'trending' }) {
       {!visible.length ? (
         <div className="state">
           <div>Nothing here right away. {mode === 'home' ? 'Signed-out Home can be empty — try Trending or Search.' : ''}</div>
-          <button onClick={() => setForce((f) => f + 1)}>Refresh</button>
+          <button onClick={() => requestFeedRefresh(mode)}>Refresh</button>
         </div>
       ) : (
         <div className="grid feed-in" key={feedVersion}>

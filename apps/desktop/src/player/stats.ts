@@ -101,9 +101,11 @@ export function buildStatsRows(snapshot: VideoStatsSnapshot): StatsRow[] {
   const network = snapshot.networkBytes == null
     ? '—'
     : `${formatBytes(snapshot.networkBytes)} / ${(snapshot.networkSeconds ?? 0).toFixed(1)} s`;
+  // The volume can be more than 100% when the volume booster is on, so the
+  // number is not clamped to the slider's maximum.
   const volume = snapshot.muted
     ? 'Muted'
-    : `${Math.round(Math.min(1, Math.max(0, snapshot.volume)) * 100)}%`;
+    : `${Math.round(Math.min(4, Math.max(0, snapshot.volume)) * 100)}%`;
 
   const rows: StatsRow[] = [
     { label: 'Video ID', value: snapshot.videoId },

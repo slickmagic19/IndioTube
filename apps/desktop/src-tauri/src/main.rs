@@ -675,6 +675,9 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // In-app updates: the shell checks the published manifest, downloads
+        // the signed installer and lets the NSIS installer take over.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             // A second launch just focuses the first window: two shells writing
             // the same library file would fight over it.

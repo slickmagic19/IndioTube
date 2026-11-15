@@ -30,3 +30,28 @@ export function doneFeedRefresh(mode: string): void {
 export function clearFeedRefresh(): void {
   pending = null;
 }
+
+export interface FeedLoadPlan {
+  /** Fetch the feed again instead of serving the cached one. */
+  reload: boolean;
+  /** The category to ask for; null is the plain (unfiltered) feed. */
+  params: string | null;
+  /** Ask the shell for a brand new mix instead of the cached one. */
+  force: boolean;
+  /** Go back to the "All" chip: a reload is the plain feed, not a category. */
+  resetChips: boolean;
+}
+
+/**
+ * What to ask the shell for.
+ *
+ * A reload is always the plain feed: the chip row goes back to "All" and the
+ * category the viewer happened to look at last is dropped. Otherwise the feed
+ * that is on screen keeps its category and comes from the cache.
+ */
+export function planFeedLoad(opts: { wanted: boolean; chipParams: string | null }): FeedLoadPlan {
+  if (opts.wanted) {
+    return { reload: true, params: null, force: true, resetChips: true };
+  }
+  return { reload: false, params: opts.chipParams, force: false, resetChips: false };
+}

@@ -25,13 +25,15 @@ export interface StatsForNerdsProps {
   audioCodec: string | null;
   /** Bytes fetched by the MSE session so far; null when a direct source plays. */
   getNetwork?(): NetworkSnapshot | null;
+  /** The loudness the viewer hears, when it is not the element's own volume. */
+  volumeOverride?: number | null;
   onClose(): void;
 }
 
 const SAMPLE_MS = 500;
 
 export function StatsForNerds(props: StatsForNerdsProps) {
-  const { videoId, videoRef, sourceHeight, videoCodec, audioCodec, getNetwork, onClose } = props;
+  const { videoId, videoRef, sourceHeight, videoCodec, audioCodec, getNetwork, volumeOverride, onClose } = props;
   const [rows, setRows] = useState<StatsRow[]>([]);
   const lastSample = useRef<{ bytes: number; at: number } | null>(null);
 
@@ -75,7 +77,7 @@ export function StatsForNerds(props: StatsForNerdsProps) {
       sourceHeight,
       videoCodec,
       audioCodec,
-      volume: video.volume,
+      volume: typeof volumeOverride === 'number' ? volumeOverride : video.volume,
       muted: video.muted,
       playbackRate: video.playbackRate,
       bufferedAhead: bufferAheadSeconds(ranges, video.currentTime),
@@ -85,7 +87,7 @@ export function StatsForNerds(props: StatsForNerdsProps) {
       totalFrames: quality?.totalVideoFrames ?? 0,
       memoryBytes: typeof memory === 'number' ? memory : null,
     }));
-  }, [audioCodec, getNetwork, sourceHeight, videoCodec, videoId, videoRef]);
+  }, [audioCodec, getNetwork, sourceHeight, videoCodec, videoId, videoRef, volumeOverride]);
 
   useEffect(() => {
     lastSample.current = null;

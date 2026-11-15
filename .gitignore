@@ -26,6 +26,9 @@ captures/
 *.keystore
 *.jks
 apps/android/app/keystore/
+# the updater's private key signs the installers - never commit it.
+# A copy lives outside the repo (%USERPROFILE%\.indiotube\updater.key).
+apps/desktop/src-tauri/updater/
 
 # rust
 apps/desktop/rust/**/target/

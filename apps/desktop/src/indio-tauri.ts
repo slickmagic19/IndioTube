@@ -191,6 +191,8 @@ type SmokeConfig = {
   searchClick?: boolean;
   /** Page the Home feed to its end and reload it from the logo. */
   feed?: boolean;
+  /** Open the settings page and check that the update section is there. */
+  update?: boolean;
   waitMs: number;
 };
 
@@ -279,6 +281,11 @@ async function probePlayerUi(): Promise<unknown> {
 
   let stats: string | null = null;
   let menuOpened = false;
+  // The volume booster: turning it on has to show its badge next to the
+  // volume slider, and the setting has to survive the round trip through the
+  // shell.
+  let boosterRow = false;
+  let boosterBadge = false;
   const gear = controls.querySelector('button[title="Settings"]') as HTMLElement | null;
   if (gear) {
     gear.click();
@@ -290,8 +297,29 @@ async function probePlayerUi(): Promise<unknown> {
     await wait(800);
     const panel = document.querySelector('[data-testid="stats-for-nerds"]');
     stats = panel ? (panel.textContent || '').replace(/\s+/g, ' ').slice(0, 360) : null;
+
+    // The booster row lives in the same menu.
+    gear.click();
+    await wait(350);
+    const booster = Array.from(document.querySelectorAll('.ps-row'))
+      .find((el) => (el.textContent || '').includes('Volume booster')) as HTMLElement | null;
+    boosterRow = Boolean(booster);
+    booster?.click();
+    await wait(700);
+    boosterBadge = Boolean(document.querySelector('.vol-boost'));
   }
-  return { hiddenAfterIdle, shownAfterMove, menuOpened, stats };
+  return {
+    hiddenAfterIdle,
+    shownAfterMove,
+    menuOpened,
+    stats,
+    boosterRow,
+    boosterBadge,
+    boosterFailures: [
+      ...(boosterRow ? [] : ['the player settings have no Volume booster row']),
+      ...(boosterBadge ? [] : ['turning the volume booster on did not show its badge']),
+    ],
+  };
 }
 
 /**
@@ -536,6 +564,45 @@ async function probeFeed(): Promise<FeedProbe> {
   };
 }
 
+type UpdateProbe = {
+  skipped?: string;
+  failures: string[];
+  heading?: string | null;
+  checkButton?: string | null;
+};
+
+/**
+ * The update section of the settings page.
+ *
+ * The Update button in the sidebar only shows when there really is a newer
+ * build, so it cannot be checked here - but the settings page always has the
+ * section, and a failed check (no network, no manifest yet) must not take the
+ * page down with it.
+ */
+async function probeUpdate(): Promise<UpdateProbe> {
+  const failures: string[] = [];
+  const start = location.hash;
+  location.hash = '#/settings';
+  const heading = await until<HTMLElement>(() => {
+    const heads = Array.from(document.querySelectorAll('.settings h2'));
+    return (heads.find((h) => (h.textContent || '').trim() === 'Updates') as HTMLElement) ?? null;
+  }, 10_000);
+  if (!heading) failures.push('the settings page has no Updates section');
+  const button = await until<HTMLElement>(() => {
+    const buttons = Array.from(document.querySelectorAll('.settings .btn'));
+    return (buttons.find((b) => /check for updates/i.test(b.textContent || '')) as HTMLElement) ?? null;
+  }, 5_000);
+  if (!button) failures.push('the settings page has no "Check for updates" button');
+  const text = (document.querySelector('.settings')?.textContent || '').replace(/\s+/g, ' ');
+  location.hash = start;
+  return {
+    failures,
+    heading: heading ? (heading.textContent || '').trim() : null,
+    checkButton: button ? (button.textContent || '').trim() : null,
+    ...(text.includes('Updates') ? {} : { failures: [...failures, 'the settings page does not mention updates'] }),
+  };
+}
+
 /**
  * When the parts the viewer waits for actually appear. `cardsAt` and `clickedAt`
  * count from the page loading; `titleAt`, `playerAt` and `frameAt` count from
@@ -629,9 +696,15 @@ async function runSmoke(): Promise<void> {
   const searchClick = config.searchClick ? await probeSearchClick() : null;
   const navigation = config.nav ? await probeNavigation() : null;
   const feed = config.feed ? await probeFeed() : null;
+  const update = config.update ? await probeUpdate() : null;
   if (searchClick) errors.push(...searchClick.failures.map((f) => `search click: ${f}`));
+  const playerUiFailures = (playerUi as { boosterFailures?: string[] } | null)?.boosterFailures;
+  if (playerUiFailures) {
+    errors.push(...playerUiFailures.map((f) => `player ui: ${f}`));
+  }
   if (navigation) errors.push(...navigation.failures.map((f) => `navigation: ${f}`));
   if (feed) errors.push(...feed.failures.map((f) => `home feed: ${f}`));
+  if (update) errors.push(...update.failures.map((f) => `update: ${f}`));
   const report = {
     title: document.title,
     hash: location.hash,
@@ -659,6 +732,7 @@ async function runSmoke(): Promise<void> {
     ...(searchClick ? { searchClick } : {}),
     ...(navigation ? { navigation } : {}),
     ...(feed ? { feed } : {}),
+    ...(update ? { update } : {}),
   };
   try {
     await invoke('smoke_report', { report });

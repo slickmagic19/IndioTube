@@ -1,11 +1,13 @@
-// Settings: profile, playback defaults, downloads, appearance, and the
-// phone-sync entry point.
-import React, { useState } from 'react';
+// Settings: profile, playback defaults, downloads, appearance, updates, and
+// the phone-sync entry point.
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../store';
 import { SyncModal } from '../components/SyncModal';
 import { QrIcon } from '../components/icons';
 import { SPONSOR_CATEGORIES } from '../player/sponsorLogic';
 import { readPerfMode, setPerfMode, type PerfMode } from '../perf';
+import { useUpdateState } from '../useUpdate';
+import { showsUpdateButton, updater } from '../updater';
 
 // 60 fps is its own stream in the ladder: offering it here is what makes
 // "always start in 720p60" possible.
@@ -22,6 +24,12 @@ export function SettingsScreen() {
   const [syncOpen, setSyncOpen] = useState(false);
   const [profile, setProfile] = useState(lib?.profileName || '');
   const [perf, setPerf] = useState<PerfMode>(readPerfMode());
+  const update = useUpdateState();
+  const [version, setVersion] = useState<string>('');
+
+  useEffect(() => {
+    window.indio.app.version().then(setVersion).catch(() => undefined);
+  }, []);
 
   if (!settings) return <div className="state">Loading settings…</div>;
 
@@ -86,6 +94,14 @@ export function SettingsScreen() {
         <div className="label"><b>Captions on by default</b></div>
         <button className={`switch${settings.captionsEnabled ? ' on' : ''}`}
           onClick={() => set({ captionsEnabled: !settings.captionsEnabled })}><i /></button>
+      </div>
+      <div className="field">
+        <div className="label">
+          <b>Volume booster</b>
+          <span>Sound above 100% - the player's own slider stays where it is</span>
+        </div>
+        <button className={`switch${settings.volumeBooster ? ' on' : ''}`}
+          onClick={() => set({ volumeBooster: !settings.volumeBooster })}><i /></button>
       </div>
       <div className="field">
         <div className="label"><b>SponsorBlock</b><span>Community-submitted sponsor, intro and self-promo segments</span></div>
@@ -153,6 +169,52 @@ export function SettingsScreen() {
         <button className={`switch${lib?.library.historyPaused ? ' on' : ''}`}
           onClick={() => op('setHistoryPaused', !lib?.library.historyPaused)}><i /></button>
       </div>
+
+      <h2>Updates</h2>
+      <div className="field">
+        <div className="label">
+          <b>Version</b>
+          <span>{version ? `IndioTube ${version}` : 'Reading the version…'}</span>
+        </div>
+        <button className="btn ghost" onClick={() => { updater.check(); }}
+          disabled={update.status === 'checking' || update.status === 'installing'}>
+          {update.status === 'checking' ? 'Checking…' : 'Check for updates'}
+        </button>
+      </div>
+      {showsUpdateButton(update) && (
+        <div className="field">
+          <div className="label">
+            <b>Update available</b>
+            <span>{update.info?.notes || `IndioTube ${update.info?.version} is ready to install`}</span>
+          </div>
+          <button className="btn" onClick={() => { updater.install(); }}
+            disabled={update.status === 'installing'}>
+            {update.status === 'installing' ? 'Installing…' : `Update to ${update.info?.version}`}
+          </button>
+        </div>
+      )}
+      {update.status === 'up-to-date' && (
+        <div className="field">
+          <div className="label"><b>You are up to date</b><span>Nothing to install</span></div>
+        </div>
+      )}
+      {update.status === 'error' && (
+        <div className="field">
+          <div className="label">
+            <b>Could not check for updates</b>
+            <span>{update.error}</span>
+          </div>
+          <button className="btn ghost" onClick={() => { updater.check(); }}>Try again</button>
+        </div>
+      )}
+      {update.status === 'installing' && (
+        <div className="field">
+          <div className="label">
+            <b>Installing the update</b>
+            <span>The installer takes over - IndioTube restarts when it is done</span>
+          </div>
+        </div>
+      )}
 
       <h2>Storage</h2>
       <div className="field">

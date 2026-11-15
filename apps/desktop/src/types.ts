@@ -215,6 +215,8 @@ export interface Settings {
   downloadDir: string;
   downloadHeight: number;
   volume: number;
+  /** Sound above 100%: the media elements are routed through a gain node. */
+  volumeBooster: boolean;
   playbackRate: number;
   theater: boolean;
   /** Watch-page side rail hidden; toggled in the DOM, not persisted by main. */
