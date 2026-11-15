@@ -41,7 +41,7 @@ pub const MAX_PER_CHANNEL: usize = 3;
 pub const PAGE_SIZE: usize = 40;
 const REBUILD_THRESHOLD: usize = 12;
 const MAX_CHANNELS: usize = 32;
-const CHANNEL_WORKERS: usize = 8;
+const CHANNEL_WORKERS: usize = 16;
 
 const STOP_WORDS: &[&str] = &[
     "the", "and", "for", "with", "from", "that", "this", "you", "your", "how", "what", "why",
@@ -589,6 +589,11 @@ struct Snapshot {
     chips: Vec<Chip>,
     /// False when the page is YouTube's own signed-out Home answer.
     local: bool,
+    /// Bumped every time a new mix is gathered. A forced refresh uses it to tell
+    /// "the mix I already had" from "a mix built while I waited my turn", so an
+    /// explicit refresh always redraws while two callers that arrive together
+    /// still share a single gather.
+    generation: u64,
 }
 
 /// What is written to disk, so the next launch has a Home page before it has
@@ -720,6 +725,7 @@ impl LocalFeed {
             videos: saved.videos,
             chips: saved.chips,
             local: saved.local,
+            generation: 0,
         });
         Self {
             snapshot: Mutex::new(snapshot),
@@ -888,6 +894,12 @@ impl LocalFeed {
         Some(snapshot.videos.clone())
     }
 
+    /// How many times this run has (re)built the mix. Used only to tell a mix
+    /// built before a forced refresh from one built while it waited its turn.
+    fn generation(&self) -> u64 {
+        self.snapshot().as_ref().map(|s| s.generation).unwrap_or(0)
+    }
+
     /// How up to date the restored mix is, for the tests and for logging.
     pub fn cached_state(&self) -> &'static str {
         let snapshot = self.snapshot();
@@ -999,6 +1011,7 @@ impl LocalFeed {
                 .as_ref()
                 .map(|previous| previous.chips.clone())
                 .unwrap_or_default();
+            let generation = snapshot.as_ref().map(|s| s.generation).unwrap_or(0) + 1;
             *snapshot = Some(Snapshot {
                 at: Instant::now(),
                 fresh: true,
@@ -1007,6 +1020,7 @@ impl LocalFeed {
                 videos: videos.clone(),
                 chips: chips.clone(),
                 local: true,
+                generation,
             });
             let saved = SavedMix {
                 saved_at_ms: epoch_ms(),
@@ -1042,10 +1056,17 @@ impl LocalFeed {
         }
         // One gather at a time; whoever arrives second finds the mix ready and
         // does no network work at all.
+        let generation_before = self.generation();
         let _slot = self.gather_slot();
+        // Someone may have gathered while we queued for the lock — that answer
+        // is the new mix. But an explicit refresh (the Home button or the logo)
+        // must always redraw, even when the current mix is still inside the
+        // cache window; otherwise a second click would hand back the page
+        // already on screen.
         if let Some(videos) = self.fresh_videos() {
-            // Somebody refreshed while we queued; that answer is the new mix.
-            return videos;
+            if !force || self.generation() != generation_before {
+                return videos;
+            }
         }
         self.gather_and_store(lib, force, new_tube)
     }
@@ -1414,6 +1435,66 @@ mod tests {
         assert_eq!(plan(true, false, false), MixPlan::Gather);
     }
 
+    #[test]
+    fn a_forced_refresh_redraws_even_when_the_mix_is_fresh() {
+        // The Home button and the logo both ask for a forced refresh. This
+        // gather has nothing to fetch — no subscriptions, watches or searches —
+        // so it draws from the watch-later shelf, and the factory is never
+        // called. Each forced build must use a new rotation, i.e. a different
+        // page, rather than replaying the mix that is already on screen.
+        let path = std::env::temp_dir().join(format!(
+            "indio-home-mix-force-{}-{}.json",
+            std::process::id(),
+            epoch_ms()
+        ));
+        let watch_later: Vec<Value> = (0..60)
+            .map(|i| {
+                serde_json::json!({
+                    "videoId": format!("v{i}"),
+                    "title": format!("Video {i}"),
+                    "channelId": format!("UC{i}"),
+                    "durationSec": 300,
+                    "publishedText": "1 day ago",
+                })
+            })
+            .collect();
+        let lib = serde_json::json!({
+            "library": { "liked": [], "watchLater": watch_later, "history": [], "searches": [] },
+            "subscriptions": [],
+        });
+        let feed = Arc::new(LocalFeed::open(path.clone()));
+        let factory: TubeFactory = Arc::new(|| {
+            panic!("a forced refresh with an empty pool must not touch the network")
+        });
+
+        let first = ids(&feed.build(&lib, true, &factory));
+        let second = ids(&feed.build(&lib, true, &factory));
+        assert!(!first.is_empty(), "the watch-later shelf seeds the first page");
+        assert_ne!(
+            first, second,
+            "a forced refresh must recommend a different mix, not replay the cache"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_plain_return_serves_the_fresh_mix_without_gathering() {
+        // A normal return to Home (no refresh) must keep the instant, cached
+        // path: the forced-refresh change must not make every visit hit the
+        // network.
+        let path = std::env::temp_dir().join(format!(
+            "indio-home-mix-plain-{}-{}.json",
+            std::process::id(),
+            epoch_ms()
+        ));
+        write_saved_mix(&path, &saved_mix(3, epoch_ms()));
+        let feed = Arc::new(LocalFeed::open(path.clone()));
+        let factory: TubeFactory = Arc::new(|| panic!("a fresh mix is served without a gather"));
+        let out = feed.build(&serde_json::json!({ "library": {} }), false, &factory);
+        assert_eq!(ids(&out), vec!["a", "b"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
     fn saved_mix(rotation: u64, at_ms: u64) -> SavedMix {
         SavedMix {
             saved_at_ms: at_ms,
@@ -1549,6 +1630,7 @@ mod tests {
             videos: vec![video("a", "UCa", None)],
             chips: vec![Chip { title: "Music".into(), params: None, token: None }],
             local: true,
+            generation: 0,
         };
         assert!(instant_page_for(Some(&restored)).is_some());
 

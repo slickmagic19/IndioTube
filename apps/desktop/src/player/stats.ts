@@ -60,9 +60,31 @@ export function formatResolution(width: number, height: number, fps?: number | n
   return Number.isFinite(fps) && fps && fps > 0 ? `${size}@${Math.round(fps)}` : size;
 }
 
-export function frameDropPercent(dropped: number, total: number): number {
-  if (!Number.isFinite(dropped) || !Number.isFinite(total) || total <= 0) return 0;
-  return Math.min(100, Math.max(0, (dropped / total) * 100));
+/**
+ * Frames the display physically cannot show.
+ *
+ * A 60 fps stream on a 50 Hz panel must drop ~1/6 of its frames; Chromium counts
+ * those in `droppedVideoFrames` even though the picture is perfectly smooth (the
+ * older builds always played 30 fps, so they never saw them). What a display can
+ * present in `elapsedSeconds` is `displayRate * elapsedSeconds`; anything the
+ * decoder produced beyond that could never have been shown.
+ */
+export function vsyncDropAllowance(
+  total: number,
+  elapsedSeconds: number,
+  displayRate: number,
+): number {
+  if (!Number.isFinite(total) || !Number.isFinite(elapsedSeconds) || elapsedSeconds <= 0) return 0;
+  // Below ~20 Hz is a throttled/background animation frame, not a display.
+  if (!Number.isFinite(displayRate) || displayRate < 20) return 0;
+  return Math.max(0, total - displayRate * elapsedSeconds);
+}
+
+/** The drops left after the display's own refresh-rate cap is removed. */
+export function realDroppedFrames(dropped: number, allowance: number): number {
+  if (!Number.isFinite(dropped)) return 0;
+  if (!Number.isFinite(allowance) || allowance <= 0) return Math.max(0, Math.round(dropped));
+  return Math.max(0, Math.round(dropped - allowance));
 }
 
 export interface VideoStatsSnapshot {
@@ -127,9 +149,7 @@ export function buildStatsRows(snapshot: VideoStatsSnapshot): StatsRow[] {
     { label: 'Connection speed', value: formatBitrate(bitrate) },
     {
       label: 'Frames',
-      value: `${Math.max(0, Math.round(snapshot.droppedFrames))} dropped / ${
-        Math.max(0, Math.round(snapshot.totalFrames))
-      } (${frameDropPercent(snapshot.droppedFrames, snapshot.totalFrames).toFixed(1)}%)`,
+      value: `${Math.max(0, Math.round(snapshot.droppedFrames))} dropped of ${Math.max(0, Math.round(snapshot.totalFrames))}`,
     },
   ];
   if (snapshot.memoryBytes != null) {

@@ -24,10 +24,11 @@ describe('the Home button and the logo', () => {
     expect(plan.navigate).toBe(false);
   });
 
-  it('refreshes and navigates when the feed is somewhere else', () => {
+  it('only navigates when the feed is somewhere else', () => {
     for (const hash of ['#/watch/abc', '#/search?q=cats', '#/settings']) {
       const plan = planHomeClick(hash);
-      expect(plan.refresh, `hash ${hash}`).toBe(true);
+      // Leaving another page for Home must not force a re-gather of the feed.
+      expect(plan.refresh, `hash ${hash}`).toBe(false);
       expect(plan.navigate, `hash ${hash}`).toBe(true);
     }
   });

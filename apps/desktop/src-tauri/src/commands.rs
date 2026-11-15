@@ -27,12 +27,21 @@ fn with_tube<T>(
     state: &AppState,
     f: impl FnOnce(&mut InnerTube<UreqTransport>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut guard = state
-        .tube
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let tube = guard.as_mut().ok_or("the shell is not initialised yet")?;
-    f(tube)
+    // Clone the shared client — its response cache and its connection pool are
+    // shared, so a clone reuses both — and run the request without holding the
+    // lock. Holding the lock across the network call serialised every command:
+    // a subscription page's dozen channel lookups ran one after another.
+    let mut tube = {
+        let guard = state
+            .tube
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or("the shell is not initialised yet")?
+    };
+    f(&mut tube)
 }
 
 #[tauri::command]
@@ -47,7 +56,7 @@ pub async fn indio_init(state: State<'_, AppState>, lang: Option<String>, countr
         let country = country.unwrap_or_else(|| "US".to_string());
         eprintln!("[indio] init lang={lang:?} country={country:?}");
         *guard = Some(InnerTube::new(
-            UreqTransport::new(),
+            state.transport.clone(),
             default_config(today),
             &lang,
             &country,

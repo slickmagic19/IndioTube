@@ -35,8 +35,9 @@ import {
 // already-visible screen would do.
 function homeClick() {
   const plan = planHomeClick(window.location.hash);
-  if (!plan.refresh) return;
-  requestFeedRefresh('home');
+  // A refresh is only owed when Home is already on screen; from anywhere else
+  // this is a plain navigation and the feed's own cache decides what to show.
+  if (plan.refresh) requestFeedRefresh('home');
   if (plan.navigate) navigate('/home');
 }
 

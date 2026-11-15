@@ -40,6 +40,10 @@ pub struct AppState {
     /// Created by `indio_init` once the renderer reports its locale, so the
     /// request context carries the same `hl`/`gl` the JavaScript client used.
     pub tube: Mutex<Option<InnerTube<UreqTransport>>>,
+    /// One shared connection pool. Every command and recommendation worker
+    /// clones this, so requests reuse warm sockets instead of opening a new TLS
+    /// connection each time.
+    pub transport: UreqTransport,
     pub locale: Mutex<(String, String)>,
     pub proxy: Arc<Proxy<UreqUpstream>>,
     pub proxy_port: u16,
@@ -171,7 +175,7 @@ pub fn new_tube(state: &AppState) -> InnerTube<UreqTransport> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
     InnerTube::new(
-        UreqTransport::new(),
+        state.transport.clone(),
         default_config(commands::utc_ymd()),
         &lang,
         &country,
@@ -186,9 +190,10 @@ pub fn tube_factory(state: &AppState) -> TubeFactory {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
+    let transport = state.transport.clone();
     Arc::new(move || {
         InnerTube::new(
-            UreqTransport::new(),
+            transport.clone(),
             default_config(commands::utc_ymd()),
             &lang,
             &country,
@@ -647,6 +652,7 @@ fn main() {
 
     let state = AppState {
         tube: Mutex::new(None),
+        transport: UreqTransport::new(),
         locale: Mutex::new(("en".to_string(), "US".to_string())),
         proxy,
         proxy_port,

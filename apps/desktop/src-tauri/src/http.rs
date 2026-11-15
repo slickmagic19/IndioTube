@@ -2,6 +2,7 @@
 //! `ureq` (rustls, no OpenSSL). One agent per role so connections are reused.
 
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
 use indio_core::innertube::{Transport, UA_DESKTOP};
@@ -20,18 +21,29 @@ fn agent() -> ureq::Agent {
         // idle socket per host by default, so every second request paid for a
         // new TCP+TLS handshake - on a four-core Atom that is both latency and
         // real CPU. A small pool keeps both tracks' ranges on warm sockets.
-        .max_idle_connections(16)
-        .max_idle_connections_per_host(6)
+        //
+        // The InnerTube client is just as chatty: a subscription page fires a
+        // dozen channel lookups at once, and each one is a POST to the same
+        // host. A pool that only keeps a handful of sockets idle per host would
+        // throw most of them away between bursts and pay the handshake again.
+        .max_idle_connections(32)
+        .max_idle_connections_per_host(16)
         .build()
 }
 
+/// A cheap-to-clone handle on one connection pool.
+///
+/// Cloning shares the same `ureq::Agent`, so every command and every
+/// recommendation worker reuses warm sockets instead of opening a new TLS
+/// connection per request.
+#[derive(Clone)]
 pub struct UreqTransport {
-    agent: ureq::Agent,
+    agent: Arc<ureq::Agent>,
 }
 
 impl UreqTransport {
     pub fn new() -> Self {
-        Self { agent: agent() }
+        Self { agent: Arc::new(agent()) }
     }
 }
 
@@ -256,6 +268,15 @@ pub fn get_text(url: &str, timeout_secs: u64) -> Result<(u16, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloned_transports_share_one_connection_pool() {
+        // Every command and recommendation worker gets a clone; they must reuse
+        // the same agent (and its warm sockets) rather than opening a new pool.
+        let a = UreqTransport::new();
+        let b = a.clone();
+        assert!(Arc::ptr_eq(&a.agent, &b.agent));
+    }
 
     #[test]
     fn connection_failures_are_transient() {

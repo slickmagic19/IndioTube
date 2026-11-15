@@ -9,6 +9,7 @@
 //! supplies a real HTTPS transport.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -904,12 +905,20 @@ pub fn with_retry<T, E>(
     Err(last.expect("with_retry runs at least one attempt"))
 }
 
+/// A client that can be cloned cheaply.
+///
+/// Cloning shares the response cache and the transport's connection pool, so a
+/// request handled by a clone reuses the sockets and the parsed pages of the
+/// original. The shell clones the shared client per command instead of holding a
+/// lock across the network call, which is what lets parallel requests (a
+/// subscription page's dozen channel lookups) actually run in parallel.
+#[derive(Clone)]
 pub struct InnerTube<T: Transport> {
     transport: T,
     config: Config,
     lang: String,
     country: String,
-    cache: HashMap<String, (Instant, Value)>,
+    cache: Arc<Mutex<HashMap<String, (Instant, Value)>>>,
 }
 
 impl<T: Transport> InnerTube<T> {
@@ -919,8 +928,38 @@ impl<T: Transport> InnerTube<T> {
             config,
             lang: lang.to_string(),
             country: country.to_string(),
-            cache: HashMap::new(),
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn cache_remove(&self, key: &str) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(key);
+    }
+
+    fn cache_get(&self, key: &str, ttl: Duration) -> Option<Value> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .filter(|(at, _)| at.elapsed() < ttl)
+            .map(|(_, data)| data.clone())
+    }
+
+    fn cache_insert(&self, key: String, root: &Value) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, (Instant::now(), root.clone()));
+    }
+
+    fn cache_clear(&self) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     pub fn config(&self) -> &Config {
@@ -1023,18 +1062,13 @@ impl<T: Transport> InnerTube<T> {
         const TTL: Duration = Duration::from_secs(600);
         let key = format!("home:{}", params.unwrap_or(""));
         if force {
-            self.cache.remove(&key);
+            self.cache_remove(&key);
         }
-        let cached = self
-            .cache
-            .get(&key)
-            .filter(|(at, _)| at.elapsed() < TTL)
-            .map(|(_, data)| data.clone());
-        let root = match cached {
+        let root = match self.cache_get(&key, TTL) {
             Some(root) => root,
             None => {
                 let fresh = self.browse("FEwhat_to_watch", params, None)?;
-                self.cache.insert(key, (Instant::now(), fresh.clone()));
+                self.cache_insert(key, &fresh);
                 fresh
             }
         };
@@ -1054,7 +1088,7 @@ impl<T: Transport> InnerTube<T> {
     }
 
     pub fn invalidate(&mut self) {
-        self.cache.clear();
+        self.cache_clear();
     }
 
     // ---- watch ----
@@ -1085,17 +1119,13 @@ impl<T: Transport> InnerTube<T> {
 
     fn cached_root(&mut self, key: &str, ttl: Duration, force: bool) -> Option<Value> {
         if force {
-            self.cache.remove(key);
+            self.cache_remove(key);
         }
-        self.cache
-            .get(key)
-            .filter(|(at, _)| at.elapsed() < ttl)
-            .map(|(_, data)| data.clone())
+        self.cache_get(key, ttl)
     }
 
     fn store_root(&mut self, key: &str, root: &Value) {
-        self.cache
-            .insert(key.to_string(), (Instant::now(), root.clone()));
+        self.cache_insert(key.to_string(), root);
     }
 
     pub fn channel_videos(
@@ -1394,6 +1424,28 @@ mod tests {
         }));
         assert!(restricted.restricted);
         assert!(restricted.entries.is_empty());
+    }
+
+    #[derive(Clone)]
+    struct NoopTransport;
+    impl Transport for NoopTransport {
+        fn post(&self, _url: &str, _headers: &[(String, String)], _body: &str) -> Result<String, String> {
+            panic!("the cache-sharing test must not hit the network")
+        }
+    }
+
+    #[test]
+    fn a_cloned_client_shares_the_response_cache() {
+        // The shell clones the shared client per command so requests run in
+        // parallel; the cache must follow the clone, or every parallel request
+        // would refetch what another just fetched.
+        let a = InnerTube::new(NoopTransport, default_config((2026, 1, 1)), "en", "US");
+        let b = a.clone();
+        a.cache_insert("home:".to_string(), &json!({ "ok": true }));
+        assert_eq!(
+            b.cache_get("home:", Duration::from_secs(600)),
+            Some(json!({ "ok": true }))
+        );
     }
 
     struct FakeTransport {

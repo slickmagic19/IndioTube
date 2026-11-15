@@ -7,7 +7,8 @@ import {
   formatBitrate,
   formatBytes,
   formatResolution,
-  frameDropPercent,
+  realDroppedFrames,
+  vsyncDropAllowance,
   type VideoStatsSnapshot,
 } from '../src/player/stats';
 
@@ -64,11 +65,31 @@ describe('video and frame labels', () => {
     expect(formatResolution(1920, 1080)).toBe('1920x1080');
     expect(formatResolution(0, 0, 30)).toBe('—');
   });
+});
 
-  it('reports dropped frames as a bounded percentage', () => {
-    expect(frameDropPercent(5, 1000)).toBeCloseTo(0.5, 6);
-    expect(frameDropPercent(0, 0)).toBe(0);
-    expect(frameDropPercent(2000, 1000)).toBe(100);
+describe('display-refresh allowance', () => {
+  it('discounts frames a 50 Hz panel cannot show for a 60 fps stream', () => {
+    // 60 frames in 0.5 s on a 50 Hz display: only 25 can ever be shown.
+    expect(vsyncDropAllowance(30, 0.5, 50)).toBeCloseTo(5, 6);
+  });
+
+  it('allows nothing when the stream fits the display', () => {
+    expect(vsyncDropAllowance(13, 0.5, 50)).toBe(0);
+  });
+
+  it('allows nothing without a plausible display rate', () => {
+    expect(vsyncDropAllowance(30, 0.5, 0)).toBe(0);
+    expect(vsyncDropAllowance(30, 0.5, 10)).toBe(0); // throttled/background rAF
+    expect(vsyncDropAllowance(30, 0, 50)).toBe(0);
+    expect(vsyncDropAllowance(Number.NaN, 0.5, 50)).toBe(0);
+  });
+
+  it('leaves only the drops beyond the display cap', () => {
+    expect(realDroppedFrames(5, 5)).toBe(0); // exactly the vsync cap
+    expect(realDroppedFrames(20, 5)).toBe(15); // real stutter on top
+    expect(realDroppedFrames(0, 5)).toBe(0);
+    expect(realDroppedFrames(Number.NaN, 5)).toBe(0);
+    expect(realDroppedFrames(7, 0)).toBe(7);
   });
 });
 
@@ -117,7 +138,7 @@ describe('stats rows', () => {
     expect(value('Buffer health')).toBe('8.2 s');
     expect(value('Network activity')).toBe('1.9 MB / 2.0 s');
     expect(value('Connection speed')).toBe('8.00 Mbps');
-    expect(value('Frames')).toBe('5 dropped / 1000 (0.5%)');
+    expect(value('Frames')).toBe('5 dropped of 1000');
     // No heap sample in the node test environment: the row stays off.
     expect(rows.some((row) => row.label === 'JS heap')).toBe(false);
   });
